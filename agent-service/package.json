@@ -1,0 +1,9 @@
+{
+  "name": "@openworkgraph/agent-service", "version": "0.2.9", "type": "module",
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=24.0.0" },
+  "bin": { "openworkgraph": "dist/cli.js" },
+  "files": ["dist/**/*.js", "dist/**/*.d.ts", "README.md"],
+  "scripts": { "prebuild": "node ../scripts/check-versions.mjs --quiet", "build": "tsc -p tsconfig.json && node scripts/vendor-protocol.mjs", "prepack": "node scripts/prepare-pack.mjs", "typecheck": "tsc -p tsconfig.json --noEmit", "start": "node dist/cli.js", "test": "node --test test/*.test.mjs" },
+  "dependencies": { "sharp": "^0.35.4" }
+}

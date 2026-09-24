@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="264" viewBox="0 0 1040 264" fill="none" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">OpenWorkgraph</title>
+  <desc id="logo-desc">左侧为彩色节点与蓝色播放图标，右侧为米白色 OpenWorkgraph 文本，透明背景。</desc>
+  <g transform="translate(-4 6) scale(0.2)">
+  <defs>
+    <linearGradient id="top" x1="480" y1="245" x2="942" y2="491" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff8900"/><stop offset=".5" stop-color="#ff6407"/><stop offset="1" stop-color="#f43750"/>
+    </linearGradient>
+    <linearGradient id="left" x1="331" y1="379" x2="277" y2="886" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0089ff"/><stop offset=".5" stop-color="#0079ff"/><stop offset="1" stop-color="#008cff"/>
+    </linearGradient>
+    <linearGradient id="bottom" x1="424" y1="995" x2="772" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00b65f"/><stop offset="1" stop-color="#08aa53"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="238" y1="146" x2="474" y2="350" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff9200"/><stop offset="1" stop-color="#ff8500"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="190" y1="887" x2="400" y2="1113" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0097f9"/><stop offset="1" stop-color="#008cf4"/>
+    </linearGradient>
+    <linearGradient id="play" x1="463" y1="428" x2="821" y2="709" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#007dff"/><stop offset="1" stop-color="#0081ff"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="899" y1="468" x2="1093" y2="667" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6029e7"/><stop offset="1" stop-color="#5829e5"/>
+    </linearGradient>
+    <linearGradient id="green" x1="790" y1="860" x2="942" y2="1049" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#08a958"/><stop offset="1" stop-color="#0aa251"/>
+    </linearGradient>
+  </defs>
+  <g stroke-width="29.4" stroke-linecap="round">
+    <path d="M477 250 C616 233 713 291 783 387 C829 451 873 479 946 501" stroke="url(#top)"/>
+    <path d="M337 376 C330 459 377 501 376 587 C379 722 282 747 273 873" stroke="url(#left)"/>
+    <path d="M1000 654 C992 747 957 806 895 865" stroke="#5c29e7"/>
+    <path d="M413 995 C490 1015 547 941 631 924 C684 913 725 920 777 939" stroke="url(#bottom)"/>
+  </g>
+  <path d="M533 410 C499 390 461 412 461 452 L461 794 C461 831 493 856 523 838 L830 666 C864 647 865 609 833 587 Z" fill="url(#play)"/>
+  <ellipse cx="355" cy="249" rx="149" ry="146" fill="url(#orange)"/>
+  <circle cx="1007" cy="561" r="123" fill="url(#purple)"/>
+  <circle cx="865" cy="953" r="114" fill="url(#green)"/>
+  <circle cx="288" cy="1002" r="148" fill="url(#blue)"/>
+  </g>
+  <text x="264" y="163" fill="#FFF8E7" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif" font-size="86" font-weight="700" letter-spacing="-2">OpenWorkgraph</text>
+</svg>

@@ -1,0 +1,565 @@
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  ArrowUp,
+  Check,
+  ChevronRight,
+  CircleHelp,
+  FileText,
+  Folder,
+  History,
+  ListTodo,
+  Square,
+  X,
+} from "lucide-react";
+import type {
+  AdapterSnapshot,
+  Run,
+  RunStatus,
+  WorkNode,
+  WorkgraphAdapter,
+} from "../domain/types";
+import { isTerminal } from "../domain/types";
+import { canDropProjectFile, takeProjectFileDrag } from "../real/project-file-drag";
+import { textareaCaretTop } from "./textarea-caret";
+import {
+  findMentionQuery,
+  extractProjectFileMarkdownLinks,
+  insertProjectFileMarkdownLink,
+  type ProjectFileMentionCandidate,
+} from "../real/project-file-mentions";
+import { useI18n } from "../i18n/I18nProvider";
+export const statusLabels: Record<RunStatus, string> = {
+  queued: "Queued",
+  preparing: "Preparing",
+  running: "Running",
+  waiting_input: "Awaiting answer",
+  waiting_approval: "Awaiting approval",
+  finalizing: "Publishing",
+  cancelling: "Stopping",
+  succeeded: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  interrupted: "Interrupted",
+};
+export function Status({ run }: { run: Run }) {
+  const { t } = useI18n();
+  return (
+    <span className={`status status-${run.status}`}>
+      <i />
+      {t(statusLabels[run.status])}
+      {run.cancelRequested &&
+      run.status !== "cancelling" &&
+      !isTerminal(run.status)
+        ? t(" · Cancellation pending confirmation")
+        : ""}
+    </span>
+  );
+}
+type BaseProps = { adapter: WorkgraphAdapter; onError(error: unknown): void };
+export function PromptPanel({
+  node,
+  adapter,
+  run,
+  onClose,
+  onOpen,
+  onRun,
+  onError,
+}: BaseProps & {
+  node: WorkNode;
+  run?: Run;
+  onClose(): void;
+  onOpen(nodeId: string): void;
+  onRun(): void;
+}) {
+  const { t } = useI18n();
+  const refs = adapter.getReferences(node.graphId, node.id);
+  const locked = adapter.isNodeLocked(node.graphId, node.id);
+  const connected = adapter
+    .getSnapshot()
+    .services.some(
+      (service) => service.id === node.serviceId && service.connected,
+    );
+  const busy = !!run && !isTerminal(run.status);
+  return <PromptEditor
+    ariaLabel={t("Execution prompt")} value={node.prompt} disabled={locked || !connected}
+    runDisabled={locked || busy || !connected || !node.prompt.trim()}
+    references={refs.map(ref => ({ id: ref.nodeId, title: ref.title }))}
+    onOpenReference={onOpen} onClose={onClose} onRun={onRun}
+    onChange={prompt => { try { adapter.updateNode(node.graphId, node.id, { prompt }); } catch (error) { onError(error); } }}
+    inputChanged={!!run && adapter.hasInputChanges(run.id)}
+    placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : t("Describe how you want to revise this text")}
+    status={locked ? t("Locked while running") : t("Development simulation · Ctrl ↵ to run")}
+    runLabel={node.type === "execution" ? t("Run") : t("Generate")}
+  />;
+}
+type MentionRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
+type MentionState = {
+  start: number;
+  query: string;
+  items: ProjectFileMentionCandidate[];
+  active: number;
+  loading: boolean;
+};
+const MENTION_SEARCH_RESULT = 20;
+const MENTION_DEBOUNCE_MS = 120;
+/** Shared phase-one editing surface. Storage and execution stay in the caller. */
+export function PromptEditor({ value, disabled, runDisabled, references, onOpenReference, onClose, onRun, onChange,
+  ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, children,
+  mentionRequest, mentionProjectId, mentionEnabled = false, onOpenProjectFile }: {
+  value: string; disabled: boolean; runDisabled: boolean;
+  references: { id: string; title: string }[];
+  onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string): void;
+  ariaLabel?: string; placeholder?: string; status?: string; runHint?: string; runLabel?: string; controls?: ReactNode; inputChanged?: boolean; children?: ReactNode;
+  mentionRequest?: MentionRequest; mentionProjectId?: string; mentionEnabled?: boolean; onOpenProjectFile?: (item: ProjectFileMentionCandidate) => void;
+}) {
+  const { t } = useI18n();
+  const resolvedAriaLabel = ariaLabel ?? t("Prompt");
+  const resolvedRunLabel = runLabel ?? t("Run");
+  const visibleStatus = status && !status.startsWith(t("In progress")) ? status : "";
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
+  const mentionEpoch = useRef(0);
+  const mentionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pendingCaret = useRef<number | undefined>(undefined);
+  const [mention, setMention] = useState<MentionState | null>(null);
+  const [mentionTop, setMentionTop] = useState(0);
+  const updateMentionPosition = () => {
+    if (textareaRef.current) setMentionTop(textareaCaretTop(textareaRef.current) - 6);
+  };
+  useLayoutEffect(() => {
+    if (!mention || !textareaRef.current) return;
+    updateMentionPosition();
+    const observer = new ResizeObserver(updateMentionPosition);
+    observer.observe(textareaRef.current);
+    return () => observer.disconnect();
+  }, [mention, value]);
+  const projectLinks = extractProjectFileMarkdownLinks(value);
+  useLayoutEffect(() => {
+    if (pendingCaret.current !== undefined && textareaRef.current) {
+      textareaRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
+      pendingCaret.current = undefined;
+    }
+  }, [value]);
+  useEffect(() => () => clearTimeout(mentionTimer.current), []);
+  const dismissMention = () => {
+    clearTimeout(mentionTimer.current);
+    mentionEpoch.current++;
+    setMention(null);
+  };
+  const runMentionSearch = (start: number, query: string) => {
+    const epoch = ++mentionEpoch.current;
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setMention(current => current && current.start === start ? { ...current, items: [], loading: false } : current);
+      return;
+    }
+    const path = "/v1/projects/" + encodeURIComponent(mentionProjectId ?? "") + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) });
+    void mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(path).then(result => {
+      if (epoch !== mentionEpoch.current) return;
+      setMention(current => current && current.start === start ? { ...current, items: (result.items ?? []).filter(item => item.kind === "file" || item.kind === "directory"), loading: false } : current);
+    }).catch(() => {
+      if (epoch !== mentionEpoch.current) return;
+      setMention(current => current && current.start === start ? { ...current, items: [], loading: false } : current);
+    });
+  };
+  const updateMention = (text: string, cursor: number) => {
+    clearTimeout(mentionTimer.current);
+    mentionEpoch.current++;
+    const found = findMentionQuery(text, cursor);
+    if (!found || !mentionEnabled || !mentionProjectId || !mentionRequest) {
+      setMention(null);
+      return;
+    }
+    setMention(current => ({ start: found.start, query: found.query, items: current && current.start === found.start ? current.items : [], active: 0, loading: true }));
+    mentionTimer.current = setTimeout(() => runMentionSearch(found.start, found.query), MENTION_DEBOUNCE_MS);
+  };
+  const insertMention = (item: ProjectFileMentionCandidate) => {
+    const textarea = textareaRef.current;
+    if (!textarea || !mention) return;
+    const text = textarea.value;
+    const cursor = textarea.selectionStart ?? text.length;
+    const next = insertProjectFileMarkdownLink(text, mention.start, cursor, item);
+    pendingCaret.current = next.caret;
+    dismissMention();
+    onChange(next.value);
+  };
+  const recheckMention = () => {
+    const textarea = textareaRef.current;
+    if (!textarea || !mention) return;
+    const cursor = textarea.selectionStart ?? textarea.value.length;
+    const found = findMentionQuery(textarea.value, cursor);
+    if (!found || found.start !== mention.start) dismissMention();
+    else updateMentionPosition();
+  };
+  return <section className="prompt-panel panel" aria-label={t("Prompt editor")}>
+    <div className="reference-area">
+      <div className="prompt-reference-heading"><span className="muted">{t("Reference content")}</span><button className="icon-button" aria-label={t("Close prompt")} onClick={onClose}><X size={14}/></button></div>
+      <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
+    </div>
+    <div className="prompt-input">
+      <textarea ref={textareaRef} aria-label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled}
+        onScroll={() => { if (mention) updateMentionPosition(); }}
+        onDragOver={event => {
+          if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = 'copy';
+        }}
+        onDrop={event => {
+          if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const relativePath = takeProjectFileDrag(event.dataTransfer, mentionProjectId);
+          if (!relativePath) return;
+          const textarea = event.currentTarget;
+          const start = textarea.selectionStart;
+          const end = textarea.selectionEnd;
+          const next = insertProjectFileMarkdownLink(textarea.value, start, end, { name: relativePath.split('/').pop()!, relativePath, kind: 'file' });
+          pendingCaret.current = next.caret;
+          dismissMention();
+          textarea.focus();
+          onChange(next.value);
+        }}
+        onCompositionStart={() => { composing.current = true; dismissMention(); }}
+        onCompositionEnd={event => {
+          composing.current = false;
+          updateMention(event.currentTarget.value, event.currentTarget.selectionStart);
+        }}
+        onChange={e => {
+          const text = e.target.value;
+          onChange(text);
+          if (composing.current || (e.nativeEvent as InputEvent).isComposing) { dismissMention(); return; }
+          updateMention(text, e.target.selectionStart ?? text.length);
+        }}
+        onSelect={recheckMention} onKeyUp={recheckMention}
+        onBlur={() => { clearTimeout(mentionTimer.current); mentionEpoch.current++; setMention(null); }}
+        onKeyDown={e => {
+          const duringComposition = composing.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+          if (mention) {
+            if (!duringComposition && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+              e.preventDefault();
+              if (!mention.items.length) return;
+              const next = e.key === "ArrowDown"
+                ? (mention.active + 1) % mention.items.length
+                : (mention.active - 1 + mention.items.length) % mention.items.length;
+              setMention({ ...mention, active: next });
+              return;
+            }
+            if (!duringComposition && (e.key === "Enter" || e.key === "Tab")) {
+              const item = mention.items[mention.active];
+              if (item) { e.preventDefault(); insertMention(item); }
+              else if (e.key === "Enter") { e.preventDefault(); dismissMention(); }
+              return;
+            }
+            if (!duringComposition && e.key === "Escape") { e.preventDefault(); dismissMention(); return; }
+          }
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !duringComposition) {
+            e.preventDefault(); if (!disabled && !runDisabled) onRun();
+          }
+        }}/>
+      {!!projectLinks.length && <div className="prompt-project-links" aria-label={t("Project file links in the prompt")}>
+        {projectLinks.map(item => <button key={item.kind + ':' + item.relativePath} type="button" disabled={!onOpenProjectFile}
+          title={item.relativePath} onClick={() => onOpenProjectFile?.(item)}>
+          {item.kind === 'directory' ? <Folder size={13}/> : <FileText size={13}/>}<span>{item.name}</span>
+        </button>)}
+      </div>}
+      {mention && <div className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t("Project file suggestions")}>
+        <div className="prompt-mention-heading">{t("Project files")}</div>
+        {mention.loading && <div className="prompt-mention-empty">{t("Searching…")}</div>}
+        {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
+        {mention.items.map((item, index) => <button key={item.kind + ":" + item.relativePath} type="button" role="option" aria-selected={index === mention.active}
+          className={"prompt-mention-item" + (index === mention.active ? " is-active" : "")}
+          onMouseDown={e => e.preventDefault()} onClick={() => insertMention(item)} onMouseEnter={() => setMention(current => current ? { ...current, active: index } : current)}>
+          {item.kind === "directory" ? <Folder size={14}/> : <FileText size={14}/>}
+          <span className="prompt-mention-name">{item.name}</span>
+          <span className="prompt-mention-path">{item.relativePath}</span>
+        </button>)}
+      </div>}
+    </div>
+    {inputChanged && <p className="input-changed">{t("Input updated · The next run will use the new content")}</p>}
+    {children}
+    <p className="prompt-status muted" role={visibleStatus ? "status" : undefined} aria-hidden={visibleStatus ? undefined : true}>{visibleStatus || t("Placeholder")}</p>
+    <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} title={runHint || visibleStatus || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled} onClick={onRun}><ArrowUp size={16}/></button></footer>
+  </section>;
+}
+export function QueuePopover({
+  adapter,
+  snapshot,
+  serviceId,
+  onLocate,
+  onError,
+  onClose,
+}: BaseProps & {
+  snapshot: AdapterSnapshot;
+  serviceId: string;
+  onLocate(run: Run): void;
+  onClose(): void;
+}) {
+  const { t } = useI18n();
+  const queue = adapter.getQueue(serviceId);
+  const runs = [...queue.runs].sort((a, b) => a.sequence - b.sequence);
+  return (
+    <section className="queue-popover panel" aria-label={t("Runtime task queue")}>
+      <div className="panel-heading">
+        <ListTodo size={16} />
+        <strong>{t("Runtime task queue")}</strong>
+        <button className="icon-button" aria-label={t("Close queue")} onClick={onClose}>
+          <X size={15} />
+        </button>
+      </div>
+      <p className="queue-info muted">
+        {t("Development simulation · Project FIFO · Capacity {occupied}/{capacity} (read-only)", { occupied: queue.occupied, capacity: queue.capacity })}
+      </p>
+      {queue.stale && (
+        <p className="connection-warning">
+          {t("Connection interrupted · Showing the last known queue; status is pending confirmation")}
+        </p>
+      )}
+      <div className="queue-list">
+        {runs.length ? (
+          runs.map((run) => (
+            <article className="queue-row" key={run.id}>
+              <button className="queue-locate" onClick={() => onLocate(run)}>
+                <strong>
+                  {snapshot.graphs
+                    .find((g) => g.id === run.graphId)
+                    ?.nodes.find((n) => n.id === run.nodeId)?.title ||
+                    t("Node removed")}
+                </strong>
+                <span className="muted">
+                  {
+                    snapshot.projects.find(
+                      (p) =>
+                        p.id === run.projectId && p.serviceId === run.serviceId,
+                    )?.name
+                  }{" "}
+                  / {snapshot.graphs.find((g) => g.id === run.graphId)?.name}
+                </span>
+                <Status run={run} />
+              </button>
+              {!isTerminal(run.status) && (
+                <button
+                  className="icon-button"
+                  disabled={run.cancelRequested || !queue.connected}
+                  aria-label={
+                    run.status === "queued" ? t("Cancel queued task") : t("Request task stop")
+                  }
+                  title={
+                    run.status === "queued" ? t("Cancel queued task") : t("Request task stop")
+                  }
+                  onClick={() => {
+                    try {
+                      adapter.cancelRun(run.id);
+                    } catch (e) {
+                      onError(e);
+                    }
+                  }}
+                >
+                  <Square size={14} />
+                </button>
+              )}
+            </article>
+          ))
+        ) : (
+          <div className="empty-state">
+            <Check size={24} />
+            <p>{queue.stale ? t("Queue status unknown") : t("No tasks right now")}</p>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+export function RunDetails({
+  adapter,
+  runs,
+  selectedRunId,
+  onSelectRun,
+  onClose,
+  onError,
+}: BaseProps & {
+  runs: Run[];
+  selectedRunId?: string;
+  onSelectRun(id: string): void;
+  onClose(): void;
+}) {
+  const { t } = useI18n();
+  const run = runs.find((r) => r.id === selectedRunId) || runs.at(-1);
+  const [answer, setAnswer] = useState("");
+  const logRef = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const [paused, setPaused] = useState(false);
+  useEffect(() => {
+    setAnswer("");
+    follow.current = true;
+    setPaused(false);
+  }, [run?.id, run?.question?.id]);
+  useEffect(() => {
+    if (follow.current && logRef.current)
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [run?.summaries.length]);
+  const act = (fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      onError(e);
+    }
+  };
+  return (
+    <aside className="run-details panel" aria-label={t("Run details")}>
+      <div className="panel-heading">
+        <History size={16} />
+        <strong>{t("Run details")}</strong>
+        <button
+          className="icon-button"
+          aria-label={t("Close run details")}
+          onClick={onClose}
+        >
+          <X size={16} />
+        </button>
+      </div>
+      {!run ? (
+        <div className="empty-state">
+          <CircleHelp size={28} />
+          <p>{t("No run history")}</p>
+          <span className="muted">{t("Enter a prompt, then run it from the original node.")}</span>
+        </div>
+      ) : (
+        <>
+          <div className="detail-meta">
+            <Status run={run} />
+            <span className="dev-label">{t("Development simulation")}</span>
+            <label>
+              {t("Historical runs")}
+              <select
+                aria-label={t("Historical runs")}
+                value={run.id}
+                onChange={(e) => onSelectRun(e.target.value)}
+              >
+                {[...runs].reverse().map((r) => (
+                  <option key={r.id} value={r.id}>
+                    #{r.sequence} · {t(statusLabels[r.status])} · {r.id.slice(-7)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <code>{run.id}</code>
+          </div>
+          <div
+            className="detail-log"
+            ref={logRef}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              follow.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 28;
+              setPaused(!follow.current);
+            }}
+          >
+            {run.summaries.map((line, i) => (
+              <div className="log-line" key={i}>
+                <span className="log-bullet" />
+                <p>{line}</p>
+              </div>
+            ))}
+            {run.error && <p className="error-message">{run.error}</p>}
+          </div>
+          {paused && (
+            <button
+              className="secondary-button"
+              onClick={() => {
+                follow.current = true;
+                setPaused(false);
+                logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+              }}
+            >
+              {t("Return to latest")}
+            </button>
+          )}
+          {run.status === "waiting_input" && run.question && (
+            <form
+              className="interaction-box"
+              onSubmit={(e) => {
+                e.preventDefault();
+                act(() =>
+                  adapter.answerInput(run.id, run.question!.id, answer),
+                );
+              }}
+            >
+              <strong>{t("Your answer is required")}</strong>
+              <p>{run.question.message}</p>
+              <textarea
+                aria-label={t("Answer question")}
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder={t("Enter an answer…")}
+              />
+              <button className="primary-button" disabled={!answer.trim()}>
+                {t("Submit answer")}
+              </button>
+            </form>
+          )}
+          {run.status === "waiting_approval" && run.approval && (
+            <div className="interaction-box">
+              <strong>{t("Approval requested")}</strong>
+              <p>{run.approval.message}</p>
+              <div className="button-row">
+                <button
+                  className="primary-button"
+                  onClick={() =>
+                    act(() =>
+                      adapter.decideApproval(run.id, run.approval!.id, true),
+                    )
+                  }
+                >
+                  {t("Approve")}
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() =>
+                    act(() =>
+                      adapter.decideApproval(run.id, run.approval!.id, false),
+                    )
+                  }
+                >
+                  {t("Reject")}
+                </button>
+              </div>
+            </div>
+          )}
+          {run.candidate && (
+            <div className="interaction-box">
+              <strong>{t("Generated candidate retained")}</strong>
+              <p>{t("The content was edited during generation, so the result did not overwrite the current content.")}</p>
+              <button
+                className="secondary-button"
+                onClick={() =>
+                  act(() => adapter.applyGenerationCandidate(run.id))
+                }
+              >
+                {t("Use generated candidate")}
+              </button>
+            </div>
+          )}
+          <details className="snapshot-details">
+            <summary>
+              <ChevronRight size={13} />
+              {t("Input snapshot · {count} references", { count: run.inputSnapshot.inputs.length })}
+            </summary>
+            <pre>{run.inputSnapshot.prompt}</pre>
+            {run.inputSnapshot.inputs.map((input) => (
+              <article key={input.nodeId}>
+                <strong>{input.title}</strong>
+                <pre>{input.content || t("Media asset reference")}</pre>
+                {input.assetRef && (
+                  <code>
+                    {input.assetRef.assetId} / {input.assetRef.versionId}
+                  </code>
+                )}
+              </article>
+            ))}
+          </details>
+        </>
+      )}
+    </aside>
+  );
+}

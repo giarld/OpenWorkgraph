@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Service 配对协议测试</title>
+<link rel="stylesheet" href="/probe.css">
+<main>
+  <h1>配对协议测试页</h1>
+  <p>仅供阶段 2 验证，不是产品管理页。当前网页来源：<code id="origin"></code></p>
+  <p>先启动服务，再在服务设备运行：<code id="command"></code>。填写命令输出的地址、serviceId 和配对码。</p>
+  <p>配对后此浏览器具有该服务的统一管理权限，可以撤销其他会话；不代表 Agent 获得整机权限。HTTP 仅在可信本机或局域网中使用。</p>
+  <form id="pair-form">
+    <label>服务地址 <input id="endpoint" type="url" required placeholder="http://127.0.0.1:4317"></label>
+    <label>serviceId <input id="service-id" required autocomplete="off"></label>
+    <label>浏览器名称 <input id="browser-name" value="协议测试浏览器" maxlength="100" required></label>
+    <label>一次性配对码 <input id="pair-code" type="password" required autocomplete="off"></label>
+    <button type="submit">配对并记住会话</button>
+  </form>
+  <p>会话自动保存在本来源的 localStorage。刷新会自动恢复；仅主动访问续期，页面不会后台轮询续期。测试后请撤销会话。</p>
+  <button id="refresh" type="button">恢复连接 / 刷新列表</button>
+  <button id="revoke" type="button">撤销当前会话</button>
+  <p id="status" role="status">尚未连接</p>
+  <pre id="sessions" aria-label="浏览器会话列表"></pre>
+</main>
+<script type="module" src="/probe.js"></script>
+</html>

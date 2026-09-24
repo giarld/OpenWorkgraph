@@ -1,0 +1,20 @@
+.real-app .run-approval { min-width: 0; margin: 16px 0; padding: 0; overflow: hidden; background: var(--panel); border-radius: 12px; font-size: 13px; line-height: 1.6; }
+.run-approval-heading { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-bottom: 1px solid var(--stroke); }
+.run-approval-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 10px; background: var(--fill); color: var(--text); }
+.run-approval-heading strong { font-size: 14px; }
+.run-approval-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.run-approval-body { display: grid; gap: 12px; min-width: 0; padding: 16px; }
+.run-approval-reason > span { color: var(--muted); font-size: 12px; }
+.run-approval-reason p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-approval-command { min-width: 0; overflow: hidden; border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas); }
+.run-approval-command-label { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--stroke); color: var(--muted); font-size: 12px; }
+.run-approval-command pre { max-height: 220px; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
+.run-approval-details { min-width: 0; font-size: 12px; }
+.run-approval-details summary { display: list-item; min-height: 44px; padding: 12px 0; color: var(--muted); cursor: pointer; }
+.run-approval-details > .run-value-list { max-height: 260px; overflow: auto; margin: 0; padding: 12px; border-radius: 8px; background: var(--canvas); }
+.run-approval-details dd { margin-inline-start: 12px; }
+.run-approval-note { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.run-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--stroke); background: var(--canvas); }
+.real-app .run-approval-actions button { justify-content: center; gap: 6px; min-height: 44px; font-size: 13px; text-align: center; }
+.run-approval-actions .primary-button { flex: 1; }
+.run-approval :focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }

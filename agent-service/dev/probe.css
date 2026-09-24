@@ -1,0 +1,6 @@
+body { font: 16px/1.6 system-ui, sans-serif; max-width: 880px; margin: 32px auto; padding: 0 20px; color: #18212f; background: #fafafa; }
+label { display: block; margin: 12px 0; }
+input { display: block; width: min(100%, 560px); padding: 8px; box-sizing: border-box; }
+button { padding: 8px 12px; margin: 4px 8px 4px 0; cursor: pointer; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #eee; padding: 16px; }
+code { overflow-wrap: anywhere; }

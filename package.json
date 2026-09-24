@@ -1,0 +1,30 @@
+{
+  "name": "openworkgraph-workspace",
+  "private": true,
+  "version": "0.2.9",
+  "type": "module",
+  "workspaces": [
+    "packages/protocol",
+    "agent-service"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "version:check": "node scripts/check-versions.mjs",
+    "test:versions": "node --test scripts/semver.test.mjs",
+    "build": "npm run version:check && npm run build -w @openworkgraph/protocol && npm run build -w @openworkgraph/agent-service",
+    "typecheck": "npm run build -w @openworkgraph/protocol && npm run typecheck -w @openworkgraph/agent-service",
+    "test": "npm run test:versions && npm run build && npm run test -w @openworkgraph/agent-service",
+    "dev:service": "npm run build && npm run start -w @openworkgraph/agent-service --",
+    "build:web": "npm run version:check && npm --prefix web-client run build",
+    "test:web": "npm --prefix web-client test"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@openworkgraph/agent-service": "^0.2.1"
+  }
+}

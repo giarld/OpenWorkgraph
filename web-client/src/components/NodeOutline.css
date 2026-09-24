@@ -1,0 +1,15 @@
+.node-outline ul { list-style: none; padding: 0; margin: 0; }
+.node-outline li { min-width: 0; }
+.node-outline .node-outline-group { display: flex; align-items: center; min-width: 0; }
+.node-outline .node-list-item { min-width: 0; flex: 1; }
+.node-outline .node-list-item > span:last-child { flex: 1; }
+.node-outline .node-list-item small { max-width: 100%; }
+.node-outline .node-outline-toggle { display: grid; place-items: center; width: 24px; height: 44px; padding: 0; flex: 0 0 24px; color: var(--muted); border: 0; background: transparent; border-radius: 4px; }
+.node-outline .node-outline-toggle:hover:not(:disabled) { color: var(--text); background: var(--fill); }
+.node-outline .node-outline-toggle:disabled { opacity: 1; cursor: default; }
+.node-outline .node-outline-leaf { padding-left: 24px; }
+.node-outline .node-outline-children { padding-left: 24px; }
+.node-outline-children > li { position: relative; padding-left: 20px; }
+.node-outline-children > li::before { content: ''; position: absolute; left: -12px; top: -2px; bottom: 0; border-left: 1px solid var(--stroke); }
+.node-outline-children > li:last-child::before { bottom: 50%; }
+.node-outline-children > li::after { content: ''; position: absolute; left: -12px; top: 0; width: 12px; height: 50%; border-left: 1px solid var(--stroke); border-bottom: 1px solid var(--stroke); border-bottom-left-radius: 8px; }

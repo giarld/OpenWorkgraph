@@ -1,0 +1,114 @@
+.management-panel { color: var(--text); background: var(--panel); padding: 24px; overflow: auto; max-height: 100%; min-width: 0; font-size: 13px; line-height: 1.5; }
+.management-panel h2, .management-panel h3 { margin: 0 0 12px; }
+.management-navigation { display: flex; align-items: center; gap: 12px; margin: 12px 0 16px; }
+.management-navigation h2 { margin: 0; font-size: 16px; }
+.management-panel .management-back { display: grid; place-items: center; width: 44px; min-height: 44px; height: 44px; padding: 0; margin: 0; flex-shrink: 0; background: transparent; }
+.management-panel .management-back[hidden] { display: none; }
+.management-navigation span { color: var(--muted); font-size: 12px; }
+.management-page-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--stroke); padding-top: 16px; }
+.management-directory-dialog, .management-confirm-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; padding: 24px; color: var(--text); background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); }
+.management-directory-dialog::backdrop, .management-confirm-dialog::backdrop { background: #0006; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.management-panel p { margin: 8px 0 12px; }
+.management-panel .management-controls { border: 0; padding: 0; margin: 0; min-width: 0; }
+.management-panel .management-section { padding: 16px 0; }
+.management-panel ul { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 12px; }
+.management-panel li { display: grid; gap: 8px; padding: 16px; background: var(--canvas); border: 1px solid var(--stroke); border-radius: 12px; min-width: 0; }
+.management-panel label { display: grid; gap: 8px; margin: 12px 0; }
+.management-panel input, .management-panel select { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas); font: inherit; }
+.management-panel button { min-height: 44px; padding: 8px 12px; margin: 4px 8px 4px 0; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); width: fit-content; max-width: 100%; transition: background 150ms; }
+.management-panel button:hover:not(:disabled) { background: var(--fill); }
+.management-panel :focus-visible { outline: 2px solid var(--active); outline-offset: 3px; }
+.management-panel code, .management-panel pre, .management-panel span { overflow-wrap: anywhere; white-space: pre-wrap; }
+.management-panel .management-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.management-panel li[data-current="true"] { border-color: var(--muted); }
+.management-panel li > strong { font-size: 14px; overflow-wrap: anywhere; }
+.management-panel li > code, .management-panel li > span { font-family: inherit; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.management-item-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.management-item-heading strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.management-item-heading svg { flex-shrink: 0; color: var(--muted); }
+.management-panel .management-badge { display: inline-block; width: fit-content; padding: 2px 6px; border: 1px solid var(--stroke); border-radius: 5px; background: var(--panel); font-size: 12px; white-space: normal; }
+.management-item-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.management-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: 12px; line-height: 1.6; }
+.management-details dt { color: var(--muted); }
+.management-details dd { margin: 0; overflow-wrap: anywhere; }
+.management-panel li > button { justify-self: end; margin: 4px 0 0; font-size: 12px; }
+.management-panel li > .management-actions { border-top: 1px solid var(--stroke); margin-top: 4px; padding-top: 12px; justify-content: flex-end; }
+.management-panel .management-actions button, .management-panel .management-page-actions button { margin: 0; font-size: 12px; }
+.management-panel .management-page-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 0; padding: 0; margin-bottom: 24px; }
+.management-panel .management-page-actions button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; text-align: center; font-size: 13px; }
+.management-panel .management-page-actions button svg { flex-shrink: 0; }
+.management-panel button.management-primary { background: var(--active); color: var(--panel); border-color: var(--active); }
+.management-panel button.management-primary:hover:not(:disabled) { background: var(--text); }
+.management-empty { display: grid; justify-items: center; gap: 10px; padding: 28px 16px; margin: 16px 0; border: 1px dashed var(--stroke); border-radius: 12px; text-align: center; }
+.management-empty > svg { color: var(--muted); }
+.management-panel .management-empty p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.management-form-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.management-panel .management-form-actions button { margin: 0; }
+.management-directory-dialog p { color: var(--muted); font-size: 12px; }
+.management-confirm-dialog p { margin: 0; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.management-panel .management-directory-dialog input { font-size: 13px; }
+.management-panel > header > code { display: block; font-family: inherit; color: var(--muted); font-size: 12px; }
+.management-panel > header > p { color: var(--muted); font-size: 12px; font-weight: normal; }
+.management-panel [role=alert] { border: 2px solid var(--active); padding: 16px; margin: 12px 0; border-radius: 8px; }
+.management-panel summary { cursor: pointer; padding: 12px 0; }
+.candidate-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.candidate-heading > div { min-width: 0; }
+.management-panel .candidate-heading h3 { margin: 0 0 4px; font-size: 14px; }
+.candidate-heading span, .candidate-source { color: var(--muted); font-size: 12px; }
+.management-panel .candidate-source summary { width: fit-content; padding: 8px 0; }
+.management-panel .candidate-source p { margin: 0 0 12px; line-height: 1.6; }
+.management-panel .candidate-list { gap: 0; margin: 8px 0 16px; border: 1px solid var(--stroke); border-radius: 10px; overflow: clip; }
+.management-panel .candidate-list:empty { display: none; }
+.management-panel .candidate-row { grid-template-columns: 20px minmax(0, 1fr) 44px; align-items: start; gap: 10px; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--stroke); border-radius: 0; background: transparent; }
+.management-panel .candidate-row:last-child { border-bottom: 0; }
+.candidate-folder { margin-top: 2px; color: var(--muted); }
+.candidate-info { min-width: 0; display: grid; gap: 5px; }
+.candidate-info strong { font-size: 13px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.management-panel .candidate-path { color: var(--muted); font-family: inherit; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.management-panel .candidate-state { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.candidate-state svg { flex-shrink: 0; }
+.management-panel .candidate-add, .management-panel .candidate-refresh { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; margin: 0; flex-shrink: 0; }
+.management-panel .candidate-manual { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin: 0 0 24px; border-style: dashed; }
+.management-panel .management-setting-group { margin: 24px 0 10px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.management-setting-section:first-child .management-setting-group { margin-top: 12px; }
+.management-setting { margin-bottom: 8px; border: 1px solid var(--stroke); border-radius: 12px; background: var(--panel); min-width: 0; }
+.management-panel .management-setting > summary { display: flex; align-items: center; gap: 12px; padding: 16px 12px; min-height: 76px; box-sizing: border-box; list-style: none; border-radius: 12px; transition: background 150ms; }
+.management-setting > summary::-webkit-details-marker { display: none; }
+.management-setting > summary:hover { background: var(--fill); }
+.management-setting-icon { display: grid; place-items: center; flex: 0 0 32px; height: 32px; border: 1px solid var(--stroke); border-radius: 9px; background: var(--canvas); color: var(--text); }
+.management-setting-copy { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.management-setting-copy strong { font-size: 13px; font-weight: 600; }
+.management-setting-copy > span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.management-setting-chevron { flex-shrink: 0; color: var(--muted); transition: transform 150ms; }
+.management-setting[open] > summary .management-setting-chevron { transform: rotate(180deg); }
+.management-setting[open] > summary { border-radius: 12px 12px 0 0; background: var(--fill); }
+.management-setting-body { padding: 16px; border-top: 1px solid var(--stroke); min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.management-setting-body > :first-child { margin-top: 0; }
+.management-setting-body > :last-child { margin-bottom: 0; }
+.management-setting-body p { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.management-setting-body form { display: grid; gap: 14px; margin: 16px 0; }
+.management-setting-body form > label, .management-setting-body form > p { margin: 0; }
+.management-setting-body input, .management-setting-body select { box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas); color: var(--text); font: inherit; }
+.management-setting-body input[type=file] { padding: 8px; font-size: 12px; }
+.management-setting-body input::file-selector-button { padding: 6px 8px; margin-right: 8px; border: 1px solid var(--stroke); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; }
+.management-setting-body form > button[type=submit] { margin: 0; justify-self: end; background: var(--active); color: var(--panel); }
+.management-setting-body form > button[type=submit]:hover:not(:disabled) { background: var(--text); }
+.management-setting-body fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--stroke); border-radius: 8px; }
+.management-panel .management-checkbox { display: flex; flex-direction: row; align-items: center; gap: 10px; min-height: 44px; margin: 0; cursor: pointer; }
+.management-panel .management-checkbox input { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; margin: 0; accent-color: var(--active); }
+.management-form-heading { margin: 24px 0 12px; padding-top: 20px; border-top: 1px solid var(--stroke); font-size: 13px; }
+.management-danger-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px dashed var(--stroke); }
+.management-panel .management-danger-actions button { margin: 0; }
+.image-model-catalog { display: grid; gap: 6px; max-height: 320px; margin: 12px 0; padding: 8px 12px; overflow: auto; border: 1px solid var(--stroke); border-radius: 10px; background: var(--canvas); }
+.management-panel .image-model-catalog .management-checkbox { align-items: flex-start; min-height: 48px; padding: 6px 0; border-bottom: 1px solid var(--stroke); }
+.management-panel .image-model-catalog .management-checkbox:last-of-type { border-bottom: 0; }
+.image-model-catalog .management-checkbox span { display: grid; min-width: 0; gap: 2px; }
+.image-model-catalog code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.image-model-catalog > button { justify-self: end; }
+.image-model-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--stroke); }
+.image-model-row span { min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: var(--muted); }
+.management-panel .image-model-row button { flex-shrink: 0; margin: 0; }
+.management-setting-body pre { max-width: 100%; padding: 12px; background: var(--canvas); border-radius: 8px; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .management-setting > summary, .management-setting-chevron { transition: none; } }
+@media (max-width: 600px) { .management-panel { padding: 16px; } }
+@media (prefers-reduced-motion: reduce) { .management-panel button { transition: none; } }

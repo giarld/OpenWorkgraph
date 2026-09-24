@@ -1,0 +1,32 @@
+.ow-preview-node { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 12px; color: var(--text); }
+.ow-preview-empty { padding: 24px; color: var(--muted); }
+.ow-preview-file-summary { display: flex; flex: 1; min-height: 0; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 12px; text-align: center; overflow: auto; }
+.ow-preview-file-summary .ow-file-metadata { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.ow-preview-file-summary strong { overflow-wrap: anywhere; }
+.ow-preview-file-summary .ow-file-size { color: var(--muted); }
+.reference-preview.reference-preview-fitted { width: min(1100px, 94vw); height: 88vh; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+.reference-preview-fitted > .panel-heading { flex-shrink: 0; }
+.reference-preview-fitted > .ow-preview-node { height: auto; flex: 1; }
+.ow-preview-download { flex-shrink: 0; display: flex; justify-content: flex-end; gap: 8px; padding: 8px; border-top: 1px solid var(--stroke); }
+.ow-preview-controls { display: flex; align-items: stretch; border-bottom: 1px solid var(--stroke); flex-shrink: 0; }
+.ow-preview-controls-name-hidden { justify-content: flex-end; }
+.ow-preview-controls > span { flex: 1; align-content: center; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+[data-node-id] .ow-preview-controls > [data-canvas-draggable] { cursor: grab; user-select: none; }
+.ow-preview-controls label { display: flex; gap: 6px; padding: 6px 8px; align-items: center; white-space: nowrap; }
+.ow-preview-controls select { max-width: 100px; color: inherit; background: var(--panel); border: 1px solid var(--stroke); border-radius: 5px; padding: 3px; }
+.ow-preview-node nav { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 5px; flex-shrink: 0; }
+.ow-preview-node button { font: inherit; color: inherit; border: 1px solid var(--stroke); background: var(--panel); border-radius: 5px; padding: 3px 8px; }
+.ow-preview-node button:disabled { opacity: .4; }
+.ow-preview-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ow-preview-layout, .ow-preview-fill { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.ow-preview-footer { flex-shrink: 0; border-top: 1px solid var(--stroke); background: var(--panel); }
+.ow-preview-scroll iframe { border: 0; background: white; width: 100%; height: 100%; min-height: 180px; }
+.ow-preview-text, .ow-preview-hex { margin: 0; padding: 10px; font: 12px/1.6 Consolas, monospace; user-select: text; }
+.ow-preview-text { white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.ow-preview-hex { white-space: pre; }
+.ow-preview-node .markdown-body { padding: 10px; line-height: 1.75; user-select: text; }
+.ow-preview-node .markdown-body p { line-height: inherit; }
+.ow-preview-node table { border-collapse: collapse; width: 100%; user-select: text; }
+.ow-preview-node td, .ow-preview-node th { border: 1px solid var(--stroke); padding: 5px 8px; white-space: pre-wrap; min-width: 50px; overflow-wrap: anywhere; max-width: 400px; }
+.ow-preview-pdf canvas { display: block; width: 100%; height: auto; background: white; }
+.ow-preview-svg, .ow-preview-image { display: block; width: 100%; height: 100%; min-height: 160px; object-fit: contain; }
