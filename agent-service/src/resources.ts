@@ -343,7 +343,7 @@ export class Resources {
   if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_resource_history'").get() && this.db.prepare('SELECT 1 FROM node_resource_history WHERE resource_id=? LIMIT 1').get(id)) return true;
   return includeUnboundHash && this.db.prepare('SELECT sha256 FROM canvas_resource_versions WHERE resource_id=?').all(id).some(row=>this.snapshotUnboundHash(String(row['sha256'])));
  }
- collectGarbage(only?:{graphId:string;blobHashes:string[]}): {canvas: number; assets: number; blobs: number} {
+ collectGarbage(only?:{graphId:string;blobHashes:string[]}, canvasOnly=false): {canvas: number; assets: number; blobs: number} {
   this.tx();const counts={canvas:0,assets:0,blobs:0};const now=this.now();
   if(this.db.prepare("SELECT 1 FROM resource_maintenance_leases WHERE kind='backup' LIMIT 1").get()) return counts;
   this.db.prepare('DELETE FROM graph_document_heads WHERE expires_at<=?').run(now);
@@ -351,7 +351,7 @@ export class Resources {
   this.db.prepare('DELETE FROM node_resource_history WHERE node_id IN (SELECT id FROM nodes WHERE deleted=1 AND undo_expires_at<=?)').run(now);
   this.db.prepare('UPDATE nodes SET undo_expires_at=NULL WHERE deleted=1 AND undo_expires_at<=?').run(now);
   for(const row of this.db.prepare('SELECT r.id,r.project_id,r.graph_id,r.current_version FROM canvas_resources r JOIN graphs g ON g.id=r.graph_id WHERE (? IS NULL AND g.archived=0 AND g.trashed=0) OR r.graph_id=?').all(only?.graphId??null,only?.graphId??null)) {const id=String(row['id']);if(this.canvasReferenced(id,!only)) continue;this.db.prepare('DELETE FROM canvas_resource_versions WHERE resource_id=?').run(id);this.db.prepare('DELETE FROM canvas_resources WHERE id=?').run(id);this.event('canvas_resource.collected',{projectId:String(row['project_id'])},String(row['graph_id']),id,Number(row['current_version']),'collected');counts.canvas++;}
-  for(const row of only?[]:this.db.prepare('SELECT id,project_id,current_version,unreferenced_since FROM assets WHERE deleted_at IS NOT NULL').all()) {
+  for(const row of only||canvasOnly?[]:this.db.prepare('SELECT id,project_id,current_version,unreferenced_since FROM assets WHERE deleted_at IS NOT NULL').all()) {
    const id=String(row['id']);if(this.assetReferenced(id)) {this.db.prepare('UPDATE assets SET unreferenced_since=NULL WHERE id=?').run(id);continue;}
    if(row['unreferenced_since']===null) {this.db.prepare('UPDATE assets SET unreferenced_since=? WHERE id=?').run(now,id);continue;}
    if(Number(row['unreferenced_since'])>now-30*DAY) continue;

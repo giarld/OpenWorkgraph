@@ -28,6 +28,8 @@ const MAX_TEXT = 1024 * 1024;
 const MAX_MANIFEST = 64 * 1024;
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const imageMime = (mime: string): boolean => IMAGE_MIMES.has(mime);
+// Binary project outputs remain live file references, not in-memory resources.
+const streamedProjectFile = (role: OutputRole | undefined, mime: string): boolean => role === 'project-file' && !supportsText(mime) && !imageMime(mime);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 function generatedTextTitle(text: string): string {
   const firstLine = text.split(/\r?\n/).find(line => line.trim())?.trim() ?? '';
@@ -80,8 +82,11 @@ function manifest(value: unknown, version: 1 | 2): Manifest {
     if (typeof item.path !== 'string' || !item.path || item.path.length > 512 || isAbsolute(item.path) || item.path.includes(String.fromCharCode(92)) || [...item.path].some(char => char.charCodeAt(0) < 32) || item.path.split('/').some(part => !part || part === '.' || part === '..') || paths.has((role ?? 'legacy') + ':' + item.path)) return invalid('Invalid or duplicate output path');
     if (typeof item.mime !== 'string' || !validMime(item.mime)) return invalid('Invalid output MIME');
     const mime = item.mime.toLowerCase();
-    if (!Number.isSafeInteger(item.bytes) || Number(item.bytes) < (role === 'project-file' ? 0 : 1) || Number(item.bytes) > MAX_TOTAL || typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)) return invalid('Invalid output size/hash');
-    if (!supportsText(mime) && !imageMime(mime) && Number(item.bytes) > 50 * 1024 * 1024) return invalid('File output exceeds 50 MiB');
+    if (!Number.isSafeInteger(item.bytes) || Number(item.bytes) < (role === 'project-file' ? 0 : 1)) return invalid('Invalid output byte count: ' + item.outputKey);
+    if (typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)) return invalid('Invalid output SHA-256: ' + item.outputKey);
+    const streaming = streamedProjectFile(role, mime);
+    if (!streaming && Number(item.bytes) > MAX_TOTAL) invalid('In-memory output exceeds 64 MiB: ' + item.outputKey);
+    if (!streaming && !supportsText(mime) && !imageMime(mime) && Number(item.bytes) > 50 * 1024 * 1024) return invalid('File output exceeds 50 MiB');
     if (mime === 'text/markdown' && role !== 'project-file') { markdown++; if (Number(item.bytes) > MAX_TEXT || !item.path.toLowerCase().endsWith('.md')) invalid('Markdown output must be a bounded .md file'); }
     if (role === 'delivery-document') { deliveries++; if (mime !== 'text/markdown') invalid('delivery-document must be Markdown'); }
     let nodeType: OutputNodeType | undefined, title: string | undefined;
@@ -93,7 +98,7 @@ function manifest(value: unknown, version: 1 | 2): Manifest {
       if ((nodeType === 'text' || nodeType === 'document') && (!supportsText(mime) || Number(item.bytes) > MAX_TEXT)) invalid(nodeType + ' workgraph-node requires bounded text content');
       if (nodeType === 'image' && !imageMime(mime) && mime !== 'image/svg+xml') invalid('image workgraph-node requires an image MIME');
     } else if (item.nodeType !== undefined || item.title !== undefined) invalid('Only workgraph-node accepts nodeType and title');
-    keys.add(item.outputKey); paths.add((role ?? 'legacy') + ':' + item.path); total += Number(item.bytes);
+    keys.add(item.outputKey); paths.add((role ?? 'legacy') + ':' + item.path); if (!streaming) total += Number(item.bytes);
     return { outputKey:item.outputKey, path:item.path, mime, bytes:Number(item.bytes), sha256:item.sha256, ...(role ? { role } : {}), ...(nodeType && title ? { nodeType, title } : {}) };
   });
   if ((version === 1 && markdown !== 1) || (version === 2 && deliveries !== 1) || total > MAX_TOTAL) return invalid(version === 2 ? 'Exactly one delivery-document and at most 64 MiB required' : 'Exactly one Markdown output and at most 64 MiB required');
@@ -289,6 +294,13 @@ export class Publication {
     const projectFiles = new ProjectFiles(this.db);
     const prepared: { output: Output; bytes: Buffer; blob?: PreparedBlob; text?: string; changeToken?: string }[] = [];
     for (const output of selected.outputs) {
+      if (streamedProjectFile(output.role, output.mime)) {
+        const verified = await projectFiles.fingerprint(run.projectId, output.path, output.bytes);
+        if (verified.sha256 !== output.sha256) invalid('Project output SHA-256 mismatch: ' + output.outputKey);
+        if (output.bytes && !mimeMatchesBytes(output.mime, sniffMime(verified.prefix))) invalid('Output MIME does not match bytes');
+        prepared.push({ output, bytes:Buffer.alloc(0), changeToken:verified.changeToken });
+        continue;
+      }
       let bytes: Buffer;
       if (output.role === 'delivery-document' && executionAnswer) bytes = executionAnswer;
       else if (hostAnswer) bytes = hostAnswer;

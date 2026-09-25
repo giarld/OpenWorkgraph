@@ -1,6 +1,6 @@
 import { randomId } from "../adapter/random";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, Image, ArrowLeftRight, ChevronDown, Settings2, Pencil } from 'lucide-react';
+import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, Image, ArrowLeftRight, ChevronDown, Settings2, Pencil, HardDrive } from 'lucide-react';
 import type { Backup, GraphBundle, ModelDefaults, Project, ProjectCandidates, Session, ExecutionSettings, SandboxMode, ImageProvider } from '../../../packages/protocol/src/index';
 import { createWorkGraphArchive, readWorkGraphFile } from './workgraph-archive';
 import { useI18n } from '../i18n/I18nProvider';
@@ -22,6 +22,20 @@ export interface ManagementPanelProps {
 }
 type Guidance = { localOnly: true; command: string };
 type LocatedBackup = Backup & { location?: string };
+type StorageCategory = 'database' | 'resources' | 'runs' | 'backups' | 'config' | 'staging' | 'other';
+type StorageUsage = { totalBytes: number; categories: Record<StorageCategory, number>; measuredAt: string };
+type StorageCleanup = { collectedResources: number; collectedBlobs: number; removedFiles: number; failedFiles: number; usage: StorageUsage };
+const storageCategories: { key: StorageCategory; label: string }[] = [
+  { key: 'database', label: 'Database' }, { key: 'resources', label: 'Resource files' },
+  { key: 'runs', label: 'Task files' }, { key: 'backups', label: 'Backups' },
+  { key: 'config', label: 'Configuration' }, { key: 'staging', label: 'Staging files' },
+  { key: 'other', label: 'Other data' },
+];
+const formatSize = (bytes: number) => {
+  if (bytes < 1024) return String(bytes) + ' B';
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 4);
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(bytes / 1024 ** unit) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][unit];
+};
 type Resource<T> = { data?: T; loading: boolean; error?: string };
 type DiscoveredImageModel = { id: string; name: string; selected: boolean };
 const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Request failed. Check the Runtime connection and try again.';
@@ -79,6 +93,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const candidates = useResource<ProjectCandidates>('/v1/project-candidates', props, page === 'add');
   const sessions = useResource<Session[]>('/v1/sessions', props, page === 'settings');
   const backups = useResource<LocatedBackup[]>('/v1/backups', props, page === 'settings');
+  const storage = useResource<StorageUsage>('/v1/storage', props, page === 'settings');
   const guidance = useResource<Guidance>('/v1/restore-guidance', props, page === 'settings');
   const models = useResource<ModelDefaults>('/v1/models', props, page === 'settings');
   const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, page === 'settings');
@@ -188,6 +203,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
     'Runtime default model': { icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
     'Image generation agent · API providers': { icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
     'Work Graph import and export': { icon: ArrowLeftRight, group: t('Data and backups'), summary: t('Import or export ZIP Work Graph packages') },
+    'Storage data management': { icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Runtime data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Runtime storage and clean unused resource copies')) },
     'Runtime backups and local restore': { icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Local restore', { count: backups.data.length }) : t('Back up the entire Runtime and view local restore guidance')) },
     'Browser sessions': { icon: Monitor, group: t('Connections and access'), summary: resourceSummary(sessions, t('{count} browser sessions · View and revoke', { count: sessions.data?.length ?? 0 })) },
   } satisfies Record<string, { icon: typeof Monitor; summary: string; group?: string }>;
@@ -378,6 +394,25 @@ export function ManagementPanel(props: ManagementPanelProps) {
           setNotice(t('Work Graph import was confirmed by the Runtime. View it in the current project’s Work Graph list.')); setFile(undefined); latest.current.onChanged();
         }, true);
       })}>{t('Import into current project')}</button>
+    </>)}
+    {section('Storage data management', <>
+      <p>{t('Storage counts files in this Runtime’s data directory, including all projects. Project source files outside that directory are not counted.')}</p>
+      <Status value={storage} retry={storage.reload} />
+      {storage.data && <>
+        <div className="management-storage-total"><span>{t('Total Runtime data')}</span><strong>{formatSize(storage.data.totalBytes)}</strong></div>
+        <dl className="management-storage-breakdown">{storageCategories.map(item => <div key={item.key}><dt>{t(item.label)}</dt><dd>{formatSize(storage.data!.categories[item.key])}</dd></div>)}</dl>
+        <p>{t('Measured at {time}. Sizes may change while the Runtime is active.', { time: localTime(storage.data.measuredAt) })}</p>
+      </>}
+      <h4 className="management-form-heading">{t('Cache cleanup')}</h4>
+      <div className="management-actions"><button type="button" disabled={disabled} onClick={() => { void storage.reload(); }}>{t('Refresh storage usage')}</button>
+        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Clean unused Work Graph resource copies? Only copies without node, history, snapshot, output, or read references will be collected. Asset library items, backups, and project source files remain untouched.'), () => { void act(t('Clean unused resource copies'), async valid => {
+          const result = await props.request<StorageCleanup>('/v1/storage/cleanup', {}, 'POST');
+          if (!valid()) return;
+          await storage.reload();
+          if (!valid()) return;
+          setNotice(t('Collected {resources} resource copies and removed {files} files. {failed} files remain queued for retry.', { resources: result.collectedResources, files: result.removedFiles, failed: result.failedFiles }));
+        }); })}>{t('Clear cache')}</button></div>
+      <p>{t('Cleanup checks current references before removal. Shared files and protected history are retained; failed file removals stay queued for retry.')}</p>
     </>)}
     {section('Runtime backups and local restore', <>
       <p>{t('A backup covers the entire Runtime, not only the current project. Restore can only be performed by an administrator on the Runtime computer.')}</p>

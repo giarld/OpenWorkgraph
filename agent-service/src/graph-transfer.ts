@@ -1,4 +1,4 @@
-import { executionOrder, importedGraphTitle } from '@openworkgraph/protocol';
+import { WORKGRAPH_UPLOAD_MAX_BYTES, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES, executionOrder, importedGraphTitle } from '@openworkgraph/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import type { GraphScope, GraphSnapshot, Json, Node, Edge, Scope } from '@openworkgraph/protocol';
 import { previewEdgeError } from '@openworkgraph/protocol';
@@ -8,9 +8,9 @@ import type { PreparedBlob } from './blob-store.js';
 import { mimeMatchesBytes, sniffMime } from './blob-store.js';
 import { checkedJson, PluginRegistry } from './plugins.js';
 import { atomic } from './persistence/database.js';
-import { canonicalJson } from './persistence/repositories.js';
+import { canonicalJsonHash } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
-import { ProjectFiles, classifyProjectFile, PROJECT_FILE_PREVIEW_MAX_BYTES } from './project-files.js';
+import { ProjectFiles, classifyProjectFile } from './project-files.js';
 
 import type { BundleResource, BundlePluginRequirement, CopiedProvenance, ImportedGraphSnapshot, GraphBundle } from '@openworkgraph/protocol';
 export type { BundleResource, BundlePluginRequirement, CopiedProvenance, ImportedGraphSnapshot, GraphBundle } from '@openworkgraph/protocol';
@@ -19,7 +19,7 @@ export interface PreparedGraphImport { readonly digest: string; readonly project
 export interface DisposedGraphImport { retired: number; retained: number; removed: number; failed: number }
 interface ImportData {bundle: GraphBundle; blobs: PreparedBlob[]; trustedTopology: boolean; disposed: boolean; disposal: Promise<DisposedGraphImport> | null}
 export interface GraphTransferLimits { maxBundleBytes: number; maxResourceBytes: number; maxTotalResourceBytes: number; maxNodes: number; maxResources: number }
-const DEFAULT_LIMITS: GraphTransferLimits = {maxBundleBytes:96*1024*1024,maxResourceBytes:50*1024*1024,maxTotalResourceBytes:64*1024*1024,maxNodes:2000,maxResources:256};
+const DEFAULT_LIMITS: GraphTransferLimits = {maxBundleBytes:WORKGRAPH_BUNDLE_MAX_BYTES,maxResourceBytes:WORKGRAPH_UPLOAD_MAX_BYTES,maxTotalResourceBytes:WORKGRAPH_TRANSFER_TOTAL_BYTES,maxNodes:2000,maxResources:256};
 const core = new Set(['text','image','document','video','file','preview','execution','group']);
 const key = (id: string, version: number) => JSON.stringify([id,version]);
 function portableNode(node: Node): Node {
@@ -35,7 +35,7 @@ function hash(bytes: Uint8Array): string {return createHash('sha256').update(byt
 /** Portable graph data only: no Run records, thread identities, filesystem paths or executable plugin activation. */
 export class GraphTransfer {
   private readonly prepared = new WeakMap<PreparedGraphImport,ImportData>();
-  private readonly limits: GraphTransferLimits;
+  readonly limits: Readonly<GraphTransferLimits>;
   constructor(readonly graphs: Graphs, readonly resources: Resources, limits: Partial<GraphTransferLimits> = {}, readonly projectFiles = new ProjectFiles(graphs.db)) {
     if(graphs.db !== resources.db) throw new Error('Graph transfer requires one shared database');
     this.limits = {...DEFAULT_LIMITS,...limits};
@@ -86,7 +86,7 @@ export class GraphTransfer {
       throw new ServiceError('PAYLOAD_TOO_LARGE','Graph exceeds export budget');
     const projectPlans: Array<{ node: Node; relativePath: string; classified: ReturnType<typeof classifyProjectFile>; bytes: number }> = [];
     let totalResourceBytes = bundle.resources.reduce((sum, resource) => sum + resource.bytes, 0);
-    const maxResourceBytes = Math.min(this.limits.maxResourceBytes, this.resources.blobs.maxBytes, PROJECT_FILE_PREVIEW_MAX_BYTES);
+    const maxResourceBytes = Math.min(this.limits.maxResourceBytes, this.resources.blobs.maxBytes);
     if (bundle.resources.some(resource => resource.bytes > maxResourceBytes) || totalResourceBytes > this.limits.maxTotalResourceBytes)
       throw new ServiceError('PAYLOAD_TOO_LARGE','Graph exceeds export budget');
     for (let offset = 0; offset < projectNodes.length; offset += 100) {
@@ -102,7 +102,7 @@ export class GraphTransfer {
         const item = batch[index]!, observation = observations[index];
         if (!observation || observation.state !== 'available') throw new ServiceError(observation?.state === 'missing' ? 'NOT_FOUND' : 'PROJECT_UNAVAILABLE', observation?.state === 'missing' ? '引用文件已不存在，工作图导出失败。' : '引用文件当前不可用，工作图导出失败。');
         if (observation.bytes === null || !Number.isSafeInteger(observation.bytes) || observation.bytes < 0) throw new ServiceError('PROJECT_UNAVAILABLE', '无法确认引用文件大小，工作图导出失败。');
-        if (observation.bytes > maxResourceBytes) throw new ServiceError('PAYLOAD_TOO_LARGE', '引用文件超过 50 MiB，工作图导出失败。');
+        if (observation.bytes > maxResourceBytes) throw new ServiceError('PAYLOAD_TOO_LARGE', '引用文件超过 300 MB，工作图导出失败。');
         totalResourceBytes += observation.bytes;
         if (totalResourceBytes > this.limits.maxTotalResourceBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','Graph exceeds export budget');
         projectPlans.push({ ...item, bytes:observation.bytes });
@@ -113,7 +113,7 @@ export class GraphTransfer {
     for (const plan of projectPlans) {
       const { node, relativePath, classified } = plan;
       const content = record(node.content) ? node.content : undefined;
-      const bytes = await this.projectFiles.read(scope.projectId, relativePath, PROJECT_FILE_PREVIEW_MAX_BYTES);
+      const bytes = await this.projectFiles.read(scope.projectId, relativePath, maxResourceBytes);
       if (bytes.length !== plan.bytes) throw new ServiceError('CONFLICT', '引用文件在导出期间已变化，请重试。');
       let resourceId = 'project-file-' + node.id;
       let suffix = 1;
@@ -225,7 +225,7 @@ export class GraphTransfer {
   async prepareImport(scope: Scope, input: unknown, options: {trustedTopology?: boolean} = {}): Promise<PreparedGraphImport> {
     this.outside();this.target(scope);const stableScope={serviceId:scope.serviceId,projectId:scope.projectId};
     const trustedTopology=options.trustedTopology===true;const {bundle,bytes}=this.validate(input,trustedTopology);
-    const digest=hash(Buffer.from(canonicalJson(bundle as unknown as Json)));const blobs:PreparedBlob[]=[];
+    const digest=canonicalJsonHash(bundle as unknown as Json);const blobs:PreparedBlob[]=[];
     try {
       for(let i=0;i<bundle.resources.length;i++) {const r=bundle.resources[i]!;blobs.push(await this.resources.prepareBytes(bytes[i]!,r.mime,r.sha256));}
     } catch(error) {

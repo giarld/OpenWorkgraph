@@ -13,6 +13,24 @@ export function canonicalJson(value: Json): string {
   if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
   return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson(value[key]!)).join(',') + '}';
 }
+/** Same digest as canonicalJson, without joining an entire resource bundle. */
+export function canonicalJsonHash(value: Json): string {
+  const hash = createHash('sha256');
+  function visit(item: Json): void {
+    if (item === null || typeof item !== 'object') { hash.update(canonicalJson(item)); return; }
+    const array = Array.isArray(item);
+    hash.update(array ? '[' : '{');
+    const keys = array ? item.map((_, index) => String(index)) : Object.keys(item).sort();
+    keys.forEach((key, index) => {
+      if (index) hash.update(',');
+      if (!array) hash.update(JSON.stringify(key) + ':');
+      visit((item as { [key: string]: Json })[key]!);
+    });
+    hash.update(array ? ']' : '}');
+  }
+  visit(value);
+  return hash.digest('hex');
+}
 export class Repositories {
   readonly db: DatabaseSync;
   constructor(db: DatabaseSync) { this.db = db; }

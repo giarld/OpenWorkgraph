@@ -2,8 +2,6 @@
 
 OpenWorkgraph 是基于无限画布思想的软件开发工作流产品，同时面向其他领域的工作组织与协作。
 
-Web 编辑器可连接 Agent Service，由运行时保存工作图和资源。可在运行时管理中设置 Agent 权限范围；设置对新提交的任务生效。
-
 ## 快速开始
 
 打开 [OpenWorkgraph 官方编辑器](https://workgraph.giarld.com/)，按照页面提供的引导完成配置即可开始使用。

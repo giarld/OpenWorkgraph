@@ -14,7 +14,7 @@ export type Request = <T>(
   path: string,
   body?: unknown,
   method?: string,
-  options?: { journal?: "session" | "memory" },
+  options?: { journal?: "session" | "memory"; range?: { start: number; end: number } },
 ) => Promise<T>;
 export const graphPath = (projectId: string, graphId: string) =>
   `/v1/projects/${encodeURIComponent(projectId)}/graphs/${encodeURIComponent(graphId)}`;

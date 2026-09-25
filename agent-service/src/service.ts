@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import {
@@ -170,9 +171,10 @@ export function createService(
           "Host 请求头无效。",
         );
       const rawPath = request.url ?? "";
-      const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
+      const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
+      const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills[/]search(?:[?]|$)/.test(rawPath);
       const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content)(?:[?]|$)/.test(rawPath);
-      const queryRoute = fileRoute || mediaRoute;
+      const queryRoute = fileRoute || skillsRoute || mediaRoute;
       const path = queryRoute ? rawPath.split('?')[0]! : rawPath;
       if (
         !path.startsWith("/") ||
@@ -345,18 +347,32 @@ export function createService(
         events.stream(request, response, token, origin);
         return;
       }
-      const business = await api.handle(request, fileRoute ? rawPath : path, token, origin);
+      const business = await api.handle(request, fileRoute || skillsRoute ? rawPath : path, token, origin);
       if (business.handled) {
         const body = auth.withSession(
           token,
           origin,
           (current) =>
-            business.binary ?? events.decorate(business.body, current.id),
+            business.binary ?? (business.binaryParts ? undefined : events.decorate(business.body, current.id)),
         );
         if (business.status) response.statusCode = business.status;
         for (const [key, value] of Object.entries(business.headers ?? {}))
           response.setHeader(key, value);
-        if (business.binary) response.end(body);
+        if (business.binaryParts) {
+          const disconnected = new AbortController();
+          const abort = () => disconnected.abort();
+          response.once('close', abort);
+          try {
+            for (const part of business.binaryParts) {
+              for (let offset = 0; offset < part.length; offset += 1024 * 1024) {
+                if (!response.write(part.subarray(offset, offset + 1024 * 1024)))
+                  await once(response, 'drain', { signal: disconnected.signal });
+              }
+            }
+            response.end();
+          } finally { response.off('close', abort); }
+        }
+        else if (business.binary) response.end(body);
         else send(body);
         return;
       }

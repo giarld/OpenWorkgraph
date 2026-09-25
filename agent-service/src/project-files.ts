@@ -26,6 +26,8 @@ class ProjectFileIoSemaphore {
   }
 }
 const projectFileIo = new ProjectFileIoSemaphore(8);
+const videoThumbnailIo = new ProjectFileIoSemaphore(2);
+const isVideoPath = (path: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(path);
 export const PROJECT_FILE_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 export const PROJECT_IMAGE_THUMBNAIL_LEVELS = [80, 160, 320, 640, 1280, 2560, 4096] as const;
 
@@ -49,7 +51,8 @@ export interface ProjectFileObservation {
 export function classifyProjectFile(name: string): { mime: string; type: 'text' | 'image' | 'file' } {
   const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
   const mime: Record<string, string> = { md:'text/markdown',markdown:'text/markdown',txt:'text/plain',json:'application/json',xml:'application/xml',yaml:'application/yaml',yml:'application/yaml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',csv:'text/csv',pdf:'application/pdf' };
-  const value = mime[extension] ?? 'application/octet-stream';
+  const videoMime: Record<string, string> = {mp4:'video/mp4',m4v:'video/mp4',webm:'video/webm',mov:'video/quicktime',mkv:'video/x-matroska',avi:'video/x-msvideo'};
+  const value = mime[extension] ?? videoMime[extension] ?? 'application/octet-stream';
   return { mime:value, type:['png','jpg','jpeg','gif','webp','svg'].includes(extension) ? 'image' : ['md','markdown','txt','json','xml','yaml','yml'].includes(extension) ? 'text' : 'file' };
 }
 
@@ -137,6 +140,7 @@ function linkedPath(value: unknown): { path: string; projectFallback: boolean } 
 
 export class ProjectFiles {
   private readonly searches = new Map<string, SearchSession>();
+  private readonly videoFrames = new Map<string, { bytes: Buffer; mime: string }>();
   constructor(private readonly db: DatabaseSync, private readonly hiddenFiles: HiddenFileReader = windowsHiddenFiles) {}
 
   private async root(projectId: string): Promise<string> {
@@ -203,7 +207,37 @@ export class ProjectFiles {
     return (await this.readRange(projectId, path, undefined, maxBytes)).bytes;
   }
 
-  async readLinkedFile(projectId: string, rawPath: unknown, runsDirectory: string): Promise<{ name:string; mime:string; bytes:Buffer; scope:'project'|'run'; relativePath?:string }> {
+  /** Verify a live binary deliverable without retaining its entire contents. */
+  async fingerprint(projectId: string, path: string, expectedBytes: number): Promise<{ sha256: string; prefix: Buffer; changeToken: string }> {
+    if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0) throw new ServiceError('INVALID_REQUEST', 'Invalid project output size');
+    return projectFileIo.run(async () => {
+      const file = await this.resolve(projectId, path, 'file');
+      const handle = await fs.open(file.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK);
+      try {
+        const before = await handle.stat({ bigint:true });
+        if (!before.isFile() || before.size !== BigInt(expectedBytes)) throw new ServiceError('INVALID_REQUEST', 'Project output size mismatch');
+        const hash = createHash('sha256');
+        const chunk = Buffer.alloc(1024 * 1024);
+        const prefix = Buffer.alloc(Math.min(expectedBytes, 64 * 1024));
+        let offset = 0;
+        while (offset < expectedBytes) {
+          const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, expectedBytes - offset), offset);
+          if (!bytesRead) throw new ServiceError('CONFLICT', 'Project output changed during verification');
+          hash.update(chunk.subarray(0, bytesRead));
+          if (offset < prefix.length) chunk.copy(prefix, offset, 0, Math.min(bytesRead, prefix.length - offset));
+          offset += bytesRead;
+        }
+        const after = await handle.stat({ bigint:true });
+        const current = await this.resolve(projectId, path, 'file');
+        const linked = await fs.stat(current.path, { bigint:true });
+        if (current.path !== file.path || [after, linked].some(info => info.dev !== before.dev || info.ino !== before.ino || info.size !== before.size || info.mtimeNs !== before.mtimeNs || info.ctimeNs !== before.ctimeNs))
+          throw new ServiceError('CONFLICT', 'Project output changed during verification');
+        return { sha256:hash.digest('hex'), prefix, changeToken:[before.dev,before.ino,before.size,before.mtimeNs].join(':') };
+      } finally { await handle.close(); }
+    });
+  }
+
+  async readLinkedFile(projectId: string, rawPath: unknown, runsDirectory: string, options: { metadataOnly?:boolean; range?:{start:number;end:number} } = {}): Promise<{ name:string; mime:string; bytes:Buffer; total:number; start:number; end:number; scope:'project'|'run'; relativePath?:string }> {
     return projectFileIo.run(async () => {
       const projectRoot = await this.root(projectId);
       let runsRoot: string;
@@ -243,22 +277,25 @@ export class ProjectFiles {
       try {
         const before = await handle.stat();
         if (!before.isFile()) throw new ServiceError('INVALID_REQUEST', '无法查看此文件。');
-        if (before.size > PROJECT_FILE_PREVIEW_MAX_BYTES) throw new ServiceError('PAYLOAD_TOO_LARGE', '文件超过 50 MiB，无法预览。');
+        if (!options.metadataOnly && !options.range && before.size > PROJECT_FILE_PREVIEW_MAX_BYTES) throw new ServiceError('PAYLOAD_TOO_LARGE', '文件超过 50 MiB，无法预览。');
         const canonical = await fs.realpath(target);
         const linked = await fs.stat(canonical);
         const allowed = scope === 'project' ? inside(projectRoot, canonical) : inside(runsRoot, canonical);
         if (!allowed || canonical !== target || linked.dev !== before.dev || linked.ino !== before.ino)
           throw new ServiceError('CONFLICT', '文件在读取前已变化，请重试。');
-        const bytes = Buffer.alloc(before.size);
-        if (before.size) {
-          const result = await handle.read(bytes, 0, before.size, 0);
-          if (result.bytesRead !== before.size) throw new ServiceError('CONFLICT', '文件在读取期间已变化，请重试。');
+        const start = options.range?.start ?? 0;
+        const end = Math.min(options.range?.end ?? before.size - 1, before.size - 1);
+        if (options.range && (!Number.isSafeInteger(start) || !Number.isSafeInteger(options.range.end) || start < 0 || start >= before.size || end < start || end - start + 1 > 4 * 1024 * 1024)) throw new ServiceError('INVALID_REQUEST', '文件字节范围无效或超过 4 MiB。');
+        const bytes = Buffer.alloc(options.metadataOnly ? 0 : Math.max(0, end - start + 1));
+        if (bytes.length) {
+          const result = await handle.read(bytes, 0, bytes.length, start);
+          if (result.bytesRead !== bytes.length) throw new ServiceError('CONFLICT', '文件在读取期间已变化，请重试。');
         }
         const after = await handle.stat();
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
           throw new ServiceError('CONFLICT', '文件在读取期间已变化，请重试。');
         const name = basename(target);
-        return { name, mime:classifyProjectFile(name).mime, bytes, scope, ...(scope === 'project' ? { relativePath:relative(projectRoot,target).split(sep).join('/') } : {}) };
+        return { name, mime:classifyProjectFile(name).mime, bytes, total:before.size, start, end, scope, ...(scope === 'project' ? { relativePath:relative(projectRoot,target).split(sep).join('/') } : {}) };
       } finally { await handle.close(); }
     });
   }
@@ -276,10 +313,48 @@ export class ProjectFiles {
 
   async thumbnail(projectId: string, path: string, size: number = 320): Promise<{ bytes: Buffer; mime: string }> {
     const file = await this.resolve(projectId, path, 'file');
+    if (isVideoPath(file.relativePath)) return videoThumbnailIo.run(() => this.videoThumbnail(projectId, file.relativePath, size));
     const classified = classifyProjectFile(file.relativePath);
-    if (!classified.mime.startsWith('image/')) throw new ServiceError('INVALID_REQUEST', '仅支持图片项目文件缩略图。');
+    if (!classified.mime.startsWith('image/')) throw new ServiceError('INVALID_REQUEST', '仅支持图片或视频项目文件缩略图。');
     const bytes = await this.read(projectId, file.relativePath);
     return resizeImageThumbnail(bytes, classified.mime, size);
+  }
+
+  private async videoThumbnail(projectId: string, path: string, requestedSize: number): Promise<{ bytes: Buffer; mime: string }> {
+    const size = [80, 160, 320].includes(requestedSize) ? requestedSize : 320;
+    // Download tools commonly save an identically named cover alongside a video.
+    // Resolve every candidate through the same project-boundary checks.
+    const stem = path.slice(0, path.lastIndexOf('.'));
+    for (const extension of ['jpg', 'jpeg', 'png', 'webp']) {
+      try {
+        const cover = await this.read(projectId, stem + '.' + extension, 8 * 1024 * 1024);
+        return { bytes:await sharp(cover).rotate().resize({ width:size, height:size, fit:'inside', withoutEnlargement:true }).webp({ quality:75 }).toBuffer(), mime:'image/webp' };
+      } catch { /* Missing, invalid or inaccessible covers fall back to a frame. */ }
+    }
+    const file = await this.resolve(projectId, path, 'file');
+    const before = await fs.stat(file.path, { bigint:true });
+    const key = [file.path,before.dev,before.ino,before.size,before.mtimeNs,before.ctimeNs,size].join(':');
+    const cached = this.videoFrames.get(key);
+    if (cached) return cached;
+    try {
+      // ffmpeg reads the local file directly; no full-video Buffer or HTTP download.
+      const { stdout } = await execFileAsync('ffmpeg', [
+        '-v', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-i', file.path,
+        '-map', '0:v:0', '-frames:v', '1', '-vf',
+        'scale=' + size + ':' + size + ':force_original_aspect_ratio=decrease',
+        '-threads', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
+      ], { encoding:'buffer', timeout:10_000, maxBuffer:2 * 1024 * 1024, windowsHide:true });
+      const current = await this.resolve(projectId, path, 'file');
+      const after = await fs.stat(current.path, { bigint:true });
+      if (current.path !== file.path || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)
+        throw new ServiceError('CONFLICT', '视频文件在生成封面时已变化，请重试。');
+      const result = { bytes:await sharp(stdout).webp({ quality:75 }).toBuffer(), mime:'image/webp' };
+      if (this.videoFrames.size >= 32) this.videoFrames.delete(this.videoFrames.keys().next().value!);
+      this.videoFrames.set(key, result);
+      return result;
+    } catch (cause) {
+      throw new ServiceError('INVALID_REQUEST', '无法生成视频封面；请提供同名图片封面，或确认运行时可使用 FFmpeg。', { cause });
+    }
   }
 
   async list(projectId: string, path: string, showHidden: boolean, limit = 200, cursor?: string | null): Promise<{ path: string; items: ProjectFileEntry[]; nextCursor: string | null }> {

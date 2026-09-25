@@ -1,4 +1,5 @@
 import { documentSnapshot, recordDocumentVersion, travelDocumentVersion, type DocumentTimeline } from './document-versions';
+import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '@openworkgraph/protocol';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import { randomId } from '../adapter/random';
@@ -34,8 +35,8 @@ function rememberReceipt(record: RecordValue, key: string, signature: string, gr
 const conflict = () => Object.assign(Error(translate("The temporary Work Graph was modified in another page. Refresh and try again.")), { code: 'REVISION_CONFLICT' });
 const EXPORT_MAX_NODES = 2000;
 const EXPORT_MAX_RESOURCES = 256;
-const EXPORT_MAX_TOTAL_RESOURCE_BYTES = 64 * 1024 * 1024;
-const EXPORT_MAX_BUNDLE_BYTES = 96 * 1024 * 1024;
+const EXPORT_MAX_TOTAL_RESOURCE_BYTES = WORKGRAPH_TRANSFER_TOTAL_BYTES;
+const EXPORT_MAX_BUNDLE_BYTES = WORKGRAPH_BUNDLE_MAX_BYTES;
 const preservedTextMimes = new Set(['text/plain', 'text/markdown', 'text/csv', 'image/svg+xml', 'application/json', 'application/xml', 'text/xml', 'text/yaml', 'text/x-yaml', 'application/yaml', 'application/x-yaml']);
 const portableMime = (bytes: Uint8Array, declared: string) => {
   const detected = sniffResourceMime(bytes);
@@ -159,6 +160,7 @@ export class TemporaryCanvasStore {
     });
   }
   async importGraph(input: unknown) {
+    if (jsonByteLength(input) > EXPORT_MAX_BUNDLE_BYTES) throw Error(translate('The Work Graph file exceeds the export limit.'));
     const bundle = input as GraphBundle;
     if (!bundle || bundle.format !== 'openworkgraph.graph' || bundle.version !== 1 ||
       !bundle.graph || typeof bundle.graph.title !== 'string' || !bundle.graph.title.trim() ||
@@ -170,9 +172,11 @@ export class TemporaryCanvasStore {
       title: bundle.graph.title, updatedAt: new Date().toISOString(), archived: false, trashed: false, executionRevision: 0, layoutRevision: 0, eventCursor: '', nodes: [], edges: [] };
     const resources: Record<string, TemporaryResource> = Object.create(null);
     const resourceIds = new Map<string, { id: string; bytes: number; mime: string }>();
+    let totalBytes = 0;
     for (const resource of bundle.resources) {
       if (!resource || typeof resource.resourceId !== 'string' || !Number.isInteger(resource.version) || resource.version < 1 || typeof resource.base64 !== 'string' || typeof resource.name !== 'string' || typeof resource.mime !== 'string') throw Error(translate("The resource format is invalid."));
       const key = JSON.stringify([resource.resourceId, resource.version]);
+      if (!Number.isSafeInteger(resource.bytes) || resource.bytes < 0 || resource.bytes > FILE_NODE_MAX_BYTES || (totalBytes += resource.bytes) > EXPORT_MAX_TOTAL_RESOURCE_BYTES || resource.base64.length > Math.ceil(resource.bytes / 3) * 4) throw Error(translate('The Work Graph resources exceed the export limit.'));
       if (resourceIds.has(key)) throw Error(translate("Duplicate resource."));
       const bytes = Uint8Array.from(atob(resource.base64), c => c.charCodeAt(0));
       if (bytes.length !== resource.bytes || bytesToHex(sha256(bytes)) !== resource.sha256) throw Error(translate("Resource file verification failed."));
@@ -284,6 +288,7 @@ export class TemporaryCanvasStore {
     } catch (error) { throw failure ?? error; }
   }
   upload = async (graphId: string, file: File): Promise<CanvasCreated> => {
+    if (file.size > FILE_NODE_MAX_BYTES) throw Error(translate('File nodes support up to 300 MB.'));
     const id = randomId();
     return this.access(graphId, true, record => {
       record.resources[id] = { name: file.name, blob: file };
@@ -342,7 +347,7 @@ export class TemporaryCanvasStore {
       if (!readProjectFile) throw Error(translate("Exporting a reference node requires a connection to its source Runtime and project."));
       const file = await readProjectFile({ serviceId:source.serviceId, projectId:source.projectId, relativePath:source.relativePath });
       if (!file || typeof file.name !== 'string' || typeof file.mime !== 'string' || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.read !== 'function') throw Error(translate("The referenced file size could not be verified. Work Graph export failed."));
-      if (file.size > FILE_NODE_MAX_BYTES) throw Error(translate("The referenced file exceeds 50 MiB. Work Graph export failed."));
+      if (file.size > FILE_NODE_MAX_BYTES) throw Error(translate("The referenced file exceeds 300 MB. Work Graph export failed."));
       projectPlans.push({ node, relativePath:source.relativePath, title:typeof node.content.title === 'string' ? node.content.title : '', file });
     }
     const links = new Map<string, number>();
@@ -361,7 +366,7 @@ export class TemporaryCanvasStore {
     for (const [resourceId] of links) {
       const resource = record.resources[resourceId];
       if (!resource) throw Error(translate("A local resource referenced by the Work Graph is missing. No data was copied."));
-      if (resource.blob.size > FILE_NODE_MAX_BYTES) throw Error(translate("A local resource exceeds 50 MiB. Work Graph export failed."));
+      if (resource.blob.size > FILE_NODE_MAX_BYTES) throw Error(translate("A local resource exceeds 300 MB. Work Graph export failed."));
       totalResourceBytes += resource.blob.size;
     }
     for (const plan of projectPlans) totalResourceBytes += plan.file.size;
@@ -403,7 +408,7 @@ export class TemporaryCanvasStore {
       const mime = portableMime(bytes, resource.blob.type);
       bundle.resources.push({ resourceId, version, name: resource.name, mime, bytes: bytes.length, sha256: bytesToHex(sha256(bytes)), base64:base64(bytes) });
     }
-    if (new TextEncoder().encode(JSON.stringify(bundle)).length > EXPORT_MAX_BUNDLE_BYTES) throw Error(translate("The Work Graph file exceeds the export limit."));
+    if (jsonByteLength(bundle) > EXPORT_MAX_BUNDLE_BYTES) throw Error(translate("The Work Graph file exceeds the export limit."));
     return bundle;
   }
   async purge(graph: GraphSnapshot, confirmTitle: string) {

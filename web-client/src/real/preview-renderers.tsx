@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { VideoPreview } from './VideoPreview';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { markdownCodeComponents, markdownRemarkPlugins } from '../components/MarkdownCodeBlock';
@@ -60,6 +61,7 @@ const renderedModes = ['rendered','text','hex'] as const;
 export const builtInPreviewRenderers: readonly PreviewRendererDefinition[] = [
   {id:'core.binary',label:'Hexadecimal',matches:()=>true,input:'blob',initialView:'metadata',modes:['hex','text'],defaultMode:'hex'},
   {id:'core.image',label:'Image',matches:file=>previewFormat(file.name,file.mime)==='image',input:'blob',Component:ImagePreview,modes:['rendered','hex'],defaultMode:'rendered'},
+  {id:'core.video',label:'Video',matches:file=>previewFormat(file.name,file.mime)==='video',input:'blob',Component:VideoPreview,layout:'fill',modes:['rendered','hex'],defaultMode:'rendered'},
   ...([
     ['html','Web page','text',HtmlPreview],['svg','SVG','blob',SvgPreview],['markdown','Markdown','text',MarkdownPreview],
     ['code','Markdown','text',CodePreview],['csv','Table','text',CsvPreview],['pdf','PDF','blob',PdfPreview],

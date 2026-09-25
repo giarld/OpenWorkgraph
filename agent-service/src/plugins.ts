@@ -34,7 +34,14 @@ export function checkedJson(value: unknown, maxBytes = 16_777_216, maxDepth = 32
     } else invalid('Value is not JSON');
     if (bytes > maxBytes) invalid('JSON size limit exceeded');
   }
-  visit(value, 0); return JSON.parse(JSON.stringify(value)) as Json;
+  // Clone the validated tree without constructing a single aggregate string.
+  // Strings are immutable and can be shared, including large resource payloads.
+  function clone(v: Json): Json {
+    if (v === null || typeof v !== 'object') return Object.is(v, -0) ? 0 : v;
+    if (Array.isArray(v)) return Array.from(v, item => item === undefined ? null : clone(item));
+    return Object.fromEntries(Object.entries(v).map(([key, item]) => [key, clone(item)]));
+  }
+  visit(value, 0); return clone(value as Json);
 }
 function object(v: unknown): v is ObjectJson { return !!v && typeof v === 'object' && !Array.isArray(v); }
 function path(field: unknown): string[] {

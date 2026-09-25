@@ -100,18 +100,31 @@ export class ProjectFilesApi {
       const result = this.auth.withSession(token, origin, current => this.graphs.command({ serviceId:this.graphs.serviceId, projectId:create[1]!, graphId:create[2]!, idempotencyKey:body['idempotencyKey'] as string, expectedExecutionRevision:Number(body['expectedExecutionRevision']), expectedLayoutRevision:Number(body['expectedLayoutRevision']), operations:[{ type:'node.create', node:{ id:randomUUID(), type:classified.type, schemaVersion:1, contentVersion:1, content:{ title:name, text:'', prompt:'', mime:classified.mime, bytes:observation.bytes, source:{ kind:'project-file', serviceId:this.graphs.serviceId, projectId:create[1]!, relativePath:file.relativePath }, observation:{ state:'available', name, mime:classified.mime, bytes:observation.bytes, changeToken:observation.changeToken } }, x:Number(body['x']), y:Number(body['y']), width:300, height:220, readOnly:false } }] }, current.id));
       return { handled:true, body:result };
     }
-    const match = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]files(?:[/](search|stat|content|media|thumbnail|link-preview))?$/.exec(url.pathname);
+    const match = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]files(?:[/](search|stat|content|media|thumbnail|link-preview|link-content))?$/.exec(url.pathname);
     if (!match) return { handled: false };
     this.auth.withSession(token, origin, () => undefined);
     const projectId = match[1]!, action = match[2] ?? 'list';
     if (action === 'link-preview' && request.method === 'POST') {
       const body = await readJson(request, 16 * 1024);
-      if (typeof body['path'] !== 'string' || Object.keys(body).some(key => !['path', 'thumbnailSize'].includes(key)) || (body['thumbnailSize'] !== undefined && ![640, 1280].includes(body['thumbnailSize'] as number))) throw new ServiceError('INVALID_REQUEST', '需要有效的文件路径和缩略图尺寸。');
+      if (typeof body['path'] !== 'string' || (body['streamVideo'] !== undefined && typeof body['streamVideo'] !== 'boolean') || Object.keys(body).some(key => !['path', 'thumbnailSize', 'streamVideo'].includes(key)) || (body['thumbnailSize'] !== undefined && ![640, 1280].includes(body['thumbnailSize'] as number))) throw new ServiceError('INVALID_REQUEST', '需要有效的文件路径和缩略图尺寸。');
+      if (body['streamVideo'] === true && body['thumbnailSize'] === undefined) {
+        const metadata = await this.files.readLinkedFile(projectId, body['path'], this.runsDirectory, {metadataOnly:true});
+        this.auth.withSession(token, origin, () => undefined);
+        if (metadata.mime.startsWith('video/')) return {handled:true, body:{name:metadata.name,mime:metadata.mime,bytes:metadata.total,scope:metadata.scope,contentPath:'/v1/projects/'+projectId+'/files/link-content?'+new URLSearchParams({path:body['path']}).toString()}};
+      }
       const result = body['thumbnailSize'] === undefined
         ? await this.files.readLinkedFile(projectId, body['path'], this.runsDirectory)
         : await this.files.readLinkedImageThumbnail(projectId, body['path'], this.runsDirectory, body['thumbnailSize'] as number);
       this.auth.withSession(token, origin, () => undefined);
       return { handled:true, body:{ name:result.name, mime:result.mime, bytes:result.bytes.length, base64:result.bytes.toString('base64'), scope:result.scope, ...(result.relativePath ? { relativePath:result.relativePath } : {}) } };
+    }
+    if (action === 'link-content' && request.method === 'GET') {
+      if ([...url.searchParams.keys()].some(key => key !== 'path') || url.searchParams.getAll('path').length !== 1) throw new ServiceError('INVALID_REQUEST','需要有效的文件路径。');
+      const range = /^bytes=([0-9]+)-([0-9]+)$/.exec(request.headers.range ?? '');
+      if (!range) throw new ServiceError('INVALID_REQUEST','链接文件须使用明确的字节范围。');
+      const result = await this.files.readLinkedFile(projectId,url.searchParams.get('path'),this.runsDirectory,{range:{start:Number(range[1]),end:Number(range[2])}});
+      this.auth.withSession(token,origin,()=>undefined);
+      return {handled:true,binary:result.bytes,status:206,headers:{'Content-Type':result.mime,'Content-Length':String(result.bytes.length),'Accept-Ranges':'bytes','Content-Range':'bytes '+result.start+'-'+result.end+'/'+result.total,'X-Content-Type-Options':'nosniff'}};
     }
     if (action === 'stat' && request.method === 'POST') {
       const body = await readJson(request, 16 * 1024);
@@ -167,7 +180,9 @@ export class ProjectFilesApi {
       if (!(PROJECT_IMAGE_THUMBNAIL_LEVELS as readonly number[]).includes(size)) throw new ServiceError('INVALID_REQUEST', '无效的缩略图尺寸。');
       const thumbnail = await this.files.thumbnail(projectId, path, size);
       this.auth.withSession(token, origin, () => undefined);
-      return { handled:true, binary:thumbnail.bytes, status:200, headers:{ 'Content-Type':thumbnail.mime, 'Content-Length':String(thumbnail.bytes.length), 'Cache-Control':'private, max-age=31536000, immutable', 'X-Content-Type-Options':'nosniff' } };
+      // Video covers may be replaced independently of the video's change token.
+      const video = /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(path);
+      return { handled:true, binary:thumbnail.bytes, status:200, headers:{ 'Content-Type':thumbnail.mime, 'Content-Length':String(thumbnail.bytes.length), 'Cache-Control':video ? 'private, no-cache' : 'private, max-age=31536000, immutable', 'X-Content-Type-Options':'nosniff' } };
     }
     if (action === 'search') {
       const query = url.searchParams.get('query')?.trim() ?? '';

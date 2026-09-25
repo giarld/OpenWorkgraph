@@ -744,7 +744,7 @@ pre {
 .reference-chip:hover {
   background: var(--fill);
 }
-.prompt-panel .prompt-input > textarea {
+.prompt-panel .prompt-input > .prompt-text-input {
   border: 0;
   border-radius: 0;
   display: block;
@@ -756,10 +756,10 @@ pre {
   font-size: 13px;
   outline-offset: -3px;
 }
-.prompt-panel textarea:focus-visible {
+.prompt-panel .prompt-text-input:focus-visible {
   outline: none;
 }
-.prompt-panel:has(textarea:focus-visible) {
+.prompt-panel:has(.prompt-text-input:focus-visible) {
   box-shadow: 0 0 0 2px var(--active), 0 8px 24px #00000012;
 }
 .prompt-panel footer {
@@ -1226,7 +1226,7 @@ pre {
   max-width: 100%;
   border-radius: 18px;
 }
-.prompt-panel .prompt-input > textarea {
+.prompt-panel .prompt-input > .prompt-text-input {
   height: 170px;
 }
 .prompt-panel .reference-area {
@@ -1521,3 +1521,27 @@ pre {
 .execution-depth-panel li { padding: 3px 0; overflow-wrap: anywhere; }
 .execution-depth-panel ol li::marker { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .execution-depth-disc { transition: none; } }
+
+.prompt-text-input {
+  color: var(--text);
+  font-family: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+}
+.prompt-text-input:empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; }
+.prompt-text-input[aria-disabled="true"] { opacity: .6; }
+.prompt-mention-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: baseline;
+  padding: 0 4px;
+  border-radius: 4px;
+  color: var(--link);
+  background: color-mix(in srgb, var(--link) 10%, transparent);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.prompt-mention-token svg { flex: 0 0 auto; align-self: center; }

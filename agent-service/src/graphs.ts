@@ -2,7 +2,7 @@ import { GraphDocumentVersions } from './graph-document-history.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DeleteGraph, Edge, GraphCommand, GraphScope, GraphSnapshot, Json, Node } from '@openworkgraph/protocol';
-import { TERMINAL_RUN_STATUSES, executionOrder } from '@openworkgraph/protocol';
+import { WORKGRAPH_UPLOAD_MAX_BYTES, TERMINAL_RUN_STATUSES, executionOrder } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
@@ -360,7 +360,7 @@ export class Graphs {
     const row=this.db.prepare('SELECT b.bytes FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id JOIN blobs b ON b.sha256=v.sha256 WHERE r.id=? AND r.graph_id=? AND v.version=?').get(data.resourceId as string,scope.graphId,Number(data.resourceVersion));
     if(!row)throw new ServiceError('INPUT_BLOCKED','文件节点资源不存在。');
     const bytes=Number(row['bytes']);
-    if(bytes>50*1024*1024)throw new ServiceError('PAYLOAD_TOO_LARGE','文件节点最大支持 50 MiB。');
+    if(bytes>WORKGRAPH_UPLOAD_MAX_BYTES)throw new ServiceError('PAYLOAD_TOO_LARGE','文件节点最大支持 300 MB。');
     if(data.bytes!==undefined&&(!Number.isSafeInteger(data.bytes)||Number(data.bytes)<0||Number(data.bytes)!==bytes))throw new ServiceError('INVALID_REQUEST','文件节点资源大小无效。');
   }
   /** Trusted publication/import only. Public commands cannot create delivery edges/read-only nodes. */

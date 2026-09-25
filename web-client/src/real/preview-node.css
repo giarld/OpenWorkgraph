@@ -7,7 +7,6 @@
 .reference-preview.reference-preview-fitted { width: min(1100px, 94vw); height: 88vh; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
 .reference-preview-fitted > .panel-heading { flex-shrink: 0; }
 .reference-preview-fitted > .ow-preview-node { height: auto; flex: 1; }
-.ow-preview-download { flex-shrink: 0; display: flex; justify-content: flex-end; gap: 8px; padding: 8px; border-top: 1px solid var(--stroke); }
 .ow-preview-controls { display: flex; align-items: stretch; border-bottom: 1px solid var(--stroke); flex-shrink: 0; }
 .ow-preview-controls-name-hidden { justify-content: flex-end; }
 .ow-preview-controls > span { flex: 1; align-content: center; padding: 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

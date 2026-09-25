@@ -1,10 +1,11 @@
 import { strToU8, unzip, zip } from 'fflate';
+import { WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_UPLOAD_MAX_BYTES, GRAPH_METADATA_MAX_BYTES, bytesBase64 } from '../../../packages/protocol/src/index';
 import type { BundleResource, GraphBundle } from '../../../packages/protocol/src/index';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
 
 export const WORKGRAPH_ARCHIVE_MIME = 'application/vnd.openworkgraph.graph+zip';
-export const WORKGRAPH_ARCHIVE_MAX_BYTES = 96 * 1024 * 1024;
+export const WORKGRAPH_ARCHIVE_MAX_BYTES = WORKGRAPH_TRANSFER_TOTAL_BYTES;
 const WORKGRAPH_MANIFEST = 'workgraph.json';
 const WORKGRAPH_ARCHIVE_MAX_ENTRIES = 258;
 
@@ -20,14 +21,6 @@ function decodeBase64(value: string): Uint8Array {
   const bytes = new Uint8Array(decoded.length);
   for (let index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index);
   return bytes;
-}
-
-function encodeBase64(bytes: Uint8Array): string {
-  const chunks: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
-  }
-  return btoa(chunks.join(''));
 }
 
 function safeAssetName(name: string, index: number): string {
@@ -60,6 +53,13 @@ function zipFiles(files: Record<string, Uint8Array>): Promise<Uint8Array> {
 export async function createWorkGraphArchive(bundle: GraphBundle): Promise<Blob> {
   const files: Record<string, Uint8Array> = Object.create(null);
   const paths = new Set<string>();
+  if (bundle.resources.length > 256) throw new Error(translate("The Work Graph ZIP contains an invalid file."));
+  let inflatedBytes = 0;
+  for (const resource of bundle.resources) {
+    if (!Number.isSafeInteger(resource.bytes) || resource.bytes < 0 || resource.bytes > WORKGRAPH_UPLOAD_MAX_BYTES || resource.base64.length !== Math.ceil(resource.bytes / 3) * 4) throw new Error(translate("The Work Graph resources exceed the export limit."));
+    inflatedBytes += resource.bytes;
+    if (inflatedBytes > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The extracted Work Graph ZIP exceeds 1 GB."));
+  }
   const resources: ArchiveResource[] = bundle.resources.map((resource, index) => {
     let path = safeAssetName(resource.name, index);
     while (paths.has(path)) path = path.replace(/(?=[^/]+$)/, `${index + 1}-`);
@@ -79,13 +79,16 @@ export async function createWorkGraphArchive(bundle: GraphBundle): Promise<Blob>
     ...(bundle.copiedProvenance ? { copiedProvenance: bundle.copiedProvenance } : {}),
   };
   files[WORKGRAPH_MANIFEST] = strToU8(JSON.stringify(manifest, null, 2));
+  if (files[WORKGRAPH_MANIFEST]!.length > GRAPH_METADATA_MAX_BYTES) throw new Error(translate("The Work Graph metadata exceeds 128 MB."));
+  if (inflatedBytes + files[WORKGRAPH_MANIFEST]!.length > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The extracted Work Graph ZIP exceeds 1 GB."));
   const archive = await zipFiles(files);
+  if (archive.length > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The Work Graph file cannot exceed 1 GB."));
   const body = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength) as ArrayBuffer;
   return new Blob([body], { type: WORKGRAPH_ARCHIVE_MIME });
 }
 
 export async function readWorkGraphFile(file: Blob): Promise<GraphBundle> {
-  if (file.size > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The Work Graph file cannot exceed 96 MiB."));
+  if (file.size > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The Work Graph file cannot exceed 1 GB."));
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!isZip(bytes)) throw new Error(translate("The Work Graph file must be a ZIP archive."));
 
@@ -97,8 +100,9 @@ export async function readWorkGraphFile(file: Blob): Promise<GraphBundle> {
         filter(entry) {
           entryCount++;
           if (entryCount > WORKGRAPH_ARCHIVE_MAX_ENTRIES || !isSafeEntry(entry.name)) throw new Error(translate("The Work Graph ZIP contains an invalid file."));
+          if (entry.originalSize > (entry.name === WORKGRAPH_MANIFEST ? GRAPH_METADATA_MAX_BYTES : WORKGRAPH_UPLOAD_MAX_BYTES)) throw new Error(translate("The Work Graph resources exceed the export limit."));
           inflatedBytes += entry.originalSize;
-          if (inflatedBytes > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The extracted Work Graph ZIP exceeds 96 MiB."));
+          if (inflatedBytes > WORKGRAPH_ARCHIVE_MAX_BYTES) throw new Error(translate("The extracted Work Graph ZIP exceeds 1 GB."));
           return entry.name !== 'assets/';
         },
       }, (error, data) => error ? reject(error) : resolve(data));
@@ -115,7 +119,7 @@ export async function readWorkGraphFile(file: Blob): Promise<GraphBundle> {
     const content = files[resource.path];
     if (!content || content.length !== resource.bytes) throw new Error(translate('Work Graph resource “{name}” is missing or has the wrong size.', { name: resource.name }));
     const { path: _path, ...metadata } = resource;
-    return { ...metadata, base64: encodeBase64(content) };
+    return { ...metadata, base64: bytesBase64(content) };
   });
   const { format: _format, version: _version, resources: _resources, ...portable } = manifest;
   return { format: 'openworkgraph.graph', version: 1, ...portable, resources };

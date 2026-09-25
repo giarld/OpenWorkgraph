@@ -545,7 +545,7 @@ export function createResourcePasteJob(
         if (status.bytes === null || !Number.isSafeInteger(status.bytes) || status.bytes < 0)
           throw Error(translate("The project file size could not be verified, so it cannot be copied as a resource node."));
         if (status.bytes > FILE_NODE_MAX_BYTES)
-          throw Error(translate("Files larger than 50 MiB cannot be copied as resource nodes."));
+          throw Error(translate("Files larger than 300 MB cannot be copied as resource nodes."));
         projectStatuses.set(job.nodeId, { mime:status.mime ?? job.body.mime });
       }
     for (const job of jobs)

@@ -11,6 +11,14 @@ export interface MentionQuery {
   query: string;
 }
 
+/** Codex recognizes a skill invocation by its dollar-prefixed name. */
+export function insertSkillMention(text: string, start: number, end: number, name: string): { value: string; caret: number } {
+  const before = text.slice(0, start);
+  const after = text.slice(end);
+  const inserted = (/\s$/.test(before) ? '' : ' ') + '$' + name + (/^\s/.test(after) ? '' : ' ');
+  return { value: before + inserted + after, caret: before.length + inserted.length };
+}
+
 const MENTION_TRIGGER = "@";
 
 /** Keep link labels literal: no nested links, emphasis, code, HTML or entities. */

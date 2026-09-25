@@ -127,9 +127,11 @@ export async function latestAgentServiceVersion(spawnProcess: SpawnProcess = spa
       else reject(new Error(stderr.trim() || `npm version check failed (${signal ?? code ?? 'unknown'})`));
     });
   });
-  let version: unknown;
-  try { version = JSON.parse(stdout); }
+  let response: unknown;
+  try { response = JSON.parse(stdout); }
   catch { throw new Error('npm returned an invalid package version response.'); }
+  // npm 12 wraps even a single scalar field in an array; older npm returns the string directly.
+  const version = Array.isArray(response) && response.length === 1 ? response[0] : response;
   if (typeof version !== 'string') throw new Error('npm returned an invalid package version response.');
   parseSemVer(version);
   return version;

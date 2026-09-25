@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { FileVideo, Play } from 'lucide-react';
 import { AlertCircle, ArrowUp, ChevronDown, ChevronRight, ChevronsDownUp, File, FileArchive, FileCode2, FileImage, FileJson, FileText, Folder, FolderOpen, FolderTree, LayoutGrid, Link2, ListTree, LoaderCircle, Plus, RefreshCw, Unplug } from 'lucide-react';
 import { formatFileSize, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
 import type { ResourceRequest } from './ResourcesPanel';
@@ -10,6 +11,7 @@ type Entry = { name: string; relativePath: string; kind: 'file' | 'directory'; h
 type Listing = { path: string; items: Entry[]; nextCursor: string | null };
 type Page = Listing & { loading: boolean; error?: string };
 type View = 'tree' | 'grid';
+const isVideoFile = (name: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(name);
 const PROJECT_FILES_VIEW_STORAGE_KEY = 'openworkgraph:project-files-view:v1';
 const PROJECT_FILES_SHOW_HIDDEN_STORAGE_KEY = 'openworkgraph:project-files-show-hidden:v1';
 
@@ -26,12 +28,13 @@ function readShowHidden(): boolean {
 function EntryIcon({ item, open = false, size = 17 }: { item: Entry; open?: boolean; size?: number }) {
   const extension = item.name.split('.').at(-1)?.toLowerCase() ?? '';
   const Icon = item.kind === 'directory' ? (open ? FolderOpen : Folder)
+    : isVideoFile(item.name) ? FileVideo
     : /^(png|jpe?g|gif|webp|svg|ico|avif)$/.test(extension) ? FileImage
     : /^(json|ya?ml|toml|xml)$/.test(extension) ? FileJson
     : /^(tsx?|jsx?|css|scss|html|py|rs|go|java|c|cpp|h|sh)$/.test(extension) ? FileCode2
     : /^(md|txt|pdf|csv)$/.test(extension) ? FileText
     : /^(zip|gz|tar|7z|rar)$/.test(extension) ? FileArchive : File;
-  return <Icon size={size} strokeWidth={1.7} aria-hidden="true" className={'ow-project-file-icon ' + (item.kind === 'directory' ? 'is-folder' : Icon === FileCode2 || Icon === FileJson ? 'is-code' : Icon === FileImage ? 'is-image' : '')}/>;
+  return <Icon size={size} strokeWidth={1.7} aria-hidden="true" className={'ow-project-file-icon ' + (item.kind === 'directory' ? 'is-folder' : Icon === FileCode2 || Icon === FileJson ? 'is-code' : Icon === FileImage ? 'is-image' : Icon === FileVideo ? 'is-video' : '')}/>;
 }
 
 function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: string; request: ResourceRequest }) {
@@ -40,10 +43,12 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
   const [size, setSize] = useState(80);
   const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
+  const isVideo = item.kind === 'file' && isVideoFile(item.name);
   const isImage = item.kind === 'file' && /[.](png|jpe?g|gif|webp|svg)$/i.test(item.name) && (item.bytes ?? 0) <= PROJECT_FILE_PREVIEW_MAX_BYTES;
+  const hasThumbnail = isImage || isVideo;
   useEffect(() => {
     const element = container.current;
-    if (!isImage || !element) return;
+    if (!hasThumbnail || !element) return;
     const resize = new ResizeObserver(() => {
       const bounds = element.getBoundingClientRect();
       const pixels = Math.max(bounds.width, bounds.height) * (window.devicePixelRatio || 1);
@@ -55,9 +60,9 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
     resize.observe(element);
     observer.observe(element);
     return () => { resize.disconnect(); observer.disconnect(); };
-  }, [isImage]);
+  }, [hasThumbnail]);
   useEffect(() => {
-    if (!isImage || !visible) return;
+    if (!hasThumbnail || !visible) return;
     let active = true;
     let objectUrl: string | undefined;
     setUrl(undefined);
@@ -66,7 +71,7 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
     void (async () => {
       const [observation] = await request<Array<{ state: string; bytes: number | null; changeToken: string | null }>>(base + 'stat', { paths: [item.relativePath] }, 'POST');
       if (!active) return;
-      if (observation?.state !== 'available' || (observation.bytes ?? 0) > PROJECT_FILE_PREVIEW_MAX_BYTES) throw new Error('Thumbnail unavailable');
+      if (observation?.state !== 'available' || (!isVideo && (observation.bytes ?? 0) > PROJECT_FILE_PREVIEW_MAX_BYTES)) throw new Error('Thumbnail unavailable');
       const query = new URLSearchParams({ path: item.relativePath, size: String(size), ...(observation.changeToken ? { cacheKey: observation.changeToken } : {}) });
       const blob = await request<Blob>(base + 'thumbnail?' + query, undefined, 'BLOB');
       if (!active) return;
@@ -74,9 +79,9 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
       setUrl(objectUrl);
     })().catch(() => { if (active) setFailed(true); });
     return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [isImage, visible, size, projectId, item.relativePath, request]);
-  return <span ref={container} className="ow-project-file-tile-icon">{url && !failed
-    ? <img className="ow-project-file-thumbnail" src={url} alt="" draggable={false} decoding="async" onError={() => setFailed(true)}/>
+  }, [hasThumbnail, isVideo, visible, size, projectId, item.relativePath, request]);
+  return <span ref={container} className={'ow-project-file-tile-icon' + (isVideo ? ' is-video' : '')}>{url && !failed
+    ? <><img className="ow-project-file-thumbnail" src={url} alt="" draggable={false} decoding="async" onError={() => setFailed(true)}/>{isVideo && <span className="ow-project-file-video-badge" aria-hidden="true"><Play size={10} fill="currentColor"/></span>}</>
     : <EntryIcon item={item} size={30}/>}</span>;
 }
 

@@ -1,5 +1,8 @@
 import { translate } from "../i18n/translate";
-import { PROTOCOL_VERSION } from "../../../packages/protocol/src/index";
+import { PROTOCOL_VERSION, GRAPH_BINARY_MIME, graphBinaryParts, readGraphBinary } from "../../../packages/protocol/src/index";
+import type { GraphBundle } from "../../../packages/protocol/src/index";
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import {
   AUTH_ERRORS,
   checkResponse,
@@ -23,8 +26,9 @@ export interface PendingRequest {
   createdAt: string;
   persistence: "session" | "memory";
 }
-interface PendingRequestEntry extends PendingRequest { body: string }
-export interface TransportRequestOptions { journal?: "session" | "memory" }
+interface PendingRequestEntry extends PendingRequest { body: string; payload?: Blob }
+export interface TransportRequestOptions { journal?: "session" | "memory"; range?: { start: number; end: number } }
+export interface RangeBlob { blob: Blob; start: number; end: number; total: number; mime: string }
 export interface TransportOptions {
   pendingStorage?: StorageLike | null;
   pendingPrefix?: string;
@@ -32,6 +36,9 @@ export interface TransportOptions {
 }
 function immutableMediaPath(path: string): boolean {
   const pathname = path.split('?')[0] ?? path;
+  if (/^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/thumbnail$/.test(pathname) &&
+      /\.(?:mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(new URLSearchParams(path.slice(pathname.length + 1)).get('path') ?? ''))
+    return false;
   return /^\/v1\/projects\/[A-Za-z0-9_-]+\/(?:assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*|graphs\/[A-Za-z0-9_-]+\/resources\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*)\/(?:thumbnail|preview|content)$/.test(pathname)
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/(?:thumbnail|media|content)$/.test(pathname);
 }
@@ -102,7 +109,7 @@ export class Transport {
   pending(): PendingRequest[] {
     return [...this.unknown.values(), ...this.memoryUnknown.values()]
       .filter(entry => !this.inFlight.has(entry.id))
-      .map(({ body: _body, ...entry }) => structuredClone(entry));
+      .map(({ body: _body, payload: _payload, ...entry }) => structuredClone(entry));
   }
   private begin(entry: PendingRequestEntry): void {
     this.inFlight.set(entry.id, (this.inFlight.get(entry.id) ?? 0) + 1);
@@ -123,13 +130,15 @@ export class Transport {
     const parts = path.split('?');
     const pathname = parts[0] ?? '';
     const fileQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
-      /^\/v1\/projects\/[A-Za-z0-9_-]+\/files(?:\/(?:search|content|media|thumbnail))?$/.test(pathname);
+      /^\/v1\/projects\/[A-Za-z0-9_-]+\/files(?:\/(?:search|content|link-content|media|thumbnail))?$/.test(pathname);
+    const skillsQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
+      /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills\/search$/.test(pathname);
     const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(path);
     if (
       parts.length > 2 || path.includes('#') ||
       !/^\/(?:health|v1(?:\/[A-Za-z0-9_.-]+)*)$/.test(pathname) ||
       pathname.split("/").some((p) => p === "." || p === "..") ||
-      (parts.length === 2 && !fileQuery && !mediaQuery)
+      (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery)
     )
       throw new TransportError("INVALID_REQUEST", translate("Only standard API paths for this Runtime are allowed"));
   }
@@ -137,10 +146,11 @@ export class Transport {
     path: string,
     options: {
       method?: string;
-      body?: string;
+      body?: string | Blob;
       signal?: AbortSignal;
       cursor?: string;
       accept?: string;
+      range?: { start: number; end: number };
       cache?: RequestCache;
     } = {},
   ): Promise<{ response: Response; lease: ConnectionLease }> {
@@ -153,9 +163,10 @@ export class Transport {
       "X-Workgraph-Service-Id": this.serviceId,
     });
     if (options.body !== undefined)
-      headers.set("Content-Type", "application/json");
+      headers.set("Content-Type", options.body instanceof Blob ? options.body.type : "application/json");
     if (options.cursor) headers.set("Last-Event-ID", options.cursor);
     if (options.accept) headers.set("Accept", options.accept);
+    if (options.range) headers.set("Range", `bytes=${options.range.start}-${options.range.end}`);
     const signal = AbortSignal.any([
       lease.signal,
       ...(this.lifecycleSignal ? [this.lifecycleSignal] : []),
@@ -205,11 +216,24 @@ export class Transport {
     const verb = (
       method ?? (body === undefined ? "GET" : "POST")
     ).toUpperCase();
-    if (!["GET", "POST", "DELETE", "BLOB"].includes(verb))
+    if (!["GET", "POST", "DELETE", "BLOB", "RANGE"].includes(verb))
       throw new TransportError("INVALID_REQUEST", translate("The Runtime only supports GET, POST, and DELETE"));
-    if ((verb === "GET" || verb === "BLOB") && body !== undefined)
+    if ((verb === "GET" || verb === "BLOB" || verb === "RANGE") && body !== undefined)
       throw new TransportError("INVALID_REQUEST", translate("GET requests do not accept a request body"));
-    const serialized = body === undefined ? undefined : JSON.stringify(body);
+    if (verb === "RANGE" && (!options.range || !Number.isSafeInteger(options.range.start) || !Number.isSafeInteger(options.range.end) || options.range.start < 0 || options.range.end < options.range.start))
+      throw new TransportError("INVALID_REQUEST", translate("Invalid media byte range"));
+    let payload: Blob | undefined;
+    let serialized: string | undefined;
+    if (verb === 'POST' && /^[/]v1[/]projects[/][A-Za-z0-9_-]+[/]graphs[/]import$/.test(path) && body && typeof body === 'object' && 'bundle' in body) {
+      const input = body as { bundle: GraphBundle; idempotencyKey?: string };
+      if (Object.keys(input).some(key => !['bundle', 'idempotencyKey'].includes(key)))
+        throw new TransportError('INVALID_REQUEST', 'Unsupported Work Graph import field');
+      const parts = graphBinaryParts(input.bundle, input.idempotencyKey);
+      const digest = sha256.create();
+      for (const part of parts) digest.update(part);
+      serialized = 'binary:' + bytesToHex(digest.digest());
+      payload = new Blob(parts as BlobPart[], { type: GRAPH_BINARY_MIME });
+    } else serialized = body === undefined ? undefined : JSON.stringify(body);
     const key =
       body && typeof body === "object" && "idempotencyKey" in body
         ? body.idempotencyKey
@@ -231,9 +255,10 @@ export class Transport {
         path,
         method: verb,
         body: serialized!,
+        ...(payload ? { payload } : {}),
         idempotencyKey: key,
         createdAt: new Date().toISOString(),
-        persistence: options.journal === "memory" ? "memory" : "session",
+        persistence: payload || options.journal === "memory" ? "memory" : "session",
       };
       (entry.persistence === "memory" ? this.memoryUnknown : this.unknown).set(id, entry);
       if (!existing && entry.persistence === "session") {
@@ -244,31 +269,54 @@ export class Transport {
         }
       }
       this.begin(entry);
-      try { return await this.send<T>(path, serialized, verb, entry); }
+      try { return await this.send<T>(path, entry.payload ?? serialized, verb, entry); }
       finally { this.end(entry); }
     }
-    return this.send<T>(path, serialized, verb);
+    return this.send<T>(path, payload ?? serialized, verb, undefined, options);
   }
   private async send<T>(
     path: string,
-    body: string | undefined,
+    body: string | Blob | undefined,
     method: string,
     entry?: PendingRequestEntry,
+    options: TransportRequestOptions = {},
   ): Promise<T> {
     let readingBody = false;
     try {
       const { response } = await this.open(path, {
-        method: method === "BLOB" ? "GET" : method,
+        method: method === "BLOB" || method === "RANGE" ? "GET" : method,
         body,
+        accept: method === 'GET' && path.endsWith('/export') ? GRAPH_BINARY_MIME : undefined,
+        range: method === "RANGE" ? options.range : undefined,
         cache: method === "BLOB" && immutableMediaPath(path) ? "force-cache" : "no-store",
       });
       readingBody = true;
       const result =
-        method === "BLOB"
+        method === "RANGE"
+          ? await (async (): Promise<RangeBlob> => {
+              const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("Content-Range") ?? "");
+              if (response.status !== 206 || !match) throw new TransportError("INVALID_REQUEST", translate("The Runtime did not return a valid media byte range"));
+              const [, start, end, total] = match;
+              const blob = await response.blob();
+              if (![start,end,total].every(value => Number.isSafeInteger(Number(value))) || Number(total) <= Number(end) || Number(start) !== options.range?.start || Number(end) < Number(start) || Number(end) > options.range!.end || blob.size !== Number(end) - Number(start) + 1)
+                throw new TransportError("INVALID_REQUEST", translate("The Runtime returned inconsistent media bytes"));
+              return { blob, start:Number(start), end:Number(end), total:Number(total), mime:response.headers.get("Content-Type") ?? blob.type };
+            })()
+          : method === "BLOB"
           ? await response.blob()
           : response.status === 204
             ? undefined
-            : await response.json();
+            : response.headers.get('Content-Type') === GRAPH_BINARY_MIME
+              ? await (async () => {
+                  if (!response.body) throw new Error('Missing Work Graph response body');
+                  const reader = response.body.getReader();
+                  async function* chunks() {
+                    try { while (true) { const value = await reader.read(); if (value.done) return; yield value.value; } }
+                    finally { await reader.cancel(); reader.releaseLock(); }
+                  }
+                  return (await readGraphBinary(chunks())).bundle;
+                })()
+              : await response.json();
       this.assertOwner();
       if (entry) {
         this.removeEntry(entry);
@@ -290,6 +338,9 @@ export class Transport {
         this.removeEntry(entry);
         this.settleJournal();
       }
+      if (method === "POST" && body instanceof Blob && body.type === GRAPH_BINARY_MIME &&
+          error instanceof TransportError && error.code === "UNSUPPORTED_MEDIA_TYPE")
+        throw new TransportError(error.code, translate("This Runtime does not support Work Graph binary import. Update the Runtime and try again."), error.status, error.details);
       throw error;
     }
   }
@@ -304,7 +355,7 @@ export class Transport {
         translate("The idempotency key is bound to the original session and cannot be replayed after pairing again"),
       );
     this.begin(entry);
-    try { return await this.send<T>(entry.path, entry.body, entry.method, entry); }
+    try { return await this.send<T>(entry.path, entry.payload ?? entry.body, entry.method, entry); }
     finally { this.end(entry); }
   }
 }

@@ -1,4 +1,4 @@
-export type PreviewFormat = 'html' | 'image' | 'svg' | 'markdown' | 'code' | 'pdf' | 'csv' | 'hex';
+export type PreviewFormat = 'html' | 'image' | 'svg' | 'markdown' | 'code' | 'pdf' | 'csv' | 'video' | 'hex';
 export type PreviewMode = 'rendered' | 'text' | 'hex';
 export function previewMode(value: unknown): PreviewMode | undefined {
   return value === 'rendered' || value === 'text' || value === 'hex' ? value : undefined;
@@ -29,6 +29,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (ext === 'svg') return 'svg';
   if (imageMimeByExtension[ext]) return 'image';
   if (ext === 'pdf') return 'pdf';
+  if (ext === 'mp4') return 'video';
   if (Object.hasOwn(languages, ext)) return 'code';
   if (ext === 'bin') return 'hex';
   if (mime === 'text/html') return 'html';
@@ -37,6 +38,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (mime === 'image/svg+xml') return 'svg';
   if (previewImageMime('', mime)) return 'image';
   if (mime === 'application/pdf') return 'pdf';
+  if (mime === 'video/mp4') return 'video';
   return 'hex';
 }
 export function codeMarkdown(text: string, name: string): string {

@@ -50,7 +50,7 @@ export function hasTextContent(asset: { text?: string }): boolean {
   return typeof asset.text === "string";
 }
 
-export const FILE_NODE_MAX_BYTES = 50 * 1024 * 1024;
+export { WORKGRAPH_UPLOAD_MAX_BYTES as FILE_NODE_MAX_BYTES } from '@openworkgraph/protocol';
 export const PROJECT_FILE_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 export function formatFileSize(bytes: number): string {
   if (!Number.isSafeInteger(bytes) || bytes < 0) throw Error(translate("File size must be a non-negative safe integer."));

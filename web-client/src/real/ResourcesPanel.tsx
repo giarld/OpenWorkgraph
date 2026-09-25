@@ -1,3 +1,4 @@
+import { PreviewActionButton } from './PreviewActionButton';
 import { randomId } from "../adapter/random";
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -6,7 +7,8 @@ import './ResourcesPanel.css';
 import type { Point } from '../canvas/geometry';
 import { beginAssetDrag } from './asset-drag';
 import { isLifecycleCancellation } from '../adapter/transport';
-import { fileMime, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
+import { FILE_NODE_MAX_BYTES, fileMime, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
+import { translate } from '../i18n/translate';
 import { cachedImageBlob } from './image-preview-cache';
 import { useI18n } from '../i18n/I18nProvider';
 
@@ -74,6 +76,7 @@ export function createResourceUpload(request: ResourceRequest, projectId: string
 // connection epochs and reject stale responses; no credentials are stored here.
 const canvasJobs = new WeakMap<ResourceRequest, WeakMap<File, Map<string, ReturnType<typeof createResourceUpload>>>>();
 export async function uploadCanvas(request: ResourceRequest, projectId: string, graphId: string, file: File, onProgress?: (percent: number) => void): Promise<CanvasCreated> {
+  if (file.size > FILE_NODE_MAX_BYTES) throw Error(translate('File nodes support up to 300 MB.'));
   let files = canvasJobs.get(request);
   if (!files) { files = new WeakMap(); canvasJobs.set(request, files); }
   let scopes = files.get(file);
@@ -248,7 +251,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     {current?.error && <div role="status">{t('Could not load preview: {error}', { error: current.error })}<button onClick={() => setRetry(v => v + 1)}>{t('Retry preview')}</button></div>}
     {current?.url && (current.mime?.startsWith('video/') ? <video src={current.url} controls preload="metadata" aria-label={name} /> : expandable ? <button ref={imageButton} className="ow-image-expand" data-canvas-interactive data-canvas-draggable type="button" aria-label={t('Enlarge {name}', { name })} title={t('Double-click to enlarge image')} onContextMenu={e => e.preventDefault()} onClick={e => { if (e.detail === 0) setExpanded(true); }} onDoubleClick={() => setExpanded(true)}><img src={current.url} alt={name} draggable={false} onContextMenu={e => e.preventDefault()} /></button> : <img src={current.url} alt={name} draggable={false} onContextMenu={e => e.preventDefault()} />)}
     {current?.text !== undefined && <pre>{current.text}</pre>}
-    {!imageNode && <button disabled={downloading} onClick={() => void download()}>{downloading ? t('Downloading…') : t('Download original file')}</button>}
+    {!imageNode && <footer className="ow-preview-download"><PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer>}
     {expanded && current?.url && createPortal(<div className="modal-backdrop ow-image-backdrop" onPointerDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setExpanded(false); }}><section className="ow-image-dialog panel" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={dialog} onClick={e => e.stopPropagation()} onKeyDown={e => {
       e.stopPropagation();
       if (e.key === 'Escape' || (e.code === 'Space' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey)) { e.preventDefault(); setExpanded(false); }
@@ -258,7 +261,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
         if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
       }
-    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <img src={originalUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /> : <p role="status">{t('Reading original image…')}</p>}<footer><button type="button" disabled={downloading} onClick={() => { void download(); }}>{downloading ? t('Downloading…') : t('Download original file')}</button></footer></section></div>, document.body)}
+    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <img src={originalUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /> : <p role="status">{t('Reading original image…')}</p>}<footer className="ow-preview-download"><PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer></section></div>, document.body)}
   </div>;
 }
 

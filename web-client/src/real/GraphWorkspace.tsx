@@ -2,7 +2,7 @@ import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import { useRunProgress, useRunPrompts, useInputChanges } from "./use-run-progress";
 import { PromptEditor } from "../components/RunPanels";
 import { DocumentDialog } from "../components/DocumentDialog";
-import { LinkedFilePreview, PreviewNode, ProjectFilePreview, ResourceFilePreview } from "./PreviewNode";
+import { LinkedVideoPreview, LinkedFilePreview, PreviewNode, ProjectFilePreview, ResourceFilePreview } from "./PreviewNode";
 import { previewMode, type PreviewMode } from './preview-formats';
 import { ExecutionOutputList } from "./ExecutionOutputList";
 import { Toast } from './Toast';
@@ -257,7 +257,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [referenceId, setReferenceId] = useState<string>();
-  const [markdownLinkedFile, setMarkdownLinkedFile] = useState<{ name:string; mime:string; bytes:number; base64:string; scope:'project'|'run'; relativePath?:string }>();
+  const [markdownLinkedFile, setMarkdownLinkedFile] = useState<{ name:string; mime:string; bytes:number; base64?:string; contentPath?:string; scope:'project'|'run'; relativePath?:string }>();
   const [copyingMarkdownLinkedFile,setCopyingMarkdownLinkedFile] = useState(false);
   const markdownLinkRequest = useRef(0);
   const [externalLink, setExternalLink] = useState<string>();
@@ -585,9 +585,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const requestId = ++markdownLinkRequest.current;
       setMarkdownLinkedFile(undefined);
       setCopyingMarkdownLinkedFile(false);
-      void (props.serviceRequest ?? props.request)<{name:string;mime:string;bytes:number;base64:string;scope:'project'|'run';relativePath?:string}>(
+      void (props.serviceRequest ?? props.request)<{name:string;mime:string;bytes:number;base64?:string;contentPath?:string;scope:'project'|'run';relativePath?:string}>(
         '/v1/projects/' + encodeURIComponent(g.projectId) + '/files/link-preview',
-        {path:target.path},
+        {path:target.path,streamVideo:true},
         'POST',
       ).then(file => { if (requestId === markdownLinkRequest.current) setMarkdownLinkedFile(file); })
         .catch(() => { if (requestId === markdownLinkRequest.current) props.onError(new Error(t('Unable to view this file.'))); });
@@ -825,7 +825,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     );
     if (!status || status.state !== 'available') throw Error(status?.state === 'missing' ? t('The project file no longer exists and cannot be added to the asset library.') : t('The project file is currently unavailable and cannot be added to the asset library.'));
     if (status.bytes === null || !Number.isSafeInteger(status.bytes) || status.bytes < 0) throw Error(t('Unable to determine the project file size, so it cannot be added to the asset library.'));
-    if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The file exceeds 50 MiB and cannot be added to the asset library.'));
+    if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The file exceeds 300 MB and cannot be added to the asset library.'));
     const title = String(value.title ?? relativePath.split('/').at(-1) ?? t('Project file'));
     const key = JSON.stringify([g.projectId, relativePath, status.changeToken, title]);
     const idempotencyKey = projectFileSaveKeys.current.get(key) ?? randomId();
@@ -858,7 +858,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     );
     if (!status || status.state !== 'available') throw Error(status?.state === 'missing' ? t('The project file no longer exists and cannot be copied as a resource node.') : t('The project file is currently unavailable and cannot be copied as a resource node.'));
     if (status.bytes === null || !Number.isSafeInteger(status.bytes) || status.bytes < 0) throw Error(t('Unable to determine the project file size, so it cannot be copied as a resource node.'));
-    if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The file exceeds 50 MiB and cannot be copied as a resource node.'));
+    if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The file exceeds 300 MB and cannot be copied as a resource node.'));
     if (reference.type === 'text' && status.bytes > 8 * 1024 * 1024) throw Error(t('The text file exceeds the node content limit of 8 MiB.'));
     const signature = JSON.stringify([current.serviceId,current.projectId,current.graphId,nodeId,reference.contentVersion,relativePath,status.changeToken,title,mime]);
     let job = projectFileCopyJobs.current.get(nodeId);
@@ -1099,7 +1099,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     try {
       const detectedType = importedNodeType(job.file.name, fileMime(job.file));
       const intended = job.replacement?.type === 'file' ? 'file' : detectedType;
-      if (intended === 'file' && job.file.size > FILE_NODE_MAX_BYTES) throw Error(t('File nodes support up to 50 MiB.'));
+      if (job.file.size > FILE_NODE_MAX_BYTES) throw Error(t('File nodes support up to 300 MB.'));
       if (intended === 'text' && job.file.size > 8 * 1024 * 1024) throw Error(t('The text file exceeds the node content limit of 8 MiB.'));
       if (intended === 'text') job.text ??= await job.file.text();
       // Unknown browser MIME types are stored as octet-stream, never trusted as active content.
@@ -1187,12 +1187,23 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (!linked || copyingMarkdownLinkedFile) return;
     if (readOnly) throw Error(t('The current Work Graph is read-only.'));
     if (!Number.isSafeInteger(linked.bytes) || linked.bytes < 0) throw Error(t('Unable to determine the file size, so it cannot be copied to the Work Graph.'));
-    if (linked.bytes > FILE_NODE_MAX_BYTES) throw Error(t('Files larger than 50 MiB cannot be copied to the Work Graph.'));
+    if (linked.bytes > FILE_NODE_MAX_BYTES) throw Error(t('Files larger than 300 MB cannot be copied as resource nodes.'));
     setCopyingMarkdownLinkedFile(true);
     try {
-      const bytes = Uint8Array.from(atob(linked.base64), character => character.charCodeAt(0));
-      if (bytes.byteLength > FILE_NODE_MAX_BYTES) throw Error(t('Files larger than 50 MiB cannot be copied to the Work Graph.'));
-      const file = new File([bytes], linked.name, {type:linked.mime || 'application/octet-stream'});
+      const parts: BlobPart[] = [];
+      if (linked.contentPath) {
+        for (let start = 0; start < linked.bytes; start += 1024 * 1024) {
+          const end = Math.min(start + 1024 * 1024 - 1, linked.bytes - 1);
+          const result = await (props.serviceRequest ?? props.request)<{blob:Blob;start:number;end:number;total:number}>(linked.contentPath,undefined,'RANGE',{range:{start,end}});
+          if (result.start !== start || result.end !== end || result.total !== linked.bytes || result.blob.size !== end-start+1) throw Error(t('The video changed while downloading.'));
+          parts.push(result.blob);
+        }
+      } else {
+        const bytes = Uint8Array.from(atob(linked.base64 ?? ''), character => character.charCodeAt(0));
+        if (bytes.byteLength !== linked.bytes) throw Error(t('Unable to view this file.'));
+        parts.push(bytes);
+      }
+      const file = new File(parts, linked.name, {type:linked.mime || 'application/octet-stream'});
       const nodeType = importedNodeType(file.name,fileMime(file));
       const position = canvas.current?.getPlacementPosition(defaultNodeSize(nodeType)) ?? {x:100,y:100};
       await upload([file],position);
@@ -1453,7 +1464,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (wire.schemaVersion === 1 && n.type === 'file') {
       const sizeKey = [wire.contentVersion, c.resourceId, c.resourceVersion].join(':');
       const bytes = typeof c.bytes === 'number' && Number.isSafeInteger(c.bytes) && c.bytes >= 0 ? c.bytes : legacyFileSizes[n.id]?.key === sizeKey ? legacyFileSizes[n.id]?.bytes : undefined;
-      return <div className="node-content ow-file-node"><FileIcon size={32} aria-hidden="true"/>{typeof c.resourceId === 'string' ? <div className="ow-file-metadata"><strong title={n.title}>{n.title}</strong>{bytes !== undefined && <span className="ow-file-size">{formatFileSize(bytes)}</span>}</div> : <><span>{t('No file uploaded yet (maximum 50 MiB)')}</span><button type="button" className="ow-file-upload-button" disabled={readOnly || n.readonly || locked(n.id)} onClick={() => { replacement.current = { nodeId: n.id, type: 'file', version: wire.contentVersion, content: wire.content }; file.current?.click(); }}><Upload size={16} aria-hidden="true"/>{t('Upload file')}</button></>}</div>;
+      return <div className="node-content ow-file-node"><FileIcon size={32} aria-hidden="true"/>{typeof c.resourceId === 'string' ? <div className="ow-file-metadata"><strong title={n.title}>{n.title}</strong>{bytes !== undefined && <span className="ow-file-size">{formatFileSize(bytes)}</span>}</div> : <><span>{t('No file uploaded yet (maximum 300 MB)')}</span><button type="button" className="ow-file-upload-button" disabled={readOnly || n.readonly || locked(n.id)} onClick={() => { replacement.current = { nodeId: n.id, type: 'file', version: wire.contentVersion, content: wire.content }; file.current?.click(); }}><Upload size={16} aria-hidden="true"/>{t('Upload file')}</button></>}</div>;
     }
     if (wire.schemaVersion === 1 && !c.resourceId && n.type === "execution") {
       const run = graphRuns.filter(r => r.nodeId === n.id).at(-1);
@@ -1804,7 +1815,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 e.currentTarget.blur();
               }}/>
             {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Replace media" title="Replace media" disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
-            {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file'} title={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file (maximum 50 MiB)'} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
+            {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file'} title={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file (maximum 300 MB)'} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
             {!['file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Edit node" title="Edit node" onClick={() => n.type === "document" ? openDocument(n.id) : setDetailsOpen(true)}><Settings2 size={16}/></button>}
             {canCopyText && <button className="icon-button" aria-label="Create editable text copy" title="Create editable text copy" disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16}/></button>}
             {n.type === "execution" && <button className="icon-button" aria-label="Copy execution task" title="Copy execution task (prompt only)" disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? "") }))}><Copy size={16}/></button>}
@@ -1919,10 +1930,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           canDropData={(data, targetNodeId) => !readOnly && (canDropProjectFile(data, g.projectId) ? !targetNodeId || isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) : !targetNodeId && props.assetsAvailable !== false && canDropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }))}
           onDropData={(data, position, targetNodeId) => canDropProjectFile(data, g.projectId) ? dropProjectFile(data, g.projectId, position, targetNodeId && isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) ? targetNodeId : undefined, (id, path) => act(() => associateProjectFile(id, path))) : dropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }, position)}
           renderPanel={panelNode => node && panelNode.id === node.id && selected.length === 1 && detailsOpen && !isProjectFileReference(node.content) && ["text", "image", "execution"].includes(node.type) && node.schemaVersion === 1 ? (
-            <PromptEditor inputChanged={inputChanged} value={String(content.prompt ?? "")} disabled={promptDisabled} runDisabled={runDisabled}
+            <PromptEditor key={node.id} inputChanged={inputChanged} value={String(content.prompt ?? "")} disabled={promptDisabled} runDisabled={runDisabled}
               references={g.edges.filter(edge => edge.kind === "reference" && edge.targetId === node.id).map(edge => ({ id: edge.sourceId, title: work.nodes.find(n => n.id === edge.sourceId)?.title || "Reference node" }))}
               onOpenReference={setReferenceId} onClose={() => setDetailsOpen(false)} onRun={() => act(runNode)} onChange={value => edit("prompt", value)}
               mentionEnabled={props.online && props.projectActive}
+              skillEnabled={node.type === "execution"}
               mentionRequest={props.serviceRequest ?? props.request}
               mentionProjectId={g.projectId}
               onOpenProjectFile={item => item.kind === 'directory' ? props.onOpenProjectDirectory?.(item.relativePath) : setPromptProjectFile({ path:item.relativePath, name:item.name })}
@@ -1985,7 +1997,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <ProjectFilePreview request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={promptProjectFile.path} name={promptProjectFile.name} mime={fileMime({ name:promptProjectFile.name, type:'' })} download showName={false}/>
       </ReferenceDialog>}
       {markdownLinkedFile && <ReferenceDialog key={markdownLinkedFile.name + ':' + markdownLinkedFile.bytes} title={markdownLinkedFile.name} fitted onClose={() => setMarkdownLinkedFile(undefined)}>
-        <LinkedFilePreview base64={markdownLinkedFile.base64} name={markdownLinkedFile.name} mime={markdownLinkedFile.mime} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/>
+        {markdownLinkedFile.contentPath ? <LinkedVideoPreview request={props.serviceRequest ?? props.request} path={markdownLinkedFile.contentPath} bytes={markdownLinkedFile.bytes} name={markdownLinkedFile.name} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/> : <LinkedFilePreview base64={markdownLinkedFile.base64 ?? ''} name={markdownLinkedFile.name} mime={markdownLinkedFile.mime} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/>}
       </ReferenceDialog>}
       {externalLink && <ExternalLinkConfirmDialog url={externalLink} onClose={() => setExternalLink(undefined)} onOpen={() => { const url=externalLink; setExternalLink(undefined); window.open(url, '_blank', 'noopener,noreferrer'); }}/>}
 

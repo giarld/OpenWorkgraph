@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { WORKGRAPH_UPLOAD_MAX_BYTES } from '@openworkgraph/protocol';
 import { mkdir, open, realpath, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { constants, lstatSync, realpathSync } from 'node:fs';
@@ -51,7 +52,7 @@ export class BlobStore {
  readonly root: string; readonly maxBytes: number;
  private readonly prepared = new WeakSet<object>();
  constructor(root: string, options: {maxBytes?: number} = {}) {
-  this.root=blobRoot(root); this.maxBytes=options.maxBytes ?? 64*1024*1024;
+  this.root=blobRoot(root); this.maxBytes=options.maxBytes ?? WORKGRAPH_UPLOAD_MAX_BYTES;
   if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes<1) throw new Error('Invalid maximum upload size');
  }
  private async directory(kind: 'objects'|'chunks'): Promise<string> {

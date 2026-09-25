@@ -8,6 +8,7 @@ import {
   Folder,
   History,
   ListTodo,
+  Sparkles,
   Square,
   X,
 } from "lucide-react";
@@ -20,11 +21,11 @@ import type {
 } from "../domain/types";
 import { isTerminal } from "../domain/types";
 import { canDropProjectFile, takeProjectFileDrag } from "../real/project-file-drag";
-import { textareaCaretTop } from "./textarea-caret";
+import { PromptTextInput, type PromptTextInputHandle } from "./PromptTextInput";
 import {
   findMentionQuery,
-  extractProjectFileMarkdownLinks,
   insertProjectFileMarkdownLink,
+  insertSkillMention,
   type ProjectFileMentionCandidate,
 } from "../real/project-file-mentions";
 import { useI18n } from "../i18n/I18nProvider";
@@ -80,7 +81,7 @@ export function PromptPanel({
       (service) => service.id === node.serviceId && service.connected,
     );
   const busy = !!run && !isTerminal(run.status);
-  return <PromptEditor
+  return <PromptEditor key={node.id}
     ariaLabel={t("Execution prompt")} value={node.prompt} disabled={locked || !connected}
     runDisabled={locked || busy || !connected || !node.prompt.trim()}
     references={refs.map(ref => ({ id: ref.nodeId, title: ref.title }))}
@@ -93,10 +94,12 @@ export function PromptPanel({
   />;
 }
 type MentionRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
+type SkillCandidate = { name: string; description: string; kind: "skill" };
+type MentionCandidate = ProjectFileMentionCandidate | SkillCandidate;
 type MentionState = {
   start: number;
   query: string;
-  items: ProjectFileMentionCandidate[];
+  items: MentionCandidate[];
   active: number;
   loading: boolean;
 };
@@ -105,18 +108,19 @@ const MENTION_DEBOUNCE_MS = 120;
 /** Shared phase-one editing surface. Storage and execution stay in the caller. */
 export function PromptEditor({ value, disabled, runDisabled, references, onOpenReference, onClose, onRun, onChange,
   ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, children,
-  mentionRequest, mentionProjectId, mentionEnabled = false, onOpenProjectFile }: {
+  mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, onOpenProjectFile }: {
   value: string; disabled: boolean; runDisabled: boolean;
   references: { id: string; title: string }[];
   onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string): void;
   ariaLabel?: string; placeholder?: string; status?: string; runHint?: string; runLabel?: string; controls?: ReactNode; inputChanged?: boolean; children?: ReactNode;
-  mentionRequest?: MentionRequest; mentionProjectId?: string; mentionEnabled?: boolean; onOpenProjectFile?: (item: ProjectFileMentionCandidate) => void;
+  mentionRequest?: MentionRequest; mentionProjectId?: string; mentionEnabled?: boolean; skillEnabled?: boolean; onOpenProjectFile?: (item: ProjectFileMentionCandidate) => void;
 }) {
   const { t } = useI18n();
   const resolvedAriaLabel = ariaLabel ?? t("Prompt");
   const resolvedRunLabel = runLabel ?? t("Run");
   const visibleStatus = status && !status.startsWith(t("In progress")) ? status : "";
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<PromptTextInputHandle>(null);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
   const composing = useRef(false);
   const mentionEpoch = useRef(0);
   const mentionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -124,19 +128,31 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionTop, setMentionTop] = useState(0);
   const updateMentionPosition = () => {
-    if (textareaRef.current) setMentionTop(textareaCaretTop(textareaRef.current) - 6);
+    if (inputRef.current) setMentionTop(inputRef.current.caretTop() - 6);
   };
   useLayoutEffect(() => {
-    if (!mention || !textareaRef.current) return;
+    if (!mention || !inputRef.current) return;
     updateMentionPosition();
     const observer = new ResizeObserver(updateMentionPosition);
-    observer.observe(textareaRef.current);
+    observer.observe(inputRef.current.element!);
     return () => observer.disconnect();
   }, [mention, value]);
-  const projectLinks = extractProjectFileMarkdownLinks(value);
   useLayoutEffect(() => {
-    if (pendingCaret.current !== undefined && textareaRef.current) {
-      textareaRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
+    const menu = mentionMenuRef.current;
+    if (!menu || !mention?.items.length) return;
+    if (mention.active === 0) { menu.scrollTop = 0; return; }
+    const option = menu.querySelectorAll<HTMLElement>('[role="option"]')[mention.active];
+    if (!option) return;
+    const menuRect = menu.getBoundingClientRect();
+    const optionRect = option.getBoundingClientRect();
+    const top = menuRect.top + menu.clientTop;
+    const bottom = top + menu.clientHeight;
+    if (optionRect.top < top) menu.scrollTop -= top - optionRect.top;
+    else if (optionRect.bottom > bottom) menu.scrollTop += optionRect.bottom - bottom;
+  }, [mention?.active, mention?.items]);
+  useLayoutEffect(() => {
+    if (pendingCaret.current !== undefined && inputRef.current) {
+      inputRef.current.setSelectionRange(pendingCaret.current, pendingCaret.current);
       pendingCaret.current = undefined;
     }
   }, [value]);
@@ -149,17 +165,14 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const runMentionSearch = (start: number, query: string) => {
     const epoch = ++mentionEpoch.current;
     const trimmed = query.trim();
-    if (!trimmed) {
-      setMention(current => current && current.start === start ? { ...current, items: [], loading: false } : current);
-      return;
-    }
-    const path = "/v1/projects/" + encodeURIComponent(mentionProjectId ?? "") + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) });
-    void mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(path).then(result => {
+    const base = "/v1/projects/" + encodeURIComponent(mentionProjectId ?? "");
+    const files = trimmed ? mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(base + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) })) : Promise.resolve({ items: [] });
+    const skills = skillEnabled ? mentionRequest!<{ items: { name: string; description: string }[] }>(base + "/skills/search?" + new URLSearchParams({ query: trimmed })) : Promise.resolve({ items: [] });
+    void Promise.allSettled([files, skills]).then(results => {
       if (epoch !== mentionEpoch.current) return;
-      setMention(current => current && current.start === start ? { ...current, items: (result.items ?? []).filter(item => item.kind === "file" || item.kind === "directory"), loading: false } : current);
-    }).catch(() => {
-      if (epoch !== mentionEpoch.current) return;
-      setMention(current => current && current.start === start ? { ...current, items: [], loading: false } : current);
+      const fileItems = results[0].status === "fulfilled" ? (results[0].value.items ?? []).filter(item => item.kind === "file" || item.kind === "directory") : [];
+      const skillItems: SkillCandidate[] = results[1].status === "fulfilled" ? (results[1].value.items ?? []).map(item => ({ ...item, kind: "skill" })) : [];
+      setMention(current => current && current.start === start ? { ...current, items: [...fileItems, ...skillItems], active: 0, loading: false } : current);
     });
   };
   const updateMention = (text: string, cursor: number) => {
@@ -173,21 +186,21 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     setMention(current => ({ start: found.start, query: found.query, items: current && current.start === found.start ? current.items : [], active: 0, loading: true }));
     mentionTimer.current = setTimeout(() => runMentionSearch(found.start, found.query), MENTION_DEBOUNCE_MS);
   };
-  const insertMention = (item: ProjectFileMentionCandidate) => {
-    const textarea = textareaRef.current;
-    if (!textarea || !mention) return;
-    const text = textarea.value;
-    const cursor = textarea.selectionStart ?? text.length;
-    const next = insertProjectFileMarkdownLink(text, mention.start, cursor, item);
+  const insertMention = (item: MentionCandidate) => {
+    const input = inputRef.current;
+    if (!input || !mention) return;
+    const text = input.value;
+    const cursor = input.selectionStart ?? text.length;
+    const next = item.kind === "skill" ? insertSkillMention(text, mention.start, cursor, item.name) : insertProjectFileMarkdownLink(text, mention.start, cursor, item);
     pendingCaret.current = next.caret;
     dismissMention();
     onChange(next.value);
   };
   const recheckMention = () => {
-    const textarea = textareaRef.current;
-    if (!textarea || !mention) return;
-    const cursor = textarea.selectionStart ?? textarea.value.length;
-    const found = findMentionQuery(textarea.value, cursor);
+    const input = inputRef.current;
+    if (!input || !mention) return;
+    const cursor = input.selectionStart ?? input.value.length;
+    const found = findMentionQuery(input.value, cursor);
     if (!found || found.start !== mention.start) dismissMention();
     else updateMentionPosition();
   };
@@ -197,7 +210,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
       <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
     </div>
     <div className="prompt-input">
-      <textarea ref={textareaRef} aria-label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled}
+      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} onOpenFile={onOpenProjectFile}
         onScroll={() => { if (mention) updateMentionPosition(); }}
         onDragOver={event => {
           if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
@@ -211,27 +224,26 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
           event.stopPropagation();
           const relativePath = takeProjectFileDrag(event.dataTransfer, mentionProjectId);
           if (!relativePath) return;
-          const textarea = event.currentTarget;
-          const start = textarea.selectionStart;
-          const end = textarea.selectionEnd;
-          const next = insertProjectFileMarkdownLink(textarea.value, start, end, { name: relativePath.split('/').pop()!, relativePath, kind: 'file' });
+          const input = inputRef.current!;
+          const start = input.selectionStart;
+          const end = input.selectionEnd;
+          const next = insertProjectFileMarkdownLink(input.value, start, end, { name: relativePath.split('/').pop()!, relativePath, kind: 'file' });
           pendingCaret.current = next.caret;
           dismissMention();
-          textarea.focus();
+          input.focus();
           onChange(next.value);
         }}
         onCompositionStart={() => { composing.current = true; dismissMention(); }}
-        onCompositionEnd={event => {
+        onCompositionEnd={(text, cursor) => {
           composing.current = false;
-          updateMention(event.currentTarget.value, event.currentTarget.selectionStart);
+          updateMention(text, cursor);
         }}
-        onChange={e => {
-          const text = e.target.value;
+        onChange={(text, cursor) => {
           onChange(text);
-          if (composing.current || (e.nativeEvent as InputEvent).isComposing) { dismissMention(); return; }
-          updateMention(text, e.target.selectionStart ?? text.length);
+          if (composing.current) { dismissMention(); return; }
+          updateMention(text, cursor);
         }}
-        onSelect={recheckMention} onKeyUp={recheckMention}
+        onSelect={recheckMention}
         onBlur={() => { clearTimeout(mentionTimer.current); mentionEpoch.current++; setMention(null); }}
         onKeyDown={e => {
           const duringComposition = composing.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
@@ -257,23 +269,18 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
             e.preventDefault(); if (!disabled && !runDisabled) onRun();
           }
         }}/>
-      {!!projectLinks.length && <div className="prompt-project-links" aria-label={t("Project file links in the prompt")}>
-        {projectLinks.map(item => <button key={item.kind + ':' + item.relativePath} type="button" disabled={!onOpenProjectFile}
-          title={item.relativePath} onClick={() => onOpenProjectFile?.(item)}>
-          {item.kind === 'directory' ? <Folder size={13}/> : <FileText size={13}/>}<span>{item.name}</span>
-        </button>)}
-      </div>}
-      {mention && <div className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t("Project file suggestions")}>
-        <div className="prompt-mention-heading">{t("Project files")}</div>
+      {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled ? "Prompt suggestions" : "Project file suggestions")}>
         {mention.loading && <div className="prompt-mention-empty">{t("Searching…")}</div>}
-        {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
-        {mention.items.map((item, index) => <button key={item.kind + ":" + item.relativePath} type="button" role="option" aria-selected={index === mention.active}
+        {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{skillEnabled ? t("No matching suggestions") : mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
+        {mention.items.map((item, index) => <div key={item.kind + ":" + (item.kind === "skill" ? item.name : item.relativePath)}>
+          {(index === 0 || mention.items[index - 1]?.kind === "skill" && item.kind !== "skill" || mention.items[index - 1]?.kind !== "skill" && item.kind === "skill") && <div className="prompt-mention-heading">{item.kind === "skill" ? t("Skills") : t("Project files")}</div>}
+          <button type="button" role="option" aria-selected={index === mention.active}
           className={"prompt-mention-item" + (index === mention.active ? " is-active" : "")}
           onMouseDown={e => e.preventDefault()} onClick={() => insertMention(item)} onMouseEnter={() => setMention(current => current ? { ...current, active: index } : current)}>
-          {item.kind === "directory" ? <Folder size={14}/> : <FileText size={14}/>}
+          {item.kind === "skill" ? <Sparkles size={14}/> : item.kind === "directory" ? <Folder size={14}/> : <FileText size={14}/>}
           <span className="prompt-mention-name">{item.name}</span>
-          <span className="prompt-mention-path">{item.relativePath}</span>
-        </button>)}
+          <span className="prompt-mention-path">{item.kind === "skill" ? item.description : item.relativePath}</span>
+        </button></div>)}
       </div>}
     </div>
     {inputChanged && <p className="input-changed">{t("Input updated · The next run will use the new content")}</p>}

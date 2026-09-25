@@ -337,7 +337,7 @@ export function RealApp() {
   );
   const request = useMemo<Request>(
     () =>
-      async <T,>(path: string, body?: unknown, method?: string, options?: { journal?: "session" | "memory" }): Promise<T> => {
+      async <T,>(path: string, body?: unknown, method?: string, options?: { journal?: "session" | "memory"; range?: { start: number; end: number } }): Promise<T> => {
         if (!transport) throw Error(t('Connect a Runtime first'));
         // These POST endpoints are read-only. Let previews and asset queries
         // recover while the authoritative snapshot is still reconciling.
@@ -619,7 +619,7 @@ export function RealApp() {
         const resource = created.resource;
         const importedText = nodeType === 'text' ? await canvasRequest<{state:string;text:string|null}>(graphPath(graph.projectId,graph.graphId) + '/resources/' + encodeURIComponent(resource.id) + '/versions/' + resource.current.version + '/representation') : null;
         if (nodeType === 'text' && (importedText?.state !== 'ready' || importedText.text === null || new TextEncoder().encode(importedText.text).length > 8 * 1024 * 1024)) throw Error(t('The text resource cannot be imported as a text node (maximum 8 MiB).'));
-        if (nodeType === 'file' && resource.current.bytes > FILE_NODE_MAX_BYTES) throw Error(t('File nodes support up to 50 MiB.'));
+        if (nodeType === 'file' && resource.current.bytes > FILE_NODE_MAX_BYTES) throw Error(t('File nodes support up to 300 MB.'));
         await update({ title: resource.name, text: importedText?.text ?? '', prompt: '', resourceId: resource.id, resourceVersion: resource.current.version, mime: resource.current.mime, ...(nodeType === 'file' ? { bytes: resource.current.bytes } : {}) });
         completed = true;
       },
@@ -786,7 +786,7 @@ export function RealApp() {
       guard();
       if (!status || status.state !== 'available') throw Error(status?.state === 'missing' ? t('The referenced file no longer exists. Work Graph export failed.') : t('The referenced file is currently unavailable. Work Graph export failed.'));
       if (status.bytes === null || !Number.isSafeInteger(status.bytes) || status.bytes < 0) throw Error(t('The referenced file size could not be verified. Work Graph export failed.'));
-      if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The referenced file exceeds 50 MiB. Work Graph export failed.'));
+      if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The referenced file exceeds 300 MB. Work Graph export failed.'));
       const name = status.name || source.relativePath.split('/').at(-1) || t('Project file');
       return {
         name,
@@ -795,6 +795,21 @@ export function RealApp() {
         read:async () => {
           guard();
           const query = new URLSearchParams({ path:source.relativePath, ...(status.changeToken ? { cacheKey:status.changeToken } : {}) });
+          if (status.bytes! > 50 * 1024 * 1024) {
+            const bytes = new Uint8Array(status.bytes!);
+            for (let start = 0; start < bytes.length; start += 4 * 1024 * 1024) {
+              guard();
+              const end = Math.min(start + 4 * 1024 * 1024, bytes.length) - 1;
+              const part = await request<import('../adapter/transport').RangeBlob>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/content?' + query, undefined, 'RANGE', {range:{start,end}});
+              guard();
+              if (part.start !== start || part.end !== end || part.total !== bytes.length || part.blob.size !== end - start + 1) throw Error(t('The referenced file changed during export. Try again.'));
+              bytes.set(new Uint8Array(await part.blob.arrayBuffer()), start);
+            }
+            const [after] = await request<Array<{state:string;bytes:number|null;changeToken:string|null}>>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/stat', {paths:[source.relativePath]});
+            guard();
+            if (after?.state !== 'available' || after.bytes !== status.bytes || after.changeToken !== status.changeToken) throw Error(t('The referenced file changed during export. Try again.'));
+            return bytes;
+          }
           const content = await request<{ path:string; bytes:number; base64:string }>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/content?' + query);
           guard();
           const bytes = Uint8Array.from(atob(content.base64), character => character.charCodeAt(0));
