@@ -12,6 +12,7 @@ import { publicProgressText } from './backend/adapter.js';
 import { sandboxMode } from './execution-settings.js';
 import { ProjectFiles } from './project-files.js';
 import { RunContexts, type RunLineage } from './run-context.js';
+import type { SkillSessions } from './skill-sessions.js';
 
 export function backendReply(interaction: Interaction, answer: Json): BackendReply {
   const payload = interaction.payload as unknown as BackendInteraction;
@@ -30,7 +31,7 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
 export class RuntimeBackend implements SchedulerBackend {
   private readonly contexts = new Map<string, BackendContext>();
   readonly runContexts: RunContexts;
-  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe()) { this.runContexts = new RunContexts(runs, dirs); }
+  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions) { this.runContexts = new RunContexts(runs, dirs); }
   private snapshot(snapshot: RuntimeSnapshot, context: BackendContext, expectedRunId: string): void {
     if (snapshot.runId !== expectedRunId) return;
     if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(expectedRunId)) return;
@@ -63,6 +64,10 @@ export class RuntimeBackend implements SchedulerBackend {
     let inputFiles: Awaited<ReturnType<typeof materializeInputs>>['files'];
     let upstreamContext: RunLineage | undefined;
     try {
+      if (snapshot.skills?.length) {
+        if (!this.skillSessions) throw new ServiceError('INPUT_BLOCKED', '冻结技能上下文不可用。');
+        await this.skillSessions.environment(snapshot.skills, true);
+      }
       if (runtime.details.kind === 'execution') upstreamContext = this.runContexts.lineage(run.id);
       const inspect = await this.probe.inspect([path]);
       if (inspect(path).canonicalPath !== path) throw new ServiceError('PROJECT_UNAVAILABLE', 'Project canonical path changed');
@@ -100,7 +105,7 @@ export class RuntimeBackend implements SchedulerBackend {
     }
     if (this.runs.runtime(run.id).epoch !== context.epoch) return;
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
-    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
+    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, skills: snapshot.skills ?? [], ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
       onSnapshot: value => this.snapshot(value, context, run.id),
       onInteraction: value => {
         if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(run.id)) return;
@@ -112,6 +117,8 @@ export class RuntimeBackend implements SchedulerBackend {
       },
       queryHistory: async query => this.queryHistory(run.id, query),
       readRunContext: async request => this.runContexts.read(run.id, request),
+      ...(this.skillSessions ? { skillEnvironment: async (skillId: string) => this.skillSessions!.forSkill(snapshot.skills ?? [], skillId) } : {}),
+      ...(this.skillSessions ? { withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.skillSessions!.withEnvironment(snapshot.skills ?? [], skillId, dispatch) } : {}),
     });
     this.snapshot(result, context, run.id);
   }

@@ -1,3 +1,4 @@
+import { syncSkillReferences, validSkillReferences } from "./project-file-mentions";
 import { projectOperations } from './optimistic-operations';
 import { randomId } from "../adapter/random";
 import type { GraphSnapshot, GraphOperation, Json, Request, Run } from "./contracts";
@@ -157,6 +158,10 @@ export class GraphEditor {
     const prior = this.state.drafts.find((d) => d.nodeId === nodeId);
     if (this.state.drafts.some(d => d.nodeId === nodeId && ["conflict", "recovery"].includes(d.state)))
       throw Error(translate("Resolve the content conflict or recovery draft first."));
+    const previous = prior?.content ?? node.content;
+    if (previous && typeof previous === 'object' && !Array.isArray(previous) && content && typeof content === 'object' && !Array.isArray(content) && typeof previous.prompt === 'string' && typeof content.prompt === 'string' && previous.prompt !== content.prompt && previous.skillReferences !== undefined && JSON.stringify(previous.skillReferences) === JSON.stringify(content.skillReferences)) {
+      content = { ...content, skillReferences: syncSkillReferences(previous.prompt, content.prompt, validSkillReferences(previous.prompt, previous.skillReferences)).map(ref => ({ ...ref })) };
+    }
     const draft: Draft = {
       draftId: this.writerId + ':' + randomId(),
       nodeId,

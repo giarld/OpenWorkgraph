@@ -1,19 +1,22 @@
+import type { SkillReference } from "../../../packages/protocol/src/skills";
+import { legacySkillMentions } from "../../../packages/protocol/src/skills";
 import { useLayoutEffect, useRef, useImperativeHandle, type Ref, type KeyboardEvent, type DragEvent } from 'react';
 import { extractReferenceMention } from '../real/reference-mentions';
-import { extractProjectFileMarkdownLinks, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
+import { extractProjectFileMarkdownLinks, syncSkillReferences, validSkillReferences, type PromptEdit, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
 
 export interface PromptTextInputHandle {
   value: string;
   selectionStart: number;
   selectionEnd: number;
   setSelectionRange(start: number, end: number): void;
+  insertText(text: string): void;
   focus(): void;
   element: HTMLDivElement | null;
   caretTop(): number;
 }
 
 type Token = { start: number; end: number; raw: string; name: string; kind: string; path?: string; id?: string };
-function tokens(value: string, skills: boolean): Token[] {
+function tokens(value: string, skills: boolean, refs: readonly SkillReference[], skillNames: readonly string[]): Token[] {
   const result: Token[] = [];
   const pattern = /\[((?:\\.|[^\]])*)\]\((?:<((?:\\.|[^>\r\n])*)>|([^)\s]+))\)/g;
   for (const match of value.matchAll(pattern)) {
@@ -22,9 +25,11 @@ function tokens(value: string, skills: boolean): Token[] {
     const item = extractProjectFileMarkdownLinks(match[0])[0];
     if (item) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...item, path: item.relativePath });
   }
-  if (skills) for (const match of value.matchAll(/(?:^|\s)(\$[a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)*)(?=$|\s|[.,!?;，。！？；])/g)) {
-    const start = match.index! + match[0].length - match[1].length;
-    if (!result.some(token => start >= token.start && start < token.end)) result.push({ start, end: start + match[1].length, raw: match[1], name: match[1].slice(1), kind: 'skill' });
+  if (skills) for (const ref of validSkillReferences(value, refs)) {
+    if (!result.some(token => ref.start < token.end && ref.end > token.start)) result.push({ start: ref.start, end: ref.end, raw: value.slice(ref.start, ref.end), name: ref.name, kind: 'skill' });
+  }
+  if (skills) for (const { name, start, end } of legacySkillMentions(value, skillNames)) {
+    if ((start === 0 || /\s/.test(value[start - 1])) && (end === value.length || /[\s.,!?;，。！？；]/.test(value[end])) && !result.some(token => start < token.end && end > token.start)) result.push({ start, end, raw: value.slice(start, end), name, kind: 'skill' });
   }
   return result.sort((a, b) => a.start - b.start);
 }
@@ -48,6 +53,53 @@ function selection(root: HTMLElement): [number, number] {
   const range = current.getRangeAt(0);
   return [offset(range.startContainer, range.startOffset), offset(range.endContainer, range.endOffset)];
 }
+function caretRect(root: HTMLElement, node: Node, offset: number): DOMRect | undefined {
+  const range = document.createRange();
+  range.setStart(node, offset); range.collapse(true);
+  const rect = Array.from(range.getClientRects()).find(rect => rect.height > 0);
+  if (rect) return rect;
+  // Empty lines and positions beside atomic mentions may have no Range rect.
+  // Measure a marker in a clone so the live DOM, selection and IME stay intact.
+  const path: number[] = [];
+  for (let child = node; child !== root; child = child.parentNode!) {
+    path.unshift(Array.prototype.indexOf.call(child.parentNode!.childNodes, child));
+  }
+  const mirror = root.cloneNode(true) as HTMLElement;
+  mirror.removeAttribute('id'); mirror.setAttribute('aria-hidden', 'true');
+  mirror.contentEditable = 'false'; mirror.tabIndex = -1;
+  Object.assign(mirror.style, {
+    position: 'absolute', visibility: 'hidden', pointerEvents: 'none',
+    left: `${root.offsetLeft}px`, top: `${root.offsetTop}px`,
+    width: `${root.offsetWidth}px`, height: `${root.offsetHeight}px`, margin: '0',
+  });
+  let target: Node = mirror;
+  for (const index of path) target = target.childNodes[index];
+  range.setStart(target, offset); range.collapse(true);
+  const marker = document.createElement('span'); marker.textContent = '\u200b';
+  range.insertNode(marker);
+  root.parentElement!.append(mirror);
+  mirror.scrollTop = root.scrollTop;
+  const measured = marker.getBoundingClientRect();
+  // Translate from the mirror's position, including ancestor transforms.
+  const mirrorBounds = mirror.getBoundingClientRect();
+  const bounds = root.getBoundingClientRect();
+  const result = new DOMRect(measured.x + bounds.x - mirrorBounds.x, measured.y + bounds.y - mirrorBounds.y, measured.width, measured.height);
+  mirror.remove();
+  return result;
+}
+function revealCaret(root: HTMLElement) {
+  const current = window.getSelection();
+  if (!current?.focusNode || !root.contains(current.focusNode)) return;
+  const rect = caretRect(root, current.focusNode, current.focusOffset);
+  const bounds = root.getBoundingClientRect();
+  const scale = bounds.height / root.offsetHeight;
+  if (!rect || !scale) return;
+  const style = getComputedStyle(root);
+  const top = bounds.top + (root.clientTop + parseFloat(style.paddingTop)) * scale;
+  const bottom = bounds.top + (root.clientTop + root.clientHeight - parseFloat(style.paddingBottom)) * scale;
+  if (rect.bottom > bottom) root.scrollTop += (rect.bottom - bottom) / scale;
+  else if (rect.top < top) root.scrollTop -= (top - rect.top) / scale;
+}
 function select(root: HTMLElement, start: number, end: number) {
   const point = (position: number): [Node, number] => {
     let remaining = position;
@@ -63,17 +115,16 @@ function select(root: HTMLElement, start: number, end: number) {
   };
   const range = document.createRange(); range.setStart(...point(start)); range.setEnd(...point(end));
   window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
-  const rect = range.getClientRects()[0];
-  const bounds = root.getBoundingClientRect();
-  if (rect && rect.bottom > bounds.bottom) root.scrollTop += rect.bottom - bounds.bottom;
-  else if (rect && rect.top < bounds.top) root.scrollTop -= bounds.top - rect.top;
+  revealCaret(root);
 }
-function render(root: HTMLElement, value: string, skills: boolean, onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void) {
+function render(root: HTMLElement, value: string, skills: boolean, skillReferences: SkillReference[], skillNames: readonly string[], onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void) {
   const fragment = document.createDocumentFragment(); let cursor = 0;
-  for (const token of tokens(value, skills)) {
+  for (const token of tokens(value, skills, skillReferences, skillNames)) {
     fragment.append(document.createTextNode(value.slice(cursor, token.start)));
     const chip = document.createElement('span'); chip.contentEditable = 'false'; chip.className = 'prompt-mention-token';
-    chip.dataset.mention = token.raw; chip.dataset.kind = token.kind; chip.title = token.path ?? token.name; chip.setAttribute('aria-label', token.name);
+    const reference = skillReferences.find(ref => ref.start === token.start && ref.end === token.end);
+    if (reference) { chip.dataset.skillId = reference.skillId; chip.dataset.skillSource = reference.source; }
+    chip.dataset.mention = token.raw; chip.dataset.kind = token.kind; chip.title = reference ? token.name + ' · ' + (reference.source === 'openworkgraph' ? 'OpenWorkgraph' : 'Codex') : token.path ?? token.name; chip.setAttribute('aria-label', token.name);
     if ((token.path && onOpenFile) || (token.id && onOpenReference)) {
       chip.setAttribute('role', 'button'); chip.tabIndex = 0;
       const open = () => token.id ? onOpenReference?.(token.id) : onOpenFile?.({ name: token.name, relativePath: token.path!, kind: token.kind as 'file' | 'directory' });
@@ -95,18 +146,22 @@ function render(root: HTMLElement, value: string, skills: boolean, onOpenFile?: 
 }
 
 /** DOM mentions are atomic; persisted prompts remain Markdown and Codex skill text. */
-export function PromptTextInput({ ref, value, disabled, skillEnabled, label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile, onOpenReference }: {
+export function PromptTextInput({ ref, value, disabled, skillEnabled, skillReferences = [], skillNames = [], label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile, onOpenReference }: {
   onOpenReference?: (id: string) => void;
   onOpenFile?: (item: ProjectFileMentionCandidate) => void;
   ref: Ref<PromptTextInputHandle>; value: string; disabled: boolean; skillEnabled: boolean; label: string; placeholder?: string;
-  onChange(value: string, cursor: number): void; onSelect(): void; onScroll(): void; onBlur(): void;
+  skillReferences?: SkillReference[];
+  skillNames?: readonly string[];
+  onChange(value: string, cursor: number, skillReferences: SkillReference[]): void; onSelect(): void; onScroll(): void; onBlur(): void;
   onCompositionStart(): void; onCompositionEnd(value: string, cursor: number): void;
   onKeyDown(event: KeyboardEvent<HTMLDivElement>): void;
   onDragOver(event: DragEvent<HTMLDivElement>): void; onDrop(event: DragEvent<HTMLDivElement>): void;
 }) {
   const root = useRef<HTMLDivElement>(null); const composing = useRef(false);
-  const history = useRef<{ value: string; caret: number }[]>([]); const future = useRef<{ value: string; caret: number }[]>([]);
+  const history = useRef<{ value: string; caret: number; refs: SkillReference[] }[]>([]); const future = useRef<{ value: string; caret: number; refs: SkillReference[] }[]>([]);
   const current = useRef(value);
+  const currentRefs = useRef(validSkillReferences(value, skillReferences));
+  const nativeEdit = useRef<{ value: string; start: number; end: number } | null>(null);
   const openFileRef = useRef(onOpenFile);
   openFileRef.current = onOpenFile;
   const openFile = onOpenFile ? (item: ProjectFileMentionCandidate) => openFileRef.current?.(item) : undefined;
@@ -114,11 +169,12 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
   openReferenceRef.current = onOpenReference;
   const openReference = onOpenReference ? (id: string) => openReferenceRef.current?.(id) : undefined;
   const renderedConfig = useRef('');
-  const config = String(skillEnabled) + ':' + String(!!onOpenFile) + ':' + String(!!onOpenReference);
+  const config = String(skillEnabled) + ':' + String(!!onOpenFile) + ':' + String(!!onOpenReference) + ':' + JSON.stringify(skillReferences) + ':' + JSON.stringify(skillNames);
   const api: PromptTextInputHandle = {
     get element() { return root.current; }, get value() { return root.current ? textOf(root.current) : value; },
     get selectionStart() { return root.current ? selection(root.current)[0] : 0; }, get selectionEnd() { return root.current ? selection(root.current)[1] : 0; },
     focus() { root.current?.focus(); }, setSelectionRange(start, end) { if (root.current) select(root.current, start, end); },
+    insertText(text) { if (!disabled && !composing.current) replace(text); },
     caretTop() {
       const element = root.current!;
       const range = window.getSelection()?.rangeCount ? window.getSelection()!.getRangeAt(0).cloneRange() : null;
@@ -129,31 +185,39 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
   useImperativeHandle(ref, () => api);
   useLayoutEffect(() => {
     const element = root.current!; if (composing.current) return;
-    if (current.current !== value) { history.current.push({ value: current.current, caret: api.selectionStart }); history.current = history.current.slice(-100); future.current = []; }
+    if (current.current !== value || JSON.stringify(currentRefs.current) !== JSON.stringify(validSkillReferences(value, skillReferences))) { history.current.push({ value: current.current, caret: api.selectionStart, refs: currentRefs.current }); history.current = history.current.slice(-100); future.current = []; }
     const caret = selection(element);
-    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, openFile, openReference); if (document.activeElement === element) select(element, ...caret); }
+    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, validSkillReferences(value, skillReferences), skillNames, openFile, openReference); if (document.activeElement === element) select(element, ...caret); }
     current.current = value;
+    currentRefs.current = validSkillReferences(value, skillReferences);
     renderedConfig.current = config;
   }, [value, config]);
-  const commit = (next: string, start: number, previousCaret = api.selectionStart) => {
-    if (!composing.current && next !== current.current) { history.current.push({ value: current.current, caret: previousCaret }); history.current = history.current.slice(-100); future.current = []; }
-    if (!composing.current) current.current = next;
-    if (!composing.current) { render(root.current!, next, skillEnabled, openFile, openReference); select(root.current!, start, start); }
-    onChange(next, start);
+  const commit = (next: string, start: number, previousCaret = api.selectionStart, edit?: PromptEdit, restoredRefs?: SkillReference[]) => {
+    const captured = nativeEdit.current;
+    if (!edit && captured?.value === current.current) edit = { start: captured.start, end: captured.end, text: next.slice(captured.start, next.length - (captured.value.length - captured.end)) };
+    nativeEdit.current = null;
+    const refs = restoredRefs ?? syncSkillReferences(current.current, next, currentRefs.current, edit);
+    if (!composing.current && (next !== current.current || JSON.stringify(refs) !== JSON.stringify(currentRefs.current))) { history.current.push({ value: current.current, caret: previousCaret, refs: currentRefs.current }); history.current = history.current.slice(-100); future.current = []; }
+    if (!composing.current) { current.current = next; currentRefs.current = refs; }
+    if (!composing.current) { render(root.current!, next, skillEnabled, refs, skillNames, openFile, openReference); select(root.current!, start, start); }
+    onChange(next, start, refs);
   };
-  const replace = (text: string, backward = false, forward = false) => {
+  const replace = (text: string, backward = false, forward = false, pastedRefs: SkillReference[] = []) => {
     const source = api.value; let [start, end] = selection(root.current!); const previousCaret = start;
     if (start === end) {
       if (backward) start = Math.max(0, start - (source.codePointAt(start - 2)! > 0xffff ? 2 : 1));
       if (forward) end = Math.min(source.length, end + (source.codePointAt(end)! > 0xffff ? 2 : 1));
     }
-    for (const token of tokens(source, skillEnabled)) if (start < token.end && end > token.start) { start = Math.min(start, token.start); end = Math.max(end, token.end); }
-    commit(source.slice(0, start) + text + source.slice(end), start + text.length, previousCaret);
+    for (const token of tokens(source, skillEnabled, currentRefs.current, skillNames)) if (start < token.end && end > token.start) { start = Math.min(start, token.start); end = Math.max(end, token.end); }
+    const next = source.slice(0, start) + text + source.slice(end);
+    const edit = { start, end, text };
+    const refs = validSkillReferences(next, [...syncSkillReferences(source, next, currentRefs.current, edit), ...pastedRefs.map(ref => ({ ...ref, start: ref.start + start, end: ref.end + start }))]);
+    commit(next, start + text.length, previousCaret, edit, refs);
   };
   const undo = (redo: boolean) => {
     const from = redo ? future.current : history.current; const to = redo ? history.current : future.current; const state = from.pop(); if (!state) return;
-    to.push({ value: api.value, caret: api.selectionStart }); current.current = state.value;
-    render(root.current!, state.value, skillEnabled, openFile, openReference); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret);
+    to.push({ value: api.value, caret: api.selectionStart, refs: currentRefs.current }); current.current = state.value; currentRefs.current = state.refs;
+    render(root.current!, state.value, skillEnabled, state.refs, skillNames, openFile, openReference); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret, state.refs);
   };
   return <div ref={root} className="prompt-text-input" role="textbox" aria-label={label} aria-placeholder={placeholder} aria-multiline="true" aria-disabled={disabled} data-placeholder={placeholder}
     contentEditable={!disabled} suppressContentEditableWarning tabIndex={disabled ? -1 : 0}
@@ -164,10 +228,13 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
     }}
     onCompositionStart={() => { composing.current = true; onCompositionStart(); }}
     onCompositionEnd={() => { composing.current = false; commit(api.value, api.selectionStart); onCompositionEnd(api.value, api.selectionStart); }}
-    onSelect={onSelect} onKeyUp={onSelect} onScroll={onScroll} onBlur={onBlur} onDragOver={onDragOver} onDrop={onDrop}
+    onSelect={onSelect} onKeyUp={() => { if (root.current && !composing.current) revealCaret(root.current); onSelect(); }} onScroll={onScroll} onBlur={onBlur} onDragOver={onDragOver} onDrop={onDrop}
     onBeforeInput={event => {
       if (disabled) { event.preventDefault(); return; }
-      const type = (event.nativeEvent as InputEvent).inputType; if (composing.current) return;
+      const type = (event.nativeEvent as InputEvent).inputType;
+      const [start, end] = selection(root.current!);
+      if (!nativeEdit.current) nativeEdit.current = { value: api.value, start, end };
+      if (composing.current) return;
       if (type === 'deleteContentBackward' || type === 'deleteContentForward') { event.preventDefault(); replace('', type === 'deleteContentBackward', type === 'deleteContentForward'); }
       if (type === 'historyUndo' || type === 'historyRedo') { event.preventDefault(); undo(type === 'historyRedo'); }
     }}
@@ -181,8 +248,18 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
         event.preventDefault(); replace('', event.key === 'Backspace', event.key === 'Delete');
       }
     }}
-    onPaste={event => { event.preventDefault(); if (!disabled) replace(event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')); }}
-    onCopy={event => { const [start, end] = selection(root.current!); if (start !== end) { event.preventDefault(); event.clipboardData.setData('text/plain', api.value.slice(start, end)); } }}
-    onCut={event => { const [start, end] = selection(root.current!); if (start !== end) { event.preventDefault(); event.clipboardData.setData('text/plain', api.value.slice(start, end)); if (!disabled) replace(''); } }}
+    onPaste={event => {
+      event.preventDefault(); if (disabled) return;
+      const text = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n');
+      let refs: SkillReference[] = [];
+      try { const payload = JSON.parse(event.clipboardData.getData('application/x-openworkgraph-prompt')); if (payload.value === text) refs = validSkillReferences(text, payload.skillReferences); } catch { /* Ordinary text paste. */ }
+      replace(text, false, false, refs);
+    }}
+    onCopy={event => { const [start, end] = selection(root.current!); if (start !== end) { event.preventDefault(); const text = api.value.slice(start, end);
+      event.clipboardData.setData('text/plain', text);
+      event.clipboardData.setData('application/x-openworkgraph-prompt', JSON.stringify({ value: text, skillReferences: currentRefs.current.filter(ref => ref.start >= start && ref.end <= end).map(ref => ({ ...ref, start: ref.start - start, end: ref.end - start })) })); } }}
+    onCut={event => { const [start, end] = selection(root.current!); if (start !== end) { event.preventDefault(); const text = api.value.slice(start, end);
+      event.clipboardData.setData('text/plain', text);
+      event.clipboardData.setData('application/x-openworkgraph-prompt', JSON.stringify({ value: text, skillReferences: currentRefs.current.filter(ref => ref.start >= start && ref.end <= end).map(ref => ({ ...ref, start: ref.start - start, end: ref.end - start })) })); if (!disabled) replace(''); } }}
   />;
 }

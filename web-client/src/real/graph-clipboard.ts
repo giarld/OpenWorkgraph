@@ -1,3 +1,4 @@
+import { validSkillReferences, portableSkillContent } from "./project-file-mentions";
 import { randomId } from "../adapter/random";
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
@@ -56,13 +57,16 @@ export function clipboardContent(
   if (node.schemaVersion !== 1 || !kinds.has(node.type))
     throw Error(translate("Structured copying is not supported for this node type or schema yet."));
   const raw = object(node.content);
+  const skillReferences = raw.skillReferences === undefined ? undefined : validSkillReferences(typeof raw.prompt === 'string' ? raw.prompt : '', raw.skillReferences);
+  if (skillReferences && (!Array.isArray(raw.skillReferences) || skillReferences.length !== raw.skillReferences.length)) throw Error(translate("Invalid skill references."));
+  const skillContent: Record<string, Json> = skillReferences ? { skillReferences: skillReferences.map(ref => ({ ...ref })) } : {};
   // Execution copies start fresh, including when reading an older clipboard.
   // Never carry run history, outputs, resource identities or model overrides.
   if (node.type === "execution") {
     if (raw.prompt === undefined) return {};
     if (typeof raw.prompt !== "string")
       throw Error(translate("Clipboard text fields must be strings."));
-    return { prompt: raw.prompt };
+    return { prompt: raw.prompt, ...skillContent };
   }
   // A generated text node may retain its immutable Markdown output. Clipboard
   // copies are editable text copies, so leave that graph-scoped resource behind.
@@ -83,10 +87,10 @@ export function clipboardContent(
   const allowed =
     node.type === "group"
       ? ["title"]
-      : ["title", "text", "prompt", "summary", "modelOverride"];
+      : ["title", "text", "prompt", "summary", "modelOverride", "skillReferences"];
   if (strict) fields(c, allowed);
   const result: Record<string, Json> = {};
-  for (const k of allowed.filter((k) => k !== "modelOverride")) {
+  for (const k of allowed.filter((k) => k !== "modelOverride" && k !== "skillReferences")) {
     if (c[k] === undefined) continue;
     if (typeof c[k] !== "string") throw Error(translate("Clipboard text fields must be strings."));
     result[k] = c[k];
@@ -110,7 +114,7 @@ export function clipboardContent(
       };
     }
   }
-  return result;
+  return { ...result, ...skillContent };
 }
 
 interface ClipboardNode {
@@ -176,7 +180,7 @@ export function contentWithResource(
   const c = object(node.content);
   const source = c.source === undefined ? undefined : object(c.source);
   if (source?.kind === 'project-file' || source?.kind === 'project-file-empty') {
-    if (strict) fields(c, ['title','text','prompt','summary','modelOverride','mime','bytes','source','observation']);
+    if (strict) fields(c, ['title','text','prompt','summary','modelOverride','skillReferences','mime','bytes','source','observation']);
     fields(source, source.kind === 'project-file' ? ['kind','serviceId','projectId','relativePath'] : ['kind','relativePath']);
     if (typeof source.relativePath !== 'string' || (source.kind === 'project-file' && (typeof source.serviceId !== 'string' || typeof source.projectId !== 'string'))) throw Error(translate("The project file reference clipboard is invalid."));
     const plain = { ...c }; delete plain.source; delete plain.observation; delete plain.mime; delete plain.bytes;
@@ -194,6 +198,7 @@ export function contentWithResource(
       "prompt",
       "summary",
       "modelOverride",
+      "skillReferences",
       "resourceId",
       "resourceVersion",
       "mime",
@@ -423,6 +428,7 @@ export function planNodePaste(
         ...(projectCopy.type === 'file' ? { bytes: projectCopy.created.resource.current.bytes } : {}),
       };
     } else if (source?.kind === 'project-file' && (!target || payload.source.serviceId !== target.serviceId || payload.source.projectId !== target.projectId || !validTrustedProjectSource(raw, payload, source))) content = emptyProjectFileContent(content);
+    if (!target || payload.source.serviceId !== target.serviceId) content = portableSkillContent(content);
     if (!projectCopy && typeof content.resourceId === "string") {
       const created = copies?.get(n.id);
       if (!created)

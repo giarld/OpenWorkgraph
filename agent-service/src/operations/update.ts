@@ -7,19 +7,36 @@ import { readInstance, requestInstance, startBackground, waitUntilStopped } from
 
 const PACKAGE_NAME = 'openworkgraph';
 
+async function npmPath(args: string[], spawnProcess: SpawnProcess): Promise<string> {
+  const invocation = process.platform === 'win32'
+    ? { command: process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe', args: ['/d', '/s', '/c', 'npm ' + args.join(' ')] }
+    : { command: 'npm', args };
+  return new Promise<string>((resolve, reject) => {
+    const child = spawnProcess(invocation.command, invocation.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+    let output = '';
+    child.stdout?.on('data', chunk => { if (output.length < 8192) output += chunk.toString('utf8'); });
+    child.once('error', reject);
+    child.once('close', code => code === 0 ? resolve(output.trim()) : reject(new Error('npm path query failed')));
+  });
+}
+
+/** Recognize the package actually running from npm exec/npx's cache, including custom cache roots. */
+export async function isNpxInstallation(cliPath: string, spawnProcess: SpawnProcess = spawn): Promise<boolean> {
+  try {
+    const cache = await npmPath(['config', 'get', 'cache'], spawnProcess);
+    if (!cache) return false;
+    const npxRoot = await realpath(join(cache, '_npx'));
+    const runningPath = await realpath(cliPath);
+    const inside = relative(npxRoot, runningPath).split(sep);
+    return inside.length === 5 && inside[0] !== '..' && inside[0] !== '' && !isAbsolute(inside[0]!)
+      && inside[1] === 'node_modules' && inside[2] === PACKAGE_NAME && inside[3] === 'dist' && inside[4] === 'cli.js';
+  } catch { return false; }
+}
+
 /** Compare the running package against npm's actual global package location. */
 export async function isGlobalNpmInstallation(cliPath: string, spawnProcess: SpawnProcess = spawn): Promise<boolean> {
-  const invocation = process.platform === 'win32'
-    ? { command: process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe', args: ['/d', '/s', '/c', 'npm root -g'] }
-    : { command: 'npm', args: ['root', '-g'] };
   try {
-    const root = await new Promise<string>((resolve, reject) => {
-      const child = spawnProcess(invocation.command, invocation.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
-      let output = '';
-      child.stdout?.on('data', chunk => { if (output.length < 8192) output += chunk.toString('utf8'); });
-      child.once('error', reject);
-      child.once('close', code => code === 0 ? resolve(output.trim()) : reject(new Error('npm root failed')));
-    });
+    const root = await npmPath(['root', '-g'], spawnProcess);
     if (!root) return false;
     const installedPath = join(root, PACKAGE_NAME);
     if ((await lstat(installedPath)).isSymbolicLink()) return false;

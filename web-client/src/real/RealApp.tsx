@@ -39,6 +39,7 @@ import { createWorkGraphArchive, readWorkGraphFile, workGraphArchiveFilename } f
 import { ManagementPanel } from "./ManagementPanel";
 import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePlacement } from "./ResourcesPanel";
 import { ProjectFilesPanel } from './ProjectFilesPanel';
+import { SkillsLibrary } from './SkillsLibrary';
 import { runsForDetail, RunsPanel } from "./RunsPanel";
 import { createRunNotifications } from "./notifications";
 import { RunNotifications } from "./RunNotifications";
@@ -47,6 +48,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import '../i18n/catalogs/app';
 import "./real.css";
 import { WelcomeDialog } from './WelcomeDialog';
+import { WelcomeCommand } from './WelcomeCommand';
 import webClientPackage from '../../package.json';
 interface ServiceData {
   generation: number;
@@ -83,19 +85,19 @@ export function isSnapshotSafeReadRequest(path: string, method?: string): boolea
   return /^\/v1\/projects\/[A-Za-z0-9_-]+\/assets\/(query|same-name)$/.test(path)
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/stat$/.test(path);
 }
-type LeftSidebarTab = 'canvas' | 'files' | 'assets';
+type LeftSidebarTab = 'canvas' | 'files' | 'assets' | 'skills';
 const LEFT_SIDEBAR_TAB_STORAGE_KEY = 'openworkgraph:left-sidebar-tab:v1';
 
 function readLeftSidebarTab(): LeftSidebarTab {
   try {
     const value = localStorage.getItem(LEFT_SIDEBAR_TAB_STORAGE_KEY);
-    if (value === 'canvas' || value === 'files' || value === 'assets') return value;
+    if (value === 'canvas' || value === 'files' || value === 'assets' || value === 'skills') return value;
   } catch { /* Unavailable preferences must not prevent startup. */ }
   return 'canvas';
 }
 
 export function RealApp() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [savedSelection] = useState(() => {
     try {
       const value = JSON.parse(localStorage.getItem('openworkgraph:selection:v1') ?? 'null');
@@ -989,10 +991,11 @@ export function RealApp() {
       />
       <div className="real-layout">
         <aside className={'real-sidebar left-sidebar' + (leftOpen && page === 'editor' ? '' : ' left-sidebar-collapsed')} aria-label={t('Work Graph sidebar')} aria-hidden={!leftOpen || page !== 'editor'} inert={!leftOpen || page !== 'editor'} style={{ width: leftOpen && page === 'editor' ? leftSidebarWidth ?? undefined : 0 }}>
-          <div className="sidebar-tabs">
+          <div className="sidebar-tabs has-skills">
             <button className={tab === "canvas" ? "active" : ""} onClick={() => setTab("canvas")}>{t('Work Graph')}</button>
-            <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{t('Project files')}</button>
             <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>{t('Asset library')}</button>
+            <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>{language === 'zh-CN' ? '技能库' : 'Skill library'}</button>
+            <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{t('Project files')}</button>
             <button className="icon-button sidebar-collapse" aria-label={t('Collapse sidebar')} onClick={() => setLeftOpen(false)}><PanelLeftClose size={18}/></button>
           </div>
           <div className="sidebar-brand">
@@ -1005,6 +1008,7 @@ export function RealApp() {
             <h1 className="visually-hidden">OpenWorkgraph</h1>
           </div>
           <div ref={setNodeSidebar} className={tab !== "canvas" ? "real-hidden" : "real-node-sidebar"}/>
+          {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''}/>}
           {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position) => { void placeProjectFile(path, position).catch(onError); }}/>}
                     {tab === "assets" && assetsAvailable &&
             (graph ? (
@@ -1468,6 +1472,12 @@ export function RealApp() {
                 {runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && <span className="runtime-upgrade-warning"><CircleAlert size={14} aria-hidden="true" />{t('Upgrade Workspace v{runtimeVersion} to v{clientVersion}', { runtimeVersion: c.info.version, clientVersion: webClientPackage.version })}</span>}
                 <small className="runtime-identity">ID · {c.serviceId}</small>
               </button>
+              {c.info.installation === 'npx' && runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && (
+                <div className="runtime-npx-upgrade">
+                  <p>{t('Run this command on the Workspace device to restart with the latest version. Restarting cancels active and queued tasks; finish your tasks first.')}</p>
+                  <WelcomeCommand command="npx openworkgraph@latest restart" label={t('Workspace upgrade command')} copyLabel={t('Copy Workspace upgrade command')} />
+                </div>
+              )}
               <div className="runtime-card-actions">
               {c.status === 'paired' && c.info.installation === 'npm-global' && runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && (
                 <button type="button" disabled={!!updatingRuntime} onClick={() => void updateRuntime(c)}>

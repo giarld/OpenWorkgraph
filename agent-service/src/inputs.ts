@@ -12,7 +12,7 @@ export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<Input
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
 export interface InputSource { edgeId: string; sourceNodeId: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
 export interface InputPreview { graphId: string; nodeId: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles: ProjectFileInput[]; sources: InputSource[]; issues: InputIssue[]; canSubmit: boolean; predecessorCount: number; totalBytes: number }
-export type BuildInputOptions = { expectedExecutionRevision?: number } & (
+export type BuildInputOptions = { expectedExecutionRevision?: number; skills?: import('@openworkgraph/protocol').FrozenSkill[] } & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute,{type:'codex'}> }
   | { imageRoute: FrozenApiImageRoute; model?: never }
 );
@@ -49,7 +49,7 @@ export class InputPreparation {
       payload={...base,imageRoute:structuredClone(route),inputMode};
     } else {
       if (!options.model || typeof options.model.model !== 'string' || !options.model.model.trim() || (options.model.reasoningEffort !== null && typeof options.model.reasoningEffort !== 'string')) throw new ServiceError('MODEL_UNAVAILABLE','A valid model selection is required');
-      payload={...base,model:{model:options.model.model,reasoningEffort:options.model.reasoningEffort},...(options.imageRoute?{imageRoute:options.imageRoute,inputMode}:{})};
+      payload={...base,model:{model:options.model.model,reasoningEffort:options.model.reasoningEffort},...(options.skills?.length?{skills:structuredClone(options.skills)}:{}),...(options.imageRoute?{imageRoute:options.imageRoute,inputMode}:{})};
     }
     // Include exact source revisions and edge provenance in the digest without sending ancestors to the model.
     const inputDigest = createHash('sha256').update(JSON.stringify({graphId,nodeId,...payload,sources:preview.sources})).digest('hex');

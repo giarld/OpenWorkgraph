@@ -98,6 +98,32 @@
 .welcome-image-models input { flex: 0 0 18px; max-width: 18px; width: 18px; height: 18px; }
 .welcome-image-models span { min-width: 0; overflow-wrap: anywhere; }
 .welcome-image-models code { display: block; margin-top: 4px; color: var(--welcome-muted); }
+/* Own the card layout even within the general .real-app form styles. */
+.welcome-skills-summary { margin: 2px 0 0; color: var(--welcome-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.welcome-skills-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.welcome-skill-card { min-width: 0; border: 1px solid var(--stroke); border-radius: 12px; background: var(--canvas); transition: border-color 150ms ease, background-color 150ms ease; }
+.welcome-skills-list .welcome-skill-choice { position: relative; display: flex; flex-direction: row; align-items: flex-start; gap: 14px; margin: 0; padding: 20px; min-height: 44px; }
+.welcome-skill-icon { display: grid; place-items: center; flex: 0 0 38px; height: 38px; border: 1px solid var(--stroke); border-radius: 10px; color: var(--welcome-muted); background: var(--panel); }
+.welcome-skill-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.welcome-skill-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-height: 22px; }
+.welcome-skill-heading strong { font-size: 14px; font-weight: 600; line-height: 1.5; letter-spacing: -.01em; }
+.welcome-skill-description { display: block; margin-top: 6px; color: var(--welcome-muted); font-size: 13px; line-height: 1.65; }
+.welcome-skill-config { display: flex; align-items: flex-start; gap: 6px; margin-top: 12px; color: var(--welcome-muted); font-size: 12px; line-height: 1.5; }
+.welcome-skill-config svg { flex-shrink: 0; margin-top: 2px; }
+.welcome-skills-list .welcome-agent-save-error { margin: 0; padding: 0 20px 16px; font-size: 13px; color: var(--danger, #d33); }
+@media (max-width: 520px) {
+  .welcome-skills-list .welcome-skill-choice { gap: 10px; padding: 16px; }
+  .welcome-skill-icon { flex-basis: 30px; height: 30px; border-radius: 8px; }
+  .welcome-skill-heading { align-items: flex-start; }
+  .welcome-skills-list .welcome-skill-choice { flex-wrap: wrap; }
+  .welcome-skill-copy { flex-basis: calc(100% - 40px); }
+  .welcome-skill-action { margin-left: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .welcome-skill-card { transition: none; }
+}
+.welcome-skills-more { display: flex; justify-content: center; min-height: 44px; }
+.welcome-skills-more button { min-height: 44px; }
 /* Keep the action row outside the scrollport so no form content can leak below it. */
 .welcome-step-layout { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100%; min-height: 0; min-width: 0; }
 .welcome-step-content { min-height: 0; min-width: 0; overflow: auto; align-content: start; padding: 32px 40px 24px; scrollbar-gutter: stable; scroll-padding-block: 24px; }
@@ -144,4 +170,19 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .welcome-dialog button, .welcome-dialog input, .welcome-dialog select { transition: none; }
+}
+
+.welcome-skill-action { flex: 0 0 auto; }
+.welcome-skill-install { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; min-width: 76px; padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.welcome-skill-install:disabled { opacity: .65; cursor: default; }
+.welcome-skill-install:enabled:hover { background: var(--fill); border-color: var(--faint); }
+.welcome-skill-card[data-installing=true] { border-color: var(--faint); }
+.welcome-skill-card[data-failed=true] .welcome-skill-install { color: var(--danger, #d33); }
+.welcome-skill-spinner { animation: welcome-skill-spin 1s linear infinite; }
+@keyframes welcome-skill-spin { to { transform: rotate(360deg); } }
+@media (max-width: 520px) {
+  .welcome-skill-install { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .welcome-skill-spinner { animation: none; }
 }

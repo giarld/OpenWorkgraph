@@ -1,6 +1,7 @@
 import { translate } from "../i18n/translate";
 import { PROTOCOL_VERSION, GRAPH_BINARY_MIME, graphBinaryParts, readGraphBinary } from "../../../packages/protocol/src/index";
 import type { GraphBundle } from "../../../packages/protocol/src/index";
+import type { SkillCatalog, SkillCatalogQuery, SkillCatalogItem, SkillDetail, SkillConfiguration } from "../../../packages/protocol/src/skills";
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import {
@@ -135,11 +136,37 @@ export class Transport {
     const skillsQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
       /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills\/search$/.test(pathname);
     const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(pathname);
+    // Stable skill identities may contain source separators and repository paths.
+    // Permit exactly one encoded identity segment, never arbitrary encoded API paths.
+    const skillPath = /^\/v1\/skills\/((?:[A-Za-z0-9_.!~*'()-]|%[0-9a-fA-F]{2})+)(?:\/(?:install|update|uninstall|config|files))?$/.exec(pathname);
+    let encodedSkillPath = false;
+    if (skillPath) {
+      try {
+        const identity = decodeURIComponent(skillPath[1]!);
+        encodedSkillPath = identity !== '.' && identity !== '..' && !/[\u0000-\u001f\u007f]/.test(identity) && encodeURIComponent(identity) === skillPath[1];
+      } catch { /* Malformed percent encoding is rejected. */ }
+    }
+    const catalogParams = new URLSearchParams(parts[1]);
+    const catalogQuery = pathname === '/v1/skills' && catalogParams.size > 0 && [...catalogParams].every(([key, value]) => {
+      if (catalogParams.getAll(key).length !== 1) return false;
+      if (key === 'refresh' || key === 'installed') return value === '1';
+      if (key === 'query') return value.length <= 1024;
+      if (key === 'offset' || key === 'limit') return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)) && (key === 'offset' || (Number(value) >= 1 && Number(value) <= 100));
+      return false;
+    });
+    const detailQuery = encodedSkillPath && !/\/(?:install|update|uninstall|config|files)$/.test(pathname) && /^locale=[A-Za-z0-9-]+$/.test(parts[1] ?? '');
+    const resourceParams = new URLSearchParams(parts[1]);
+    const resourcePath = resourceParams.get('path') ?? '';
+    const resourceQuery = encodedSkillPath && pathname.endsWith('/files') && [...resourceParams].length === 2 &&
+      resourceParams.getAll('version').length === 1 && resourceParams.getAll('path').length === 1 &&
+      /^[a-f0-9]{64}$/.test(resourceParams.get('version') ?? '') && resourcePath.length > 0 &&
+      !resourcePath.startsWith('/') && !/[\\\u0000-\u001f\u007f]/.test(resourcePath) &&
+      !/^[a-z][a-z0-9+.-]*:/i.test(resourcePath) && !resourcePath.split('/').some(part => !part || part === '.' || part === '..');
     if (
       parts.length > 2 || path.includes('#') ||
-      !/^\/(?:health|v1(?:\/[A-Za-z0-9_.-]+)*)$/.test(pathname) ||
+      (!/^\/(?:health|v1(?:\/[A-Za-z0-9_.-]+)*)$/.test(pathname) && !encodedSkillPath) ||
       pathname.split("/").some((p) => p === "." || p === "..") ||
-      (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery)
+      (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery && !catalogQuery && !detailQuery && !resourceQuery)
     )
       throw new TransportError("INVALID_REQUEST", translate("Only standard API paths for this Workspace are allowed"));
   }
@@ -217,7 +244,8 @@ export class Transport {
     const verb = (
       method ?? (body === undefined ? "GET" : "POST")
     ).toUpperCase();
-    if (!["GET", "POST", "DELETE", "BLOB", "RANGE"].includes(verb))
+    if (!["GET", "POST", "DELETE", "BLOB", "RANGE", "PUT"].includes(verb) ||
+        (verb === 'PUT' && !/^\/v1\/skills\/[^/]+\/config$/.test(path)))
       throw new TransportError("INVALID_REQUEST", translate("The Workspace only supports GET, POST, and DELETE"));
     if ((verb === "GET" || verb === "BLOB" || verb === "RANGE") && body !== undefined)
       throw new TransportError("INVALID_REQUEST", translate("GET requests do not accept a request body"));
@@ -358,5 +386,39 @@ export class Transport {
     this.begin(entry);
     try { return await this.send<T>(entry.path, entry.payload ?? entry.body, entry.method, entry); }
     finally { this.end(entry); }
+  }
+  listSkills(refresh = false, options: SkillCatalogQuery = {}): Promise<SkillCatalog> {
+    const params = new URLSearchParams();
+    if (refresh) params.set('refresh', '1');
+    if (options.offset !== undefined) params.set('offset', String(options.offset));
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.installedOnly) params.set('installed', '1');
+    if (options.query?.trim()) params.set('query', options.query.trim());
+    return this.request('/v1/skills' + (params.size ? '?' + params.toString() : ''));
+  }
+  skillDetail(id: string, locale: string): Promise<SkillDetail> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '?locale=' + encodeURIComponent(locale));
+  }
+  installSkill(id: string, expectedRevision: number): Promise<SkillCatalogItem> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/install', { expectedRevision });
+  }
+  updateSkill(id: string, expectedRevision: number): Promise<SkillCatalogItem> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/update', { expectedRevision });
+  }
+  uninstallSkill(id: string, expectedRevision: number): Promise<SkillCatalogItem> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/uninstall', { expectedRevision });
+  }
+  readSkillConfig(id: string): Promise<SkillConfiguration> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/config');
+  }
+  writeSkillConfig(id: string, expectedRevision: number, values: Record<string, string | null>, expectedPackageVersion: string): Promise<SkillConfiguration> {
+    // No idempotency journal: configuration values must never enter browser storage.
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/config', { expectedRevision, expectedPackageVersion, values }, 'PUT');
+  }
+  clearSkillConfig(id: string, expectedRevision: number): Promise<void> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/config', { expectedRevision }, 'DELETE');
+  }
+  readSkillFile(id: string, version: string, path: string): Promise<Blob> {
+    return this.request('/v1/skills/' + encodeURIComponent(id) + '/files?' + new URLSearchParams({ version, path }), undefined, 'BLOB');
   }
 }

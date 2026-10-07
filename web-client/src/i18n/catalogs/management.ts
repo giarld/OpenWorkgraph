@@ -73,7 +73,7 @@ export const managementZhCN: Record<string, string> = {
   "Sandbox permissions": "沙盒权限",
   "Sandbox permissions are enforced by Codex app-server. Changes apply to newly submitted tasks; queued and running tasks keep their original setting.": "由 Codex app-server 执行沙盒权限。设置对新提交的任务生效，排队中和运行中的任务保留原设置。",
   "Files can be read. Write operations require Codex approval.": "允许读取文件，写入操作需要 Codex 请求批准。",
-  "The task workspace and output directories can be modified. Operations outside that scope require Codex approval.": "允许修改任务工作目录和输出目录，范围外操作由 Codex 请求批准。",
+  "The task workspace and output directories can be modified, and network access is enabled. File operations outside that scope require Codex approval.": "允许修改任务工作目录和输出目录，并允许访问网络。范围外文件操作由 Codex 请求批准。",
   "Codex sandbox restrictions are disabled. Agents can use the file and network permissions of the Workspace process.": "关闭 Codex 沙盒限制，Agent 可使用工作空间进程拥有的文件与网络权限。",
   "Save permission scope": "保存权限范围",
   "Workspace default model": "工作空间默认模型",

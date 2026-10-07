@@ -112,7 +112,7 @@
 .real-service-panel .runtime-back { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; flex-shrink: 0; background: transparent; }
 .runtime-subpage-heading h3 { margin: 0; font-size: 16px; }
 .real-service-panel h2 { font-size: 14px; }
-.real-service-panel .management-panel { padding: 0; min-width: 0; overflow: visible; max-height: none; }
+.real-service-panel .management-panel { background: transparent; padding: 0; min-width: 0; overflow: visible; max-height: none; }
 .real-service-panel .management-panel > header { position: sticky; top: 0; z-index: 1; padding: 1px 0 8px; background: var(--panel); }
 @media (max-width: 1250px) {
   .real-service-panel { position: absolute; right: 0; top: 0; bottom: 0; z-index: 50; width: min(380px, 90vw); box-shadow: -8px 0 24px #0004; }
@@ -183,6 +183,8 @@
 .runtime-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--stroke); padding: 8px 12px; }
 .runtime-card-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; }
 .runtime-card-actions .runtime-disconnect { background: transparent; border-color: transparent; color: var(--muted); }
+.runtime-npx-upgrade { min-width: 0; padding: 0 12px 12px; }
+.runtime-npx-upgrade p { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .real-service-panel .runtime-connect { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; margin: 20px 0; }
 .runtime-list-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 24px 0 12px; }
 .runtime-list-heading h3 { margin: 0; font-size: 13px; }
@@ -381,12 +383,12 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-app .workgraph-notifications-clear { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 36px; margin: 0; border-radius: 8px; background: var(--toolbar); color: var(--muted); font-size: 12px; }
 .workgraph-notifications-clear:focus-visible { outline: 2px solid var(--active); outline-offset: -3px; }
 .workgraph-notifications ul { display: grid; gap: 8px; margin: 0; padding: 2px; list-style: none; overflow-x: hidden; overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
-.workgraph-notification { display: flex; align-items: center; min-width: 0; border: 1px solid color-mix(in srgb, var(--stroke) 65%, transparent); border-radius: 12px; background: var(--panel); box-shadow: 0 3px 12px #00000008; transition: background 150ms, border-color 150ms; }
+.workgraph-notification { display: flex; align-items: center; min-width: 0; border: 1px solid color-mix(in srgb, var(--stroke) 65%, transparent); border-radius: 12px; box-shadow: 0 3px 12px #00000008; transition: border-color 150ms; }
 .workgraph-notification { animation: workgraph-notification-enter 260ms cubic-bezier(.2,.8,.2,1) both; }
 .workgraph-notification[data-phase=exit] { animation: workgraph-notification-exit 220ms ease-in both; pointer-events: none; }
 @keyframes workgraph-notification-enter { from { opacity: 0; transform: translateX(calc(100% + 16px)); } to { opacity: 1; transform: translateX(0); } }
 @keyframes workgraph-notification-exit { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(calc(100% + 16px)); } }
-.workgraph-notification:hover, .workgraph-notification:focus-within { background: var(--fill); border-color: var(--stroke); }
+.workgraph-notification:hover, .workgraph-notification:focus-within { border-color: var(--stroke); }
 .real-app .workgraph-notification button { border: 0; background: transparent; min-height: 44px; margin: 0; }
 .real-app .workgraph-notification button:hover:not(:disabled) { background: transparent; }
 .real-app .workgraph-notification-open { display: grid; gap: 6px; flex: 1; min-width: 0; padding: 12px; border-radius: 11px; text-align: left; }
@@ -401,7 +403,22 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-workspace { position: relative; }
 .real-canvas-mount { min-height: 0; height: 100%; }
 .real-canvas-row { height: 100%; }
-.real-toolbar { position: absolute; top: 16px; left: 16px; z-index: 30; padding: 4px 12px; border: 1px solid var(--stroke); max-width: calc(100% - 270px); flex-wrap: nowrap; background: color-mix(in srgb, var(--panel) 72%, transparent); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+.real-toolbar { position: absolute; top: 16px; left: 16px; z-index: 30; padding: 4px 12px; border: 1px solid var(--stroke); max-width: calc(100% - 270px); flex-wrap: nowrap; }
+.real-toolbar,
+.real-service-panel,
+.workgraph-notification,
+.workgraph-toast-viewport > *,
+.real-workspace .graph-main-menu,
+.real-workspace .graph-recent-menu,
+.real-workspace .bottom-dock,
+.real-workspace .owg-zoom-controls {
+  background-color: color-mix(in srgb, var(--panel) 72%, transparent);
+  /* A faint, static texture breaks up visible steps in the blurred grid. */
+  background-image: url('../assets/frosted-noise.svg');
+  background-size: 128px 128px;
+  -webkit-backdrop-filter: blur(40px);
+  backdrop-filter: blur(40px);
+}
 .real-toolbar strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .real-toolbar [role=status] { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .workgraph-title:not([aria-disabled="true"]) { cursor: text; }
@@ -411,13 +428,13 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-search label { margin: 8px 0; gap: 4px; }
 .real-search input { padding: 5px 8px; }
 .real-workspace .bottom-dock { left: var(--dock-center, 50%); right: auto; bottom: var(--dock-bottom, 88px); transform: translateX(-50%); margin: 0; max-width: calc(100% - 32px); }
-.real-service-panel { position: absolute; right: 16px; top: 70px; bottom: 16px; width: min(380px, calc(100vw - 32px)); z-index: 55; border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); background: var(--toolbar); backdrop-filter: blur(12px); transform-origin: right top; visibility: visible; transition: transform 240ms cubic-bezier(.2, .8, .2, 1), opacity 180ms ease, visibility 0s; }
+.real-service-panel { position: absolute; right: 16px; top: 70px; bottom: 16px; width: min(380px, calc(100vw - 32px)); z-index: 55; border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); transform-origin: right top; visibility: visible; transition: transform 240ms cubic-bezier(.2, .8, .2, 1), opacity 180ms ease, visibility 0s; }
 .real-service-panel-collapsed { transform: scale(.86); opacity: 0; visibility: hidden; pointer-events: none; transition-delay: 0s, 0s, 240ms; }
 
 .real-sidebar-open { position: absolute; top: 16px; left: 16px; z-index: 44; }
 .sidebar-closed .real-toolbar { left: 62px; }
 .workgraph-toast-viewport { display: grid; gap: 8px; width: max-content; max-width: calc(100% - 32px); max-height: min(420px, calc(100% - 96px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; pointer-events: none; }
-.workgraph-toast-viewport > * { pointer-events: auto; padding: 10px 14px; margin: 0; border: 1px solid var(--stroke); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); overflow-wrap: anywhere; }
+.workgraph-toast-viewport > * { pointer-events: auto; padding: 10px 14px; margin: 0; border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .real-toast-queue { position: absolute; top: 72px; left: 50%; transform: translateX(-50%); z-index: 110; }
 .real-pending-request-toast { display: grid; gap: 8px; }
 .real-pending-request-toast button { justify-self: start; }
@@ -454,6 +471,30 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-sidebar .ow-project-file-controls,
 .real-sidebar .ow-assets-controls { top: 54px; }
 .real-node-sidebar .node-list { overflow: visible; }
+
+/* Shared inset and control sizing for the four left-sidebar pages. */
+.real-sidebar :is(.ow-resources-panel, .ow-skills-library, .ow-project-files-panel) { height: auto; overflow: visible; padding: 8px 0 16px; }
+.real-sidebar :is(.ow-skills-controls, .ow-assets-controls, .ow-project-file-controls) { top: 0; }
+.real-sidebar:has(> .sidebar-tabs) :is(.ow-skills-controls, .ow-assets-controls, .ow-project-file-controls) { top: 54px; }
+.real-sidebar .real-node-sidebar { padding-top: 8px; }
+.real-sidebar .real-node-sidebar .sidebar-search { margin: 0 16px 10px; }
+.real-sidebar .ow-skills-controls { padding-top: 0; }
+.real-sidebar .ow-resources-panel .ow-assets-toolbar { min-height: 36px; gap: 8px; margin-bottom: 10px; }
+.real-sidebar :is(.sidebar-search, .ow-assets-toolbar .ow-assets-search, .ow-skills-search) {
+  display: flex; align-items: center; gap: 7px; min-height: 36px;
+  border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas); color: var(--muted);
+}
+.real-sidebar :is(.sidebar-search, .ow-assets-toolbar .ow-assets-search, .ow-skills-search) input {
+  min-height: 34px; padding: 7px 0; border: 0; background: transparent; font-size: 12px;
+}
+.real-sidebar :is(.sidebar-search, .ow-assets-toolbar .ow-assets-search, .ow-skills-search):focus-within { outline: 2px solid var(--active); outline-offset: 2px; }
+.real-sidebar :is(.sidebar-search, .ow-assets-toolbar .ow-assets-search, .ow-skills-search) input:focus-visible { outline: none; }
+.real-sidebar :is(.ow-assets-icon-button, .ow-assets-upload-trigger, .ow-skills-refresh, .ow-project-file-action) {
+  min-height: 36px; border-radius: 7px;
+}
+.real-sidebar .ow-project-files-panel .ow-project-file-action { width: 36px; border-color: var(--stroke); }
+.real-sidebar .ow-project-file-views { flex: 0 1 auto; }
+.real-sidebar .ow-project-file-toolbar > .ow-project-file-action:first-of-type { margin-left: auto; }
 
 
 
@@ -550,7 +591,6 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .library-dialog label { margin-bottom: 16px; }
 .library-dialog-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 .library-dialog-actions button { margin: 0; }
-.real-sidebar .ow-resources-panel { padding: 12px 0; height: auto; overflow: visible; }
 .real-app .graph-menu-dismiss { position: fixed; inset: 0; border: 0; background: transparent; z-index: 59; }
 .graph-main-menu { position: absolute; top: 62px; left: 16px; z-index: 61; width: 220px; padding: 6px; max-height: calc(100dvh - 80px); overflow: auto; }
 .graph-recent-menu { position: fixed; z-index: 63; width: max-content; max-width: min(392px, calc(100vw - 16px)); max-height: min(320px, calc(100dvh - 16px)); overflow: auto; padding: 6px; }

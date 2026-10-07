@@ -32,11 +32,15 @@ import { ImageProviders } from './image-providers.js';
 import { ImageCredentials } from './image-credentials.js';
 import { ApiImageAgent, RoutedImageBackend } from './api-image-agent.js';
 import { planOpenAiImage, discoverOpenAiModels } from './openai-image-driver.js';
+import { BuiltinSkills, type BuiltinSkillsOptions } from './builtin-skills.js';
+import { SkillConfigs } from './skill-configs.js';
+import { SkillSessions } from './skill-sessions.js';
 
 export interface WorkflowRuntimeOptions {
   backend?: SchedulerBackend; models?: BackendModel[];
   /** Default: discover on model reads/submission. True also probes at startup; false disables execution and discovery. */
   enableBackend?: boolean; backendOptions?: AdapterOptions;
+  skillsOptions?: BuiltinSkillsOptions;
 }
 class RuntimeRuns extends Runs {
   constructor(db: DatabaseSync, serviceId: string, dependencies: RunsDependencies, private readonly available: (run: Run, snapshot: import('@openworkgraph/protocol').InputSnapshot) => boolean) { super(db, serviceId, dependencies); }
@@ -57,6 +61,9 @@ export class WorkflowRuntime {
   readonly executionSettings: ExecutionSettingsStore;
   readonly imageProviders: ImageProviders;
   readonly imageCredentials: ImageCredentials;
+  readonly skills: BuiltinSkills;
+  readonly skillConfigs: SkillConfigs;
+  readonly skillSessions: SkillSessions;
   private readonly probe = new ProjectProbe();
   private readonly adapter: CodexBackendAdapter | undefined;
   private availableModels: BackendModel[];
@@ -75,6 +82,9 @@ export class WorkflowRuntime {
     this.executionSettings = new ExecutionSettingsStore(db);
     this.imageCredentials = new ImageCredentials(directories,serviceId);
     this.imageProviders = new ImageProviders(db,this.imageCredentials);
+    this.skills = new BuiltinSkills(directories, serviceId, options.skillsOptions);
+    this.skillConfigs = new SkillConfigs(directories, serviceId);
+    this.skillSessions = new SkillSessions(this.skills, this.skillConfigs, options.backendOptions);
     this.inputs = new InputPreparation(db, { plugins: this.plugins, readRepresentation: resource => this.resources.readPreparedRepresentation(resource) }); this.models = new ModelDefaultsStore(db);
     this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
       ? this.imageProviders.credentialAvailable(snapshot.imageRoute.providerId,snapshot.imageRoute.credentialRevision)
@@ -82,7 +92,7 @@ export class WorkflowRuntime {
     this.history = new History(db); this.publication = new Publication(db, directories, this.resources, this.graphs, this.runs);
     this.executionChains = new ExecutionChains(this.runs,this.graphs,this.resources);
     this.adapter = options.backend ? undefined : new CodexBackendAdapter(options.backendOptions);
-    const codexBackend = options.backend ?? new RuntimeBackend(this.runs, directories, this.adapter!, this.probe);
+    const codexBackend = options.backend ?? new RuntimeBackend(this.runs, directories, this.adapter!, this.probe, this.skillSessions);
     const backend = new RoutedImageBackend(codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
     this.scheduler = new Scheduler(this.runs, backend, { publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
@@ -248,6 +258,10 @@ export class WorkflowRuntime {
     }
     const scopedInputs = new InputPreparation(this.db, { plugins: this.plugins, readRepresentation: resource => prepared.get(resourceKey(resource)) ?? null });
     const scopedPreview = scopedInputs.inputPreview(request.graphId,request.nodeId,!!apiRoute);
+    const targetContent = this.db.prepare('SELECT v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?').get(request.nodeId, request.graphId);
+    const skillReferences = targetContent ? (JSON.parse(String(targetContent.content)) as Record<string,unknown>).skillReferences : undefined;
+    if (apiRoute && Array.isArray(skillReferences) && skillReferences.length) throw new ServiceError('INPUT_BLOCKED', '独立图片 API 不支持技能引用，请切换到 Codex 或移除技能引用。');
+    const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path);
     if(apiRoute){
       const references: {bytes:Buffer;mime:'image/png'|'image/jpeg'|'image/webp'}[]=[];
       for(const envelope of scopedPreview.resources){
@@ -274,7 +288,7 @@ export class WorkflowRuntime {
       },
       freeze: () => scopedInputs.build(request.graphId, request.nodeId, apiRoute
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
-        : {expectedExecutionRevision:request.expectedExecutionRevision,model:this.models.freeze(request.modelOverride,this.availableModels),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}),
+        : {expectedExecutionRevision:request.expectedExecutionRevision,model:this.models.freeze(request.modelOverride,this.availableModels),skills:frozenSkills,...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}),
     });
     return principal => scoped.submit(request, principal, request.kind==='execution' && holdExecution);
   }
@@ -286,7 +300,7 @@ export class WorkflowRuntime {
     const snapshot = this.runs.snapshot(id); const snapshotJson = canonicalJson(snapshot as unknown as Json);
     const api=snapshot.imageRoute?.type==='api'?snapshot.imageRoute:null;
     if(api){await this.imageProviders.refreshCredentials();if(!this.imageProviders.credentialAvailable(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销或本机不可用。');}
-    else {this.requireAvailable({ kind: token.details.kind } as SubmitRun);await this.refreshModels();}
+    else {this.requireAvailable({ kind: token.details.kind } as SubmitRun);await this.refreshModels();await this.skillSessions.environment(snapshot.skills ?? [], true);}
     const project = this.db.prepare('SELECT state,canonical_path FROM projects WHERE id=?').get(run.projectId);
     if (!project || project.state !== 'active') throw new ServiceError('PROJECT_INACTIVE', 'Restored project is inactive');
     const path = String(project.canonical_path);

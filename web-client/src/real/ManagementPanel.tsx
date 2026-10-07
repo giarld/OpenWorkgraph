@@ -297,7 +297,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
           <option value="workspace-write">{t('Workspace write')}</option>
           <option value="danger-full-access">{t('Full access')}</option>
         </select></label>
-        <p>{sandbox === 'read-only' ? t('Files can be read. Write operations require Codex approval.') : sandbox === 'workspace-write' ? t('The task workspace and output directories can be modified. Operations outside that scope require Codex approval.') : t('Codex sandbox restrictions are disabled. Agents can use the file and network permissions of the Workspace process.')}</p>
+        <p>{sandbox === 'read-only' ? t('Files can be read. Write operations require Codex approval.') : sandbox === 'workspace-write' ? t('The task workspace and output directories can be modified, and network access is enabled. File operations outside that scope require Codex approval.') : t('Codex sandbox restrictions are disabled. Agents can use the file and network permissions of the Workspace process.')}</p>
         <button type="submit" disabled={writeDisabled}>{t('Save permission scope')}</button>
       </form>}
     </>)}

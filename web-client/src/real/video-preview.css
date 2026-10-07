@@ -19,15 +19,16 @@
 }
 .ow-preview-node .ow-preview-video-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #080a0d; }
 .ow-preview-node .ow-preview-video-stage > video { display: block; width: 100%; height: 100%; object-fit: contain; }
-.ow-preview-node .ow-preview-video-message { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: #080a0dde; color: var(--video-muted); text-align: center; font-size: 13px; line-height: 1.6; }
+.ow-preview-node .ow-preview-video-message { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: #080a0dde; color: var(--video-muted); text-align: center; font-size: 13px; line-height: 1.6; pointer-events: none; }
 .ow-preview-node .ow-preview-video button { display: grid; place-items: center; flex: none; width: 44px; height: 44px; padding: 0; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--video-text); cursor: pointer; transition: background 150ms ease, color 150ms ease; }
 .ow-preview-node .ow-preview-video button:hover:not(:disabled) { background: var(--video-hover); }
 .ow-preview-node .ow-preview-video button:active:not(:disabled) { background: #ffffff26; }
 .ow-preview-node .ow-preview-video button:disabled { opacity: .4; cursor: default; }
 .ow-preview-node .ow-preview-video button:focus-visible, .ow-preview-node .ow-preview-video input:focus-visible { outline: 2px solid var(--video-accent); outline-offset: 2px; }
-.ow-preview-node .ow-preview-video .ow-preview-video-center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 64px; height: 64px; border-radius: 50%; border-color: #ffffff50; background: #101216b3; box-shadow: 0 8px 32px #0005; backdrop-filter: blur(12px); }
-.ow-preview-node .ow-preview-video .ow-preview-video-center:hover { background: #242b38e6; }
-.ow-preview-node .ow-preview-video-center svg { margin-left: 3px; }
+.ow-preview-node .ow-preview-video .ow-preview-video-surface { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 0; }
+.ow-preview-node .ow-preview-video .ow-preview-video-surface:hover:not(:disabled),
+.ow-preview-node .ow-preview-video .ow-preview-video-surface:active:not(:disabled) { background: transparent; }
+.ow-preview-node .ow-preview-video .ow-preview-video-surface:focus-visible { outline-offset: -2px; }
 .ow-preview-node .ow-preview-video-controls { position: absolute; z-index: 1; inset: auto 0 0; padding: 32px 16px 8px; background: linear-gradient(180deg, transparent 0%, #00000052 30%, #000000b3 70%, #000000d9 100%); pointer-events: none; }
 .ow-preview-node .ow-preview-video-controls button,
 .ow-preview-node .ow-preview-video-controls input { pointer-events: auto; }
@@ -54,7 +55,6 @@
   .ow-preview-node .ow-preview-video-controls { padding: 28px 8px 6px; }
   .ow-preview-node .ow-preview-video-toolbar { gap: 4px; }
   .ow-preview-node .ow-preview-video input.ow-preview-video-volume { display: none; }
-  .ow-preview-node .ow-preview-video .ow-preview-video-center { width: 52px; height: 52px; }
 }
 @media (pointer: coarse) { .ow-preview-node .ow-preview-video input[type="range"] { height: 44px; } }
 @media (prefers-reduced-motion: reduce) {

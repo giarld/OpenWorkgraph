@@ -17,6 +17,7 @@
   --faint: #a8a29e;
   --active: #1c1917;
   --link: #2563eb;
+  --document-dialog-width: min(820px, 94vw);
   --toolbar: rgba(251, 250, 247, 0.96);
   --shadow: 0 16px 40px rgba(28, 25, 23, 0.12);
 }
@@ -1075,7 +1076,7 @@ pre {
   padding: 30px;
 }
 .document-dialog {
-  width: min(820px, 94vw);
+  width: var(--document-dialog-width);
   max-height: 90vh;
   background: var(--panel);
   border: 1px solid var(--stroke);
@@ -1471,7 +1472,28 @@ pre {
 .image-dimension-inputs label span { display: grid; place-items: center; height: 38px; color: var(--muted); }
 .image-dimension-inputs input { width: 100%; min-width: 0; height: 38px; padding: 0 10px; border: 0; outline: 0; background: transparent; color: var(--text); }
 .image-setting-error { margin: 0; color: var(--danger, #d66); font-size: 11px; line-height: 1.4; }
-.prompt-status { box-sizing: border-box; height: 18px; margin: 0; padding: 2px 14px 0; overflow: hidden; font-size: 11px; line-height: 16px; white-space: nowrap; text-overflow: ellipsis; }
+.prompt-status-row { display: flex; align-items: flex-start; gap: 6px; min-height: 28px; padding: 0 14px; }
+.prompt-status-row .prompt-mention-trigger {
+  width: 28px;
+  height: 28px;
+  color: var(--link);
+  background: color-mix(in srgb, var(--link) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--link) 35%, var(--panel));
+}
+.prompt-status-row .prompt-mention-trigger:hover:not(:disabled) {
+  color: var(--link);
+  background: color-mix(in srgb, var(--link) 22%, var(--panel));
+  border-color: var(--link);
+}
+.prompt-status-row .prompt-mention-trigger:focus-visible { outline-color: var(--link); }
+.prompt-status-row .prompt-mention-trigger:disabled {
+  color: var(--muted);
+  background: var(--fill);
+  border-color: var(--stroke);
+}
+.prompt-status { flex: 1; min-width: 0; margin: 0; padding: 6px 0; font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.prompt-status-warning { color: #a16207; }
+[data-theme="dark"] .prompt-status-warning { color: #fbbf24; }
 .prompt-status[aria-hidden="true"] { visibility: hidden; }
 .reference-preview { width: min(720px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; border-radius: 16px; padding: 16px; }
 .reference-preview .markdown-body { white-space: normal; overflow-wrap: anywhere; }

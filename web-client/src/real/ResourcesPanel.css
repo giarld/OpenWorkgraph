@@ -15,9 +15,7 @@
 .ow-resources-panel small { display: block; font-size: 12px; }
 .ow-resources-panel progress { width: 100%; }
 .ow-resources-panel { box-sizing: border-box; font-size: 13px; }
-.ow-resources-panel .ow-assets-heading { flex-wrap: nowrap; margin-bottom: 16px; }
-.ow-resources-panel .ow-assets-heading h2 { margin: 0 0 3px; font-size: 14px; color: var(--text, #292524); }
-.ow-assets-heading span, .ow-assets-note, .ow-assets-source, .ow-assets-list-heading, .ow-assets-card small { color: var(--muted, #78716c); font-size: 12px; }
+.ow-assets-note, .ow-assets-source, .ow-assets-list-heading, .ow-assets-card small { color: var(--muted, #78716c); font-size: 12px; }
 .ow-resources-panel .ow-assets-icon-button { display: grid; place-items: center; width: 36px; padding: 0; flex-shrink: 0; }
 .ow-resources-panel .ow-assets-upload { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 40px; background: var(--text, #292524); color: var(--panel, #fbfaf7); border-color: transparent; }
 .ow-resources-panel .ow-assets-upload:hover:not(:disabled) { background: var(--active, #1c1917); }
@@ -132,7 +130,8 @@
 .ow-assets-video-thumbnail { position: relative; }
 .ow-assets-video-thumbnail img { object-fit: contain; }
 .ow-assets-thumbnail > .ow-assets-video-badge { position: absolute; right: 8px; bottom: 8px; width: 24px; height: 20px; display: grid; place-items: center; border: 1px solid #ffffff60; border-radius: 4px; background: #101216c9; color: #fff; pointer-events: none; }
-.ow-resources-panel .ow-assets-file-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; text-align: left; }
+.ow-assets-type-badge { position: absolute; top: 8px; left: 8px; max-width: calc(100% - 48px); box-sizing: border-box; padding: 2px 6px; border: 1px solid #ffffff30; border-radius: 5px; background: #292b35e8; color: #fff; font-size: 11px; font-weight: 600; line-height: 16px; letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; user-select: none; }
+.ow-resources-panel .ow-assets-file-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 38px 12px 12px; text-align: left; }
 .ow-assets-file-preview span { display: block; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.4; }
 .ow-assets-quick-actions { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity 150ms ease; }
 .ow-resources-panel .ow-assets-quick-actions button { display: grid; place-items: center; flex: none; width: 34px; height: 34px; min-height: 34px; padding: 0; border: 1px solid #ffffff20; border-radius: 50%; color: #fff; background: #292b35e8; box-shadow: 0 2px 8px #0002; pointer-events: none; }
@@ -154,6 +153,7 @@
 .ow-resources-panel .ow-assets-library-settings .ow-resources-check { width: auto; margin: 0; font-size: 12px; }
 @container (max-width: 190px) { .ow-resources-panel .ow-assets-list { grid-template-columns: minmax(0, 1fr); } }
 @media (hover: none), (pointer: coarse) {
+  .ow-assets-type-badge { max-width: calc(100% - 64px); }
   .ow-assets-quick-actions, .ow-assets-card-menu .ow-assets-menu-trigger { opacity: 1; }
   .ow-assets-quick-actions { align-items: flex-end; padding-bottom: 8px; }
   .ow-resources-panel .ow-assets-quick-actions button { width: 44px; height: 44px; pointer-events: auto; }

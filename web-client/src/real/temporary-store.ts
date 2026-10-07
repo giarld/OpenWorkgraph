@@ -1,3 +1,4 @@
+import { portableSkillContent } from "./project-file-mentions";
 import { documentSnapshot, recordDocumentVersion, travelDocumentVersion, type DocumentTimeline } from './document-versions';
 import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '@openworkgraph/protocol';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
@@ -216,7 +217,7 @@ export class TemporaryCanvasStore {
         if (!ids.has(id) || members.has(id) || bundle.graph.nodes.find(v => v.id === id)?.type === 'group') throw Error(translate("Group members are missing or overlapping."));
         members.add(id); return ids.get(id)!;
       });
-      return { ...n, id: ids.get(n.id)!, content: remap(n.content), ...(memberIds ? { memberIds } : {}) };
+      return { ...n, id: ids.get(n.id)!, content: remap(['text','image','document','video','file','preview','execution','group'].includes(n.type) ? portableSkillContent(n.content) : n.content), ...(memberIds ? { memberIds } : {}) };
     });
     const edges = new Set<string>(), pairs = new Set<string>(), incoming = new Map<string, number>();
     graph.edges = bundle.graph.edges.map(e => {
@@ -333,7 +334,7 @@ export class TemporaryCanvasStore {
     // Capture the graph and resource descriptors in one read transaction.
     const record = await this.access(graphId, false, value => value);
     const { title, nodes, edges } = record.graph;
-    const portableNodes = nodes.map(node => structuredClone(node));
+    const portableNodes = nodes.map(node => { const copy = structuredClone(node); if (['text','image','document','video','file','preview','execution','group'].includes(copy.type)) copy.content = portableSkillContent(copy.content); return copy; });
     if (portableNodes.length > EXPORT_MAX_NODES || edges.length > EXPORT_MAX_NODES * 9) throw Error(translate("The Work Graph exceeds the export limit."));
     const resourceIds = new Set(Object.keys(record.resources));
     const projectResourceIds = new Set<string>();

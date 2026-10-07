@@ -82,11 +82,11 @@ export class StdioRpc {
     if (Buffer.byteLength(line) > (this.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES) || this.child.stdin.writableLength > 2 * 1024 * 1024) throw new BackendError('PROTOCOL', 'Backend message limit exceeded');
     this.child.stdin.write(line);
   }
-  request(method: string, params: unknown): Promise<any> {
+  request(method: string, params: unknown, requestTimeoutMs?: number): Promise<any> {
     if (this.pending.size >= 128) return Promise.reject(new BackendError('PROTOCOL', 'Too many backend requests'));
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
-      const timeoutMs = method === 'initialize' ? this.options.initializeTimeoutMs ?? this.options.timeoutMs ?? 60000 : this.options.timeoutMs ?? 15000;
+      const timeoutMs = requestTimeoutMs ?? (method === 'initialize' ? this.options.initializeTimeoutMs ?? this.options.timeoutMs ?? 60000 : this.options.timeoutMs ?? 15000);
       const timer = setTimeout(() => { this.pending.delete(id); reject(new BackendError('TIMEOUT', 'Backend request timed out; outcome unknown', { method, timeoutMs })); this.fail('rpc_timeout'); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method });
       try { this.write({ id, method, params }); } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }

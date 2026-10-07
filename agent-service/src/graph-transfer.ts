@@ -6,7 +6,7 @@ import { Graphs, assertProjectWritable, resourceLinks, nodeDimension } from './g
 import { Resources } from './resources.js';
 import type { PreparedBlob } from './blob-store.js';
 import { mimeMatchesBytes, sniffMime } from './blob-store.js';
-import { checkedJson, PluginRegistry } from './plugins.js';
+import { checkedJson, PluginRegistry, portableSkillContent } from './plugins.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJsonHash } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
@@ -23,7 +23,9 @@ const DEFAULT_LIMITS: GraphTransferLimits = {maxBundleBytes:WORKGRAPH_BUNDLE_MAX
 const core = new Set(['text','image','document','video','file','preview','execution','group']);
 const key = (id: string, version: number) => JSON.stringify([id,version]);
 function portableNode(node: Node): Node {
-  return structuredClone(node);
+  const result = structuredClone(node);
+  if (core.has(node.type)) result.content = portableSkillContent(result.content);
+  return result;
 }
 function invalid(message: string): never {throw new ServiceError('INVALID_REQUEST',message);}
 function record(value: unknown): value is Record<string,unknown> {return value !== null && typeof value === 'object' && !Array.isArray(value);}
@@ -147,6 +149,7 @@ export class GraphTransfer {
       if(!record(n)) invalid('Invalid node');keys(n,['id','type','schemaVersion','contentVersion','content','x','y','width','height','memberIds','readOnly']);id(n.id);id(n.type);positive(n.schemaVersion);positive(n.contentVersion);
       if(nodes.has(n.id)||typeof n.readOnly!=='boolean'||!Number.isFinite(n.x)||!Number.isFinite(n.y)||Math.abs(n.x)>1e9||Math.abs(n.y)>1e9) invalid('Invalid or duplicate node');
       checkedJson(n.content,2*1024*1024,32);
+      if (core.has(n.type)) n.content = portableSkillContent(n.content);
       if(n.width!==undefined)nodeDimension(n.width);if(n.height!==undefined)nodeDimension(n.height);
       if(n.type!=='group'&&n.memberIds!==undefined)invalid('Only layout groups have members');
       if(n.type==='group'){

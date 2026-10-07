@@ -59,6 +59,7 @@ export function createService(
     projectProbe?: ProjectProbe;
     runtime?: WorkflowRuntimeOptions;
     npmInstallation?: () => Promise<boolean>;
+    npxInstallation?: () => Promise<boolean>;
     latestNpmVersion?: () => Promise<string>;
     updateRuntime?: (onExit: () => void) => Promise<void>;
   } = {},
@@ -85,6 +86,7 @@ export function createService(
   const events = new Events(db, serviceId, auth);
   const instanceId = randomUUID();
   const npmInstallation = options.npmInstallation ?? (async () => false);
+  const npxInstallation = options.npxInstallation ?? (async () => false);
   let updateQueued = false;
   const unavailable = {
     status: "unavailable" as const,
@@ -173,15 +175,16 @@ export function createService(
       const rawPath = request.url ?? "";
       const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
       const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills[/]search(?:[?]|$)/.test(rawPath);
+      const skillsManagementRoute = /^[/]v1[/]skills(?:[/][^/?#]+(?:[/](?:install|update|uninstall|config|files))?)?(?:[?]|$)/.test(rawPath);
       const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content)(?:[?]|$)/.test(rawPath);
-      const queryRoute = fileRoute || skillsRoute || mediaRoute;
+      const queryRoute = fileRoute || skillsRoute || skillsManagementRoute || mediaRoute;
       const path = queryRoute ? rawPath.split('?')[0]! : rawPath;
       if (
         !path.startsWith("/") ||
         path.startsWith("//") ||
         (!queryRoute && path.includes("?")) ||
         path.includes("#") ||
-        path.includes("%") ||
+        (!skillsManagementRoute && path.includes("%")) ||
         path.includes("\\")
       )
         throw new ServiceError(
@@ -209,16 +212,17 @@ export function createService(
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean);
+        const allowedMethods = /^[/]v1[/]skills[/][^/]+[/]config$/.test(path) ? ["GET", "POST", "PUT", "DELETE"] : ["GET", "POST", "DELETE"];
         if (
           typeof method !== "string" ||
-          !["GET", "POST", "DELETE"].includes(method) ||
+          !allowedMethods.includes(method) ||
           headers.some((header) => !CORS_HEADERS.includes(header))
         )
           throw new ServiceError(
             "ORIGIN_DENIED",
             "不允许的跨来源方法或请求头。",
           );
-        response.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE");
+        response.setHeader("Access-Control-Allow-Methods", allowedMethods.join(", "));
         response.setHeader(
           "Access-Control-Allow-Headers",
           CORS_HEADERS.join(", "),
@@ -255,7 +259,7 @@ export function createService(
         const runtimeInfo=runtime.serviceInfo;
         send({
           ...info,
-          installation: await npmInstallation() ? 'npm-global' : 'other',
+          installation: await npmInstallation() ? 'npm-global' : await npxInstallation() ? 'npx' : 'other',
           imageRoutes:runtimeInfo.imageRoutes,
           capabilities: {
             ...info.capabilities,
@@ -347,7 +351,7 @@ export function createService(
         events.stream(request, response, token, origin);
         return;
       }
-      const business = await api.handle(request, fileRoute || skillsRoute ? rawPath : path, token, origin);
+      const business = await api.handle(request, fileRoute || skillsRoute || skillsManagementRoute ? rawPath : path, token, origin);
       if (business.handled) {
         const body = auth.withSession(
           token,
@@ -551,15 +555,25 @@ export function createService(
     ).run(JSON.stringify(listenerInfo(address, serviceId, instanceId)));
   });
   let closing: Promise<void> | undefined;
+  async function closeHttpServer(): Promise<void> {
+    if (!server.listening) return;
+    await new Promise<void>((resolve, reject) => {
+      // Runs and event streams have already drained. A browser's unfinished
+      // request must not hold the service's lifetime locks indefinitely.
+      const timeout = setTimeout(() => server.closeAllConnections(), 1000);
+      timeout.unref();
+      server.close(error => {
+        clearTimeout(timeout);
+        if (error) reject(error); else resolve();
+      });
+    });
+  }
   async function abortStartup(): Promise<void> {
     runtime.disposeUnstarted();
     projectProbe.close();
     events.close();
     try {
-      if (server.listening)
-        await new Promise<void>((resolve, reject) =>
-          server.close((error) => (error ? reject(error) : resolve())),
-        );
+      await closeHttpServer();
     } finally {
       db.close();
     }
@@ -571,10 +585,7 @@ export function createService(
       projectProbe.close();
       events.close();
       try {
-        if (server.listening)
-          await new Promise<void>((resolve, reject) =>
-            server.close((error) => (error ? reject(error) : resolve())),
-          );
+        await closeHttpServer();
         db.prepare(
           "DELETE FROM settings WHERE key='listener' AND json_extract(value,'$.instanceId')=?",
         ).run(instanceId);

@@ -1,6 +1,9 @@
 import { zhCN } from '../messages';
 
 export const realCoreZhCN: Record<string, string> = {
+  'Find nodes': '查找节点',
+  'Search nodes': '搜索节点',
+  'All nodes': '全部节点',
   'Confirm resubmission': '确认再次提交',
   'Submit this node again?': '再次提交此节点？',
   '“{title}” has already been submitted. Confirm to start another run.': '“{title}”已有提交记录。确认后将再次发起运行。',

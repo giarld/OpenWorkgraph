@@ -18,6 +18,7 @@ import { PluginManagement } from './plugin-management.js';
 import { Repositories } from './persistence/repositories.js';
 import { ProjectFilesApi } from './project-files-api.js';
 import { SkillsApi } from './skills-api.js';
+import { SkillsManagementApi } from './skills-management-api.js';
 import { StorageApi } from './storage-api.js';
 import type { Json } from '@openworkgraph/protocol';
 export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; headers?:Record<string,string> }
@@ -29,11 +30,14 @@ export class BusinessApi {
   private pluginApi?:PluginApi;
   private projectFilesApi?:ProjectFilesApi;
   private skillsApi?:SkillsApi;
+  private skillsManagementApi?:SkillsManagementApi;
   private storageApi?:StorageApi;
   constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
     this.storageApi??=new StorageApi(this.db,this.runtime.directories,this.runtime.resources,this.auth);
     const storage=await this.storageApi.handle(request,path,token,origin);if(storage.handled)return storage;
+    this.skillsManagementApi??=new SkillsManagementApi(this.auth,this.runtime);
+    const management=await this.skillsManagementApi.handle(request,path,token,origin);if(management.handled)return management;
     this.skillsApi??=new SkillsApi(this.db,this.auth,this.runtime);
     const skills=await this.skillsApi.handle(request,path,token,origin);if(skills.handled)return skills;
     this.projectFilesApi??=new ProjectFilesApi(this.db,this.auth,this.graphs,this.runtime.resources,this.runtime.directories.runs);

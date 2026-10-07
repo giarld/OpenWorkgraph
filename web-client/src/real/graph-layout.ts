@@ -1,3 +1,4 @@
+import { validSkillReferences } from "./project-file-mentions";
 import type { GraphOperation, GraphSnapshot, Json, Node } from './contracts';
 import type { Rect } from '../canvas/geometry';
 import { groupAtCenter, insetNodePosition } from '../canvas/group-drop';
@@ -134,5 +135,5 @@ export function textCopyContent(node: Node, content: Json = node.content): Recor
   if (node.schemaVersion !== 1 || !['text', 'document', 'execution'].includes(node.type)) throw Error(translate("This node does not support a safe text copy."));
   const c = content && typeof content === 'object' && !Array.isArray(content) ? content : {};
   if (c.resourceId !== undefined || c.resourceVersion !== undefined || c.assetRef !== undefined) throw Error(translate("Resource nodes require the separate resource copy flow. Their references cannot be copied."));
-  return { title: String(c.title ?? node.type) + translate(" Copy"), text: typeof c.text === 'string' ? c.text : '', prompt: typeof c.prompt === 'string' ? c.prompt : '', summary: typeof c.summary === 'string' ? c.summary : '' };
+  return { ...(c.skillReferences !== undefined ? { skillReferences: validSkillReferences(typeof c.prompt === 'string' ? c.prompt : '', c.skillReferences).map(ref => ({ ...ref })) } : {}), title: String(c.title ?? node.type) + translate(" Copy"), text: typeof c.text === 'string' ? c.text : '', prompt: typeof c.prompt === 'string' ? c.prompt : '', summary: typeof c.summary === 'string' ? c.summary : '' };
 }

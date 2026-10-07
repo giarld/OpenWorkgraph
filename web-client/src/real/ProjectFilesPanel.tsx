@@ -243,15 +243,13 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
   const files = (current?.items.length ?? 0) - folders;
   return <section className="ow-project-files-panel" aria-label={t('Project files')}>
     <div className="ow-project-file-controls">
-      <header className="ow-project-file-heading"><div><h2>{t('Project files')}</h2><p>{t('Browse directories and add references to the Work Graph')}</p></div>
-        <button type="button" className="ow-project-file-action" title={t('Refresh project files')} aria-label={t('Refresh project files')} onClick={refresh} disabled={!available || busy}><RefreshCw size={16} className={busy ? 'is-spinning' : undefined}/></button>
-      </header>
       <div className="ow-project-file-toolbar">
         <div className="ow-project-file-views" role="group" aria-label={t('File view')}>
           <button type="button" title={t('Tree view')} aria-label={t('Tree view')} aria-pressed={view === 'tree'} onClick={() => setView('tree')}><ListTree size={15}/><span>{t('List')}</span></button>
           <button type="button" title={t('Large icon view')} aria-label={t('Large icon view')} aria-pressed={view === 'grid'} onClick={() => setView('grid')}><LayoutGrid size={15}/><span>{t('Icons')}</span></button>
         </div>
         {view === 'tree' && <button type="button" className="ow-project-file-action" aria-label={t('Collapse all directories')} title={t('Collapse all directories')} disabled={!expanded.size} onClick={() => setExpanded(new Set())}><ChevronsDownUp size={16}/></button>}
+        <button type="button" className="ow-project-file-action" title={t('Refresh project files')} aria-label={t('Refresh project files')} onClick={refresh} disabled={!available || busy}><RefreshCw size={16} className={busy ? 'is-spinning' : undefined}/></button>
       </div>
       <label className="ow-project-file-hidden"><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)}/><span>{t('Show hidden files')}</span></label>
       <nav className="ow-project-file-location" aria-label={t('Project directory path')}>

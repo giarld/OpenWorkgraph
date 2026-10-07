@@ -5,7 +5,7 @@ export * from './execution-chain.js';
 export * from './graph-title.js';
 export * from './graph-binary.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.2.13' as const;
+export const SERVICE_VERSION = '0.3.1' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -25,7 +25,7 @@ export interface Capability { status: 'available' | 'unavailable' | 'unknown'; r
 export interface ImageRouteCapability { route: {type:'codex'} | {type:'api';providerId:string;modelId:string}; modes: Record<ImageInputMode,Capability> }
 export type CoreCapabilityName = 'pairing' | 'projects' | 'graphs' | 'assets' | 'execution' | 'imageGeneration' | 'events' | 'backups';
 export type ProjectFileCapabilityName = 'projectFiles' | 'projectFileReferences';
-export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName, Capability>>; imageRoutes?: ImageRouteCapability[] }
+export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName, Capability>>; imageRoutes?: ImageRouteCapability[] }
 export interface Health { status: 'ok'; version: string; protocolVersion: string }
 export function isProtocolCompatible(version: string): boolean { return /^1\.\d+$/.test(version); }
 export interface Session { id: string; browserName: string; pairedAt: string; lastUsedAt: string; expiresAt: string; current: boolean; origin: string; state: 'active' | 'expired' }
@@ -97,7 +97,7 @@ export type ImageInputMode = 'text' | 'image' | 'text_image';
 export type FrozenApiImageRoute = Extract<ImageRoute, { type: 'api' }> & { configRevision: number; credentialRevision: number };
 export interface ImageProviderModel { id: string; name: string; modes: ('text' | 'image' | 'text_image')[]; formats: ('png' | 'jpeg' | 'webp')[]; sizes: string[]; qualities: string[]; isDefault: boolean; verifiedAt: string | null }
 export interface ImageProvider { id: string; name: string; driver: 'openai'; endpoint: string; enabled: boolean; revision: number; credentialConfigured: boolean; credentialRevision: number | null; models: ImageProviderModel[] }
-export interface InputSnapshotBase { inputDigest: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles?: ProjectFileInput[] }
+export interface InputSnapshotBase { inputDigest: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles?: ProjectFileInput[]; skills?: import('./skills.js').FrozenSkill[] }
 export type InputSnapshot = InputSnapshotBase & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute, { type: 'codex' }>; inputMode?: ImageInputMode }
   | { imageRoute: FrozenApiImageRoute; inputMode: ImageInputMode; model?: never }
@@ -142,3 +142,4 @@ export interface ServiceControl {
 export interface LocalRestoreControl { previewRestore(path: string): Promise<RestorePreview>; restore(path: string, expectedSha256: string): Promise<void> }
 
 export { previewEdgeError } from "./preview.js";
+export * from './skills.js';

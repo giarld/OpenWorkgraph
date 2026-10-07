@@ -107,16 +107,16 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
         onEnded={() => { setPlaying(false); setLoading(false); }}
         onVolumeChange={event => { setVolume(event.currentTarget.volume); setMuted(event.currentTarget.muted); }}
         onError={() => { setFailed(true); setLoading(false); setPlaying(false); }}/>}
+      <button className="ow-preview-video-surface" type="button" data-canvas-shortcut-surface onClick={toggle}
+        onKeyDown={event => { if (event.key === ' ' || event.key === 'Enter') event.stopPropagation(); }}
+        aria-label={playLabel} title={playLabel} disabled={!source || failed}/>
       {failed ? <div className="ow-preview-video-message" role="status">
         <AlertCircle size={28} aria-hidden="true"/>
         <span>{t('Video preview failed. Check the file format or codec.')}</span>
       </div> : loading ? <div className="ow-preview-video-message" role="status">
         <LoaderCircle className="ow-preview-video-spinner" size={28} aria-hidden="true"/>
         <span>{t('Loading video…')}</span>
-      </div> : !playing && <button className="ow-preview-video-center" type="button"
-        onClick={toggle} aria-label={t('Start video playback')} title={t('Play video')}>
-        <Play size={28} fill="currentColor" aria-hidden="true"/>
-      </button>}
+      </div> : null}
     </div>
     <div className="ow-preview-video-controls">
       <input className="ow-preview-video-seek" type="range" min="0" max={seekDuration} step="0.01"

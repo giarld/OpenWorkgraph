@@ -1,6 +1,9 @@
+import type { SkillCandidate as ProtocolSkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
+import { legacySkillMentions } from "../../../packages/protocol/src/skills";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowUp,
+  AtSign,
   Check,
   ChevronRight,
   CircleHelp,
@@ -26,7 +29,9 @@ import { PromptTextInput, type PromptTextInputHandle } from "./PromptTextInput";
 import {
   findMentionQuery,
   insertProjectFileMarkdownLink,
-  insertSkillMention,
+  insertSkillReference,
+  syncSkillReferences,
+  orderedSkillCandidates,
   type ProjectFileMentionCandidate,
 } from "../real/project-file-mentions";
 import { useI18n } from "../i18n/I18nProvider";
@@ -95,9 +100,9 @@ export function PromptPanel({
   />;
 }
 type MentionRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
-type SkillCandidate = { name: string; description: string; kind: "skill" };
+type SkillCandidate = ProtocolSkillCandidate & { kind: "skill" };
 type MentionCandidate = ProjectFileMentionCandidate | SkillCandidate | ReferenceMentionCandidate;
-const mentionGroup = (item: MentionCandidate) => item.kind === "directory" ? "file" : item.kind;
+const mentionGroup = (item: MentionCandidate) => item.kind === "directory" ? "file" : item.kind === "skill" ? item.source : item.kind;
 type MentionState = {
   start: number;
   query: string;
@@ -109,12 +114,14 @@ const MENTION_SEARCH_RESULT = 20;
 const MENTION_DEBOUNCE_MS = 120;
 /** Shared phase-one editing surface. Storage and execution stay in the caller. */
 export function PromptEditor({ value, disabled, runDisabled, references, onOpenReference, onClose, onRun, onChange,
-  ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, children,
-  mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, onOpenProjectFile }: {
+  ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, additionalWarnings = [], children,
+  mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, skillReferences = [], onOpenProjectFile }: {
   value: string; disabled: boolean; runDisabled: boolean;
   references: { id: string; title: string }[];
-  onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string): void;
+  onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string, skillReferences?: SkillReference[]): void;
+  skillReferences?: SkillReference[];
   ariaLabel?: string; placeholder?: string; status?: string; runHint?: string; runLabel?: string; controls?: ReactNode; inputChanged?: boolean; children?: ReactNode;
+  additionalWarnings?: string[];
   mentionRequest?: MentionRequest; mentionProjectId?: string; mentionEnabled?: boolean; skillEnabled?: boolean; onOpenProjectFile?: (item: ProjectFileMentionCandidate) => void;
 }) {
   const { t } = useI18n();
@@ -129,6 +136,28 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const pendingCaret = useRef<number | undefined>(undefined);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionTop, setMentionTop] = useState(0);
+  const [availableSkills, setAvailableSkills] = useState<ProtocolSkillCandidate[] | null>(null);
+  const [skillRefresh, setSkillRefresh] = useState(0);
+  const referenceIdentities = JSON.stringify(skillReferences.map(ref => [ref.source, ref.skillId]));
+  const hasLegacySkills = legacySkillMentions(value).length > 0;
+  useEffect(() => {
+    let cancelled = false;
+    setAvailableSkills(null);
+    if (skillEnabled && mentionEnabled && mentionRequest && mentionProjectId && (skillReferences.length || hasLegacySkills)) {
+      void mentionRequest<{ items: ProtocolSkillCandidate[] }>("/v1/projects/" + encodeURIComponent(mentionProjectId) + "/skills").then(result => {
+        if (!cancelled) setAvailableSkills(result.items);
+      }).catch(() => { /* An unavailable catalog is not evidence of a missing skill. */ });
+    }
+    return () => { cancelled = true; };
+  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, referenceIdentities, hasLegacySkills, skillRefresh]);
+  const missingSkills = skillReferences.filter(ref => (ref.source === "codex" && ref.skillId.startsWith("codex-unresolved:")) || (availableSkills && !availableSkills.some(item => item.source === ref.source && item.skillId === ref.skillId)));
+  const notices = [
+    ...additionalWarnings.map(text => ({ text, warning: true })),
+    ...(missingSkills.length ? [{ text: t("Referenced skills are missing from this Workspace. Install them or select them again:") + " " + Array.from(new Set(missingSkills.map(ref => ref.name + " (" + (ref.source === "openworkgraph" ? "OpenWorkgraph" : "Codex") + ")"))).join(", "), warning: true }] : []),
+    { text: visibleStatus, warning: false },
+    { text: runHint && !runHint.startsWith(t("In progress")) ? runHint : "", warning: false },
+    { text: inputChanged ? t("Input updated · The next run will use the new content") : "", warning: true },
+  ].filter((notice, index, all) => notice.text && all.findIndex(item => item.text === notice.text) === index);
   const updateMentionPosition = () => {
     if (inputRef.current) setMentionTop(inputRef.current.caretTop() - 6);
   };
@@ -174,11 +203,11 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     const referencesFound = referenceCandidates(query);
     const remoteEnabled = mentionEnabled && !!mentionRequest && !!mentionProjectId;
     const files = remoteEnabled && trimmed ? mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(base + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) })) : Promise.resolve({ items: [] });
-    const skills = remoteEnabled && skillEnabled ? mentionRequest!<{ items: { name: string; description: string }[] }>(base + "/skills/search?" + new URLSearchParams({ query: trimmed })) : Promise.resolve({ items: [] });
+    const skills = remoteEnabled && skillEnabled ? mentionRequest!<{ items: ProtocolSkillCandidate[] }>(base + "/skills/search?" + new URLSearchParams({ query: trimmed })) : Promise.resolve({ items: [] });
     void Promise.allSettled([files, skills]).then(results => {
       if (epoch !== mentionEpoch.current) return;
       const fileItems = results[0].status === "fulfilled" ? (results[0].value.items ?? []).filter(item => item.kind === "file" || item.kind === "directory") : [];
-      const skillItems: SkillCandidate[] = results[1].status === "fulfilled" ? (results[1].value.items ?? []).map(item => ({ ...item, kind: "skill" })) : [];
+      const skillItems: SkillCandidate[] = results[1].status === "fulfilled" ? orderedSkillCandidates(results[1].value.items ?? []).map(item => ({ ...item, kind: "skill" })) : [];
       const items = [...referencesFound, ...fileItems, ...skillItems];
       setMention(current => current && current.start === start ? { ...current, items, active: Math.max(0, Math.min(current.active, items.length - 1)), loading: false } : current);
     });
@@ -194,15 +223,25 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     setMention({ start: found.start, query: found.query, items: referenceCandidates(found.query), active: 0, loading: true });
     mentionTimer.current = setTimeout(() => runMentionSearch(found.start, found.query), MENTION_DEBOUNCE_MS);
   };
+  useLayoutEffect(() => { dismissMention(); }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled]);
+  useEffect(() => {
+    const refresh = () => {
+      setSkillRefresh(current => current + 1);
+      const input = inputRef.current;
+      if (input && document.activeElement === input.element) updateMention(input.value, input.selectionStart);
+    };
+    window.addEventListener("openworkgraph:skills-changed", refresh);
+    return () => window.removeEventListener("openworkgraph:skills-changed", refresh);
+  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, references]);
   const insertMention = (item: MentionCandidate) => {
     const input = inputRef.current;
     if (!input || !mention) return;
     const text = input.value;
     const cursor = input.selectionStart ?? text.length;
-    const next = item.kind === "reference" ? insertReferenceMention(text, mention.start, cursor, item) : item.kind === "skill" ? insertSkillMention(text, mention.start, cursor, item.name) : insertProjectFileMarkdownLink(text, mention.start, cursor, item);
+    const next = item.kind === "reference" ? insertReferenceMention(text, mention.start, cursor, item) : item.kind === "skill" ? insertSkillReference(text, mention.start, cursor, item, skillReferences) : insertProjectFileMarkdownLink(text, mention.start, cursor, item);
     pendingCaret.current = next.caret;
     dismissMention();
-    onChange(next.value);
+    onChange(next.value, "skillReferences" in next ? next.skillReferences as SkillReference[] : syncSkillReferences(text, next.value, skillReferences, { start: mention.start, end: cursor, text: next.value.slice(mention.start, next.caret) }));
   };
   const recheckMention = () => {
     const input = inputRef.current;
@@ -212,13 +251,23 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     if (!found || found.start !== mention.start) dismissMention();
     else updateMentionPosition();
   };
+  const triggerMention = () => {
+    const input = inputRef.current;
+    if (!input || disabled || composing.current) return;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const prefix = start > 0 && !/\s/.test(input.value[start - 1]) ? " " : "";
+    input.focus();
+    input.setSelectionRange(start, end);
+    input.insertText(prefix + "@");
+  };
   return <section className="prompt-panel panel" aria-label={t("Prompt editor")}>
     <div className="reference-area">
       <div className="prompt-reference-heading"><span className="muted">{t("Reference content")}</span><button className="icon-button" aria-label={t("Close prompt")} onClick={onClose}><X size={14}/></button></div>
       <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
     </div>
     <div className="prompt-input">
-      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
+      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} skillReferences={skillReferences} skillNames={availableSkills?.map(item => item.name)} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
         onScroll={() => { if (mention) updateMentionPosition(); }}
         onDragOver={event => {
           if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
@@ -239,15 +288,15 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
           pendingCaret.current = next.caret;
           dismissMention();
           input.focus();
-          onChange(next.value);
+          onChange(next.value, syncSkillReferences(input.value, next.value, skillReferences, { start, end, text: next.value.slice(start, next.caret) }));
         }}
         onCompositionStart={() => { composing.current = true; dismissMention(); }}
         onCompositionEnd={(text, cursor) => {
           composing.current = false;
           updateMention(text, cursor);
         }}
-        onChange={(text, cursor) => {
-          onChange(text);
+        onChange={(text, cursor, refs) => {
+          onChange(text, refs);
           if (composing.current) { dismissMention(); return; }
           updateMention(text, cursor);
         }}
@@ -280,8 +329,8 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
       {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
         {mention.loading && <div className="prompt-mention-empty">{t("Searching…")}</div>}
         {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{skillEnabled || references.length ? t("No matching suggestions") : mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
-        {mention.items.map((item, index) => <div key={item.kind + ":" + (item.kind === "reference" ? item.id : item.kind === "skill" ? item.name : item.relativePath)}>
-          {(index === 0 || mentionGroup(mention.items[index - 1]) !== mentionGroup(item)) && <div className="prompt-mention-heading">{item.kind === "reference" ? t("Reference content") : item.kind === "skill" ? t("Skills") : t("Project files")}</div>}
+        {mention.items.map((item, index) => <div key={item.kind + ":" + (item.kind === "reference" ? item.id : item.kind === "skill" ? item.source + ":" + item.skillId : item.relativePath)}>
+          {(index === 0 || mentionGroup(mention.items[index - 1]) !== mentionGroup(item)) && <div className="prompt-mention-heading">{item.kind === "reference" ? t("Reference content") : item.kind === "skill" ? (item.source === "openworkgraph" ? t("OpenWorkgraph skills") : t("Codex skills")) : t("Project files")}</div>}
           <button type="button" role="option" aria-selected={index === mention.active}
           className={"prompt-mention-item" + (index === mention.active ? " is-active" : "")}
           onMouseDown={e => e.preventDefault()} onClick={() => insertMention(item)} onMouseEnter={() => setMention(current => current ? { ...current, active: index } : current)}>
@@ -291,9 +340,17 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
         </button></div>)}
       </div>}
     </div>
-    {inputChanged && <p className="input-changed">{t("Input updated · The next run will use the new content")}</p>}
     {children}
-    <p className="prompt-status muted" role={visibleStatus ? "status" : undefined} aria-hidden={visibleStatus ? undefined : true}>{visibleStatus || t("Placeholder")}</p>
+    <div className="prompt-status-row">
+      <button type="button" className="icon-button prompt-mention-trigger" aria-label={t("Insert mention")} title={t("Insert mention")} disabled={disabled}
+        onMouseDown={event => event.preventDefault()} onClick={triggerMention}><AtSign size={16}/></button>
+      <p className="prompt-status muted" role={notices.length ? "status" : undefined} aria-hidden={notices.length ? undefined : true}>
+        {notices.length ? notices.map((notice, index) => <span key={notice.text}>
+          {index > 0 && <span aria-hidden="true"> · </span>}
+          <span className={notice.warning ? "prompt-status-warning" : undefined}>{notice.text}</span>
+        </span>) : t("Placeholder")}
+      </p>
+    </div>
     <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} title={runHint || visibleStatus || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled} onClick={onRun}><ArrowUp size={16}/></button></footer>
   </section>;
 }

@@ -6,6 +6,7 @@ import webClientPackage from '../../package.json';
 import { WelcomeRuntimePairing } from './WelcomeRuntimePairing';
 import { WelcomeAgentSetup } from './WelcomeAgentSetup';
 import { WelcomeImageSetup } from './WelcomeImageSetup';
+import { WelcomeSkillsSetup } from './WelcomeSkillsSetup';
 import { WelcomeWorkspaceSetup } from './WelcomeWorkspaceSetup';
 import { WelcomeGraphSetup } from './WelcomeGraphSetup';
 import { WelcomeCommand } from './WelcomeCommand';
@@ -21,9 +22,9 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(true);
-  const [page, setPage] = useState<0 | 1 | 2 | 3 | 4 | 5>(0);
-  const steps = ['Welcome to Workgraph', 'Connect Workspace', 'Set up Agent', 'Set up project workspace', 'Set up image models', 'Create your first Work Graph'] as const;
-  const stepLabels = [t('Welcome'), t('Workspace'), t('Agent'), t('Project workspace'), t('Image models'), t('Work Graph')];
+  const [page, setPage] = useState<0 | 1 | 2 | 3 | 4 | 5 | 6>(0);
+  const steps = ['Welcome to Workgraph', 'Connect Workspace', 'Set up Agent', 'Set up project workspace', 'Set up image models', 'Install skills', 'Create your first Work Graph'] as const;
+  const stepLabels = [t('Welcome'), t('Workspace'), t('Agent'), t('Project workspace'), t('Image models'), t('Skills'), t('Work Graph')];
   const [setupProjectId, setSetupProjectId] = useState('');
   const [setupServiceId, setSetupServiceId] = useState('');
   const [busy, setBusy] = useState(false);
@@ -158,8 +159,11 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
         <section className="welcome-page welcome-agent-page welcome-image-page" aria-label={t('Set up image models')} inert={page !== 4}>
           {page === 4 && <WelcomeImageSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={() => setPage(5)} />}
         </section>
-        <section className="welcome-page welcome-agent-page welcome-graph-page" aria-label={t('Create your first Work Graph')} inert={page !== 5}>
-          {page === 5 && <WelcomeGraphSetup registry={registry} serviceId={setupServiceId} projectId={setupProjectId} onBusy={setBusy} onSetupWorkspace={() => setPage(3)} onComplete={(projectId, graphId) => { setOpen(false); onComplete(setupServiceId, projectId, graphId); }} />}
+        <section className="welcome-page welcome-agent-page welcome-skills-page" aria-label={t('Install skills')} inert={page !== 5}>
+          {page === 5 && <WelcomeSkillsSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={() => setPage(6)} />}
+        </section>
+        <section className="welcome-page welcome-agent-page welcome-graph-page" aria-label={t('Create your first Work Graph')} inert={page !== 6}>
+          {page === 6 && <WelcomeGraphSetup registry={registry} serviceId={setupServiceId} projectId={setupProjectId} onBusy={setBusy} onSetupWorkspace={() => setPage(3)} onComplete={(projectId, graphId) => { setOpen(false); onComplete(setupServiceId, projectId, graphId); }} />}
         </section>
       </div>
     </dialog>

@@ -1,5 +1,6 @@
+import { isSkillName } from '@openworkgraph/protocol';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Json, ResourceEnvelope } from '@openworkgraph/protocol';
+import type { Json, ResourceEnvelope, SkillReference } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
 
 type ObjectJson = { [key: string]: Json };
@@ -108,6 +109,31 @@ function validateContract(input: unknown): PluginContract {
   }
   return c;
 }
+/** Validate explicit references against the exact prompt occurrence, including boundaries. */
+export function validSkillContent(content: Json): boolean {
+  if (!object(content) || content.skillReferences === undefined) return true;
+  const refs = content.skillReferences;
+  if (!Array.isArray(refs) || refs.length > 1024 || typeof content.prompt !== 'string') return false;
+  const prompt = content.prompt;
+  let end = 0;
+  for (const value of refs) {
+    if (!object(value) || Object.keys(value).some(key => !['skillId','source','name','start','end'].includes(key))) return false;
+    const ref = value as unknown as SkillReference;
+    if (typeof ref.skillId !== 'string' || !ref.skillId.trim() || ref.skillId.length > 4096 || /[\x00-\x1f]/.test(ref.skillId) ||
+      !['openworkgraph','codex'].includes(ref.source) || !isSkillName(ref.name) ||
+      !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < end || ref.end > prompt.length ||
+      prompt.slice(ref.start,ref.end) !== '$'+ref.name ||
+      (ref.start > 0 && !/\s/.test(prompt[ref.start-1]!)) || (ref.end < prompt.length && !/[\s.,!?;，。！？；]/.test(prompt[ref.end]!))) return false;
+    end = ref.end;
+  }
+  return true;
+}
+/** Keep explicit Codex provenance while removing host paths; re-selection is required. */
+export function portableSkillContent(content: Json): Json {
+  if (!object(content) || content.skillReferences === undefined) return content;
+  if (!validSkillContent(content)) invalid('Invalid skill references');
+  return { ...content, skillReferences: (content.skillReferences as Json[]).map(ref => object(ref) && ref.source === 'codex' ? { ...ref, skillId: 'codex-unresolved:' + ref.name } : ref) };
+}
 export interface PluginInformation { state: 'available' | 'missing' | 'incompatible' | 'invalid'; typeId: string; schemaVersion: number; content: Json; reason: string | null; contract: PluginContract | null }
 export class PluginRegistry {
   constructor(private readonly db: DatabaseSync) {}
@@ -144,7 +170,7 @@ export class PluginRegistry {
     let contract: PluginContract | null;
     try { contract = this.get(type,schemaVersion); } catch { return {state:'incompatible',typeId:type,schemaVersion,content,reason:'Stored contract is incompatible',contract:null}; }
     if (!contract) return {state:'missing',typeId:type,schemaVersion,content,reason:'Resource contract is unavailable',contract:null};
-    const valid = matches(contract.contentSchema,content);
+    const valid = matches(contract.contentSchema,content) && (!builtins.has(type) || validSkillContent(content));
     return {state:valid ? 'available' : 'invalid',typeId:type,schemaVersion,content,reason:valid ? null : 'Content does not match schema',contract};
   }
   /** Pure copy-on-success migration. Caller persists new node version atomically; old version is never changed. */

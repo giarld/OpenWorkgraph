@@ -202,8 +202,13 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         {props.renderTitlePrefix?.(node)}
         <span className="owg-node-title-text">{node.title}</span>
       </div>
-      <div className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : "")}>
-        {node.type === "group" ? null : <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />}
+      <div className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : node.type === 'preview' ? ' owg-preview-body' : "")}>
+        {node.type === 'preview' ? <>
+          <div className="owg-preview-content" inert={!props.selectedIds.includes(node.id)}>
+            <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />
+          </div>
+          {!props.selectedIds.includes(node.id) && <div className="owg-preview-selection-shield" data-canvas-draggable aria-hidden="true"/>}
+        </> : node.type === "group" ? null : <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />}
       </div>
       {acceptsInput(node) && (
         <button
@@ -506,6 +511,17 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         ),
       );
     }
+    function activateSelection(allowActivate = true) {
+      const selectedNode = props.selectedIds.length === 1
+        ? props.graph.nodes.find(node => node.id === props.selectedIds[0])
+        : undefined;
+      if (selectedNode) {
+        if (!allowActivate) return;
+        if (selectedNode.type === 'text' && !selectedNode.readonly && !props.readOnly && (props.canEditTextOnSpace?.(selectedNode) ?? true)) {
+          root.current?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(selectedNode.id)}"] [data-canvas-text-editor]`)?.focus({ preventScroll: true });
+        } else if (selectedNode.type !== 'execution') props.onActivateNode?.(selectedNode);
+      } else setSpace(true);
+    }
     function focusSelection() {
       const { props, size } = current.current;
       const selected = props.graph.nodes.filter(node => props.selectedIds.includes(node.id));
@@ -709,6 +725,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       }
       setSelectedEdge(null);
       if (node) {
+        // Keep the selecting gesture on the graph even after the shield is
+        // removed, so pointerup/click cannot land in an iframe or a control.
+        if (target?.closest('.owg-preview-selection-shield')) root.current?.setPointerCapture(event.pointerId);
         if (props.readOnly) { props.onSelect([node.id]); return; }
         const port = target?.closest<HTMLElement>("[data-port]")?.dataset
           .port as Extract<Gesture, { kind: "link" }>["port"] | undefined;
@@ -1017,9 +1036,21 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         onKeyDownCapture={(e) => {
           // Node content (including execution progress) may stop key bubbling.
           // Keep the shortcut available there without stealing text or control input.
-          if (e.key.toLowerCase() !== "f" || e.repeat || e.defaultPrevented || e.nativeEvent.isComposing ||
+          const target = element(e.target);
+          if (e.repeat || e.defaultPrevented || e.nativeEvent.isComposing ||
             e.ctrlKey || e.metaKey || e.altKey || e.shiftKey ||
-            element(e.target)?.closest('input,textarea,select,button,a,[contenteditable]:not([contenteditable="false"]),[role="textbox"],dialog,[role="dialog"],[role="alertdialog"]')) return;
+            target?.closest('input,textarea,select,button:not([data-canvas-shortcut-surface]),a,[contenteditable]:not([contenteditable="false"]),[role="textbox"],dialog,[role="dialog"],[role="alertdialog"]')) return;
+          const targetId = target?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
+          const previewTarget = props.graph.nodes.some(node => node.id === targetId && node.type === 'preview');
+          // Read-only preview surfaces reserve Space for node activation,
+          // even when their pointer interactions require an interactive wrapper.
+          if (e.code === 'Space' && previewTarget) {
+            e.preventDefault();
+            e.stopPropagation();
+            activateSelection();
+            return;
+          }
+          if (e.key.toLowerCase() !== 'f') return;
           if (!current.current.props.graph.nodes.some(node => current.current.props.selectedIds.includes(node.id))) return;
           e.preventDefault();
           focusSelection();
@@ -1099,16 +1130,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             key = e.key.toLowerCase();
           if (e.code === "Space") {
             e.preventDefault();
-            const selectedNode = props.selectedIds.length === 1
-              ? props.graph.nodes.find(node => node.id === props.selectedIds[0])
-              : undefined;
-            if (selectedNode && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-              if (selectedNode.type === "text" && !selectedNode.readonly && !props.readOnly && (props.canEditTextOnSpace?.(selectedNode) ?? true)) {
-                root.current?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(selectedNode.id)}"] [data-canvas-text-editor]`)?.focus({ preventScroll: true });
-              } else if (selectedNode.type !== "execution") {
-                props.onActivateNode?.(selectedNode);
-              }
-            } else if (!selectedNode) setSpace(true);
+            activateSelection(!e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey);
           }
           if (e.key === primaryKey) setModifierDown(true);
           if (e.key === "Escape") {

@@ -27,6 +27,20 @@ const projectPath = (id: string) => '/v1/projects/' + encodeURIComponent(id);
 const key = () => randomId();
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const CHUNK = 1024 * 1024;
+function assetTypeLabel(asset: LibraryAsset): string {
+  const extension = /[^.].([a-z0-9]{1,8})$/i.exec(asset.name)?.[1];
+  if (extension) return extension.toUpperCase();
+  const mime = asset.current.mime.split(';')[0]!.trim().toLowerCase();
+  const formats: Record<string, string> = {
+    'text/plain': 'TXT', 'text/markdown': 'MD', 'image/svg+xml': 'SVG',
+    'image/jpeg': 'JPG', 'video/quicktime': 'MOV', 'audio/mpeg': 'MP3',
+    'audio/mp4': 'M4A', 'application/octet-stream': 'FILE',
+  };
+  if (formats[mime]) return formats[mime];
+  const subtype = mime.split('/')[1]?.replace(/^x-/, '');
+  if (subtype && /^[a-z0-9]{1,8}$/.test(subtype)) return subtype.toUpperCase();
+  return mime.startsWith('image/') ? 'IMAGE' : mime.startsWith('video/') ? 'VIDEO' : mime.startsWith('audio/') ? 'AUDIO' : mime.startsWith('text/') ? 'TXT' : 'FILE';
+}
 const videoCoverKey = (asset: Pick<LibraryAsset, 'projectId' | 'name'>) => {
   const dot = asset.name.lastIndexOf('.');
   return JSON.stringify([asset.projectId, dot < 0 ? asset.name : asset.name.slice(0, dot)]);
@@ -568,7 +582,6 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   ];
   const availableProjects = projects.filter(p => p.state === 'active');
   return <section className="ow-resources-panel" aria-label={t('Asset library')} aria-busy={busy}>
-    <header className="ow-assets-heading"><h2>{t('Asset library')}</h2></header>
     <div className="ow-assets-controls" ref={controls}>
     <div className="ow-assets-toolbar">
       <label className="ow-assets-search"><Search size={15} aria-hidden="true" /><input aria-label={t('Search assets')} placeholder={t('Search assets')} value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} />{search && <button aria-label={t('Clear name filter')} onClick={() => { setSearch(''); setPage(0); }}><X size={14} /></button>}</label>
@@ -595,6 +608,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
             setOpenAssetMenu(undefined); setUploadOpen(false);
           }} onDragEnd={() => { cancelDrag.current?.(); cancelDrag.current = undefined; }}>
           {group.id === 'images' || group.id === 'videos' ? <AssetThumbnail key={base + ':' + asset.current.version} video={group.id === 'videos'} thumbnailRevision={group.id === 'videos' ? videoCoverRevisions[videoCoverKey(asset)] : undefined} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : group.id === 'texts' ? <TextThumbnail request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} mime={asset.current.mime} onPreview={() => setPreview(asset)} /> : <button className="ow-assets-file-preview" onClick={() => setPreview(asset)} aria-label={t('Preview: {name}', { name: asset.name })}><File size={22} /><span>{asset.name}</span></button>}
+          <span className="ow-assets-type-badge">{assetTypeLabel(asset)}</span>
           <div className="ow-assets-quick-actions" role="group" aria-label={t('Quick actions: {name}', { name: asset.name })}>
             {!asset.deleted && <button type="button" disabled={disabled} aria-label={t('Copy independently to Work Graph: {name}', { name: asset.name })} title={t('Copy independently to Work Graph')} onClick={() => mutate(asset, 'copy')}><Plus size={18} aria-hidden="true" /></button>}
             {!asset.deleted && asset.projectId === ownerProjectId && <button type="button" disabled={disabled} aria-label={t('Delete asset: {name}', { name: asset.name })} title={t('Delete asset')} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}><Trash2 size={16} aria-hidden="true" /></button>}

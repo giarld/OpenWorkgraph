@@ -9,7 +9,7 @@ import { waitForBackups, clearStaleResourceLeases } from './backups.js';
 import { localCapacity } from './capacity.js';
 import { registerLocalPlugin } from './plugins.js';
 import { fileURLToPath } from 'node:url';
-import { isGlobalNpmInstallation, startWebUpdate } from './update.js';
+import { isGlobalNpmInstallation, isNpxInstallation, startWebUpdate } from './update.js';
 export function activeRunCount(db: DatabaseSync): number {
   return Number(db.prepare("SELECT count(*) AS n FROM runs WHERE status NOT IN ('accepted','queued','paused_restore','succeeded','failed','cancelled','interrupted')").get()!.n);
 }
@@ -19,8 +19,10 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
   let service: ReturnType<typeof createService>;
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
   const npmInstallation = isGlobalNpmInstallation(cliPath);
+  const npxInstallation = npmInstallation.then(global => global ? false : isNpxInstallation(cliPath));
   try { service = createService(lock.root, {
     npmInstallation: () => npmInstallation,
+    npxInstallation: () => npxInstallation,
     updateRuntime: async onExit => {
       if (state !== 'running') throw new Error('Runtime is stopping.');
       await startWebUpdate(cliPath, undefined, onExit);
@@ -30,10 +32,13 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
   let stopping = false;
   const drains = new Set<Promise<void>>();
   let closing: Promise<void> | undefined;
+  let listenAddress: AddressInfo;
   let recoveryAttempted = false;
   const onSignal = () => { void stop(false).catch(() => log.append('shutdown_failed')); };
   const removeSignals = () => { process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal); };
-  const status = () => ({ state, activeRuns: activeRunCount(service.db), listenHost: (service.server.address() as AddressInfo).address, ...listenerInfo(service.server.address() as AddressInfo, service.info.serviceId, service.instanceId) });
+  // server.address() becomes null as soon as HTTP shutdown begins; local
+  // management must remain available until connections close and locks release.
+  const status = () => ({ state, activeRuns: closing ? 0 : activeRunCount(service.db), listenHost: listenAddress.address, ...listenerInfo(listenAddress, service.info.serviceId, service.instanceId) });
   async function stop(interrupt: boolean): Promise<void> {
     // Escalation remains available while an earlier drain waits indefinitely.
     if (stopping && (!interrupt || state === 'interrupting')) return;
@@ -69,6 +74,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
     clearStaleResourceLeases(service.db, lock);
     await service.api.backups.recoverCreating(lock);
     await new Promise<void>((done, reject) => { service.server.once('error', reject); service.server.listen(port, host, done); });
+    listenAddress = service.server.address() as AddressInfo;
     // Own the kernel lock before transferring scheduler epochs. Runtime.start
     // resets acceptingRuns after a normal shutdown and starts its dispatch timer.
     recoveryAttempted = true;
