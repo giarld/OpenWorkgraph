@@ -515,7 +515,8 @@ export function createService(
               ? error.message
               : "服务内部错误，请检查本机服务状态。",
           requestId,
-          retryable: false,
+          retryable: error instanceof ServiceError && error.retryable,
+          ...(error instanceof ServiceError && error.details !== undefined ? { details: error.details } : {}),
         },
       };
       const projectStatus = {

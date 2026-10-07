@@ -106,7 +106,7 @@ export function createRunNotifications(options: RunNotificationOptions) {
       changed();
     },
     ingest(service: { serviceId: string; name: string }, notifications: RunNotification[]) {
-      if (notifications.some(notification => notification.run.serviceId !== service.serviceId)) throw new Error(translate("The notification snapshot contains tasks from another Runtime."));
+      if (notifications.some(notification => notification.run.serviceId !== service.serviceId)) throw new Error(translate("The notification snapshot contains tasks from another Workspace."));
       enabledServices.add(service.serviceId);
       const present = new Set(notifications.map(notification => identity(service.serviceId, notification.run.id)));
       todos.filter(todo => todo.serviceId === service.serviceId && !present.has(todo.id)).forEach(todo => close(todo.id));

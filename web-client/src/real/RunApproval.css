@@ -1,4 +1,4 @@
-.real-app .run-approval { min-width: 0; margin: 16px 0; padding: 0; overflow: hidden; background: var(--panel); border-radius: 12px; font-size: 13px; line-height: 1.6; }
+.real-app .run-approval, .run-summaries .run-approval { min-width: 0; margin: 16px 0; padding: 0; overflow: hidden; background: var(--panel); border-radius: 12px; font-size: 13px; line-height: 1.6; }
 .run-approval-heading { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border-bottom: 1px solid var(--stroke); }
 .run-approval-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: 10px; background: var(--fill); color: var(--text); }
 .run-approval-heading strong { font-size: 14px; }
@@ -18,3 +18,15 @@
 .real-app .run-approval-actions button { justify-content: center; gap: 6px; min-height: 44px; font-size: 13px; text-align: center; }
 .run-approval-actions .primary-button { flex: 1; }
 .run-approval :focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+.run-process-interactions { min-width: 0; width: 100%; overflow-wrap: anywhere; }
+.run-process-interactions:empty { display: none; }
+.run-interaction-record { margin-block: 8px; padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px; }
+.run-interaction-record > summary { min-height: 32px; cursor: pointer; }
+.run-process-interactions .interaction-box { margin-block: 12px; }
+.run-summaries .run-approval-heading, .run-summaries .run-approval-body { padding: 12px; }
+.run-summaries .run-approval-heading p { display: none; }
+.run-summaries .run-approval-actions { padding: 10px 12px; }
+.run-summaries .run-approval-command pre { max-height: 140px; }
+.run-summaries .run-process-interactions { --panel: var(--canvas-panel); --canvas: var(--canvas-bg); --text: var(--canvas-text); --muted: var(--canvas-muted); --stroke: var(--canvas-border); --fill: var(--canvas-hover); --active: var(--canvas-active); color: var(--text); }
+.run-summaries .run-approval-actions button { flex: 1 1 100%; justify-content: center; min-height: 44px; white-space: nowrap; }
+.run-summaries .run-approval-actions .secondary-button { color: var(--text); }

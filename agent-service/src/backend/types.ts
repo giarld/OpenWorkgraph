@@ -18,4 +18,6 @@ export interface BackendCallbacks {
   readRunContext?(request: RunContextRequest): Promise<string>;
 }
 export interface BackendAdapter { start(context: BackendRunContext, callbacks: BackendCallbacks): Promise<RuntimeSnapshot>; cancel(runId: string): Promise<RuntimeSnapshot>; respond(runId: string, interactionId: string, reply: BackendReply): Promise<RuntimeSnapshot>; reconcile(runId: string): Promise<RuntimeSnapshot> }
-export class BackendError extends Error { constructor(readonly code: 'UNAVAILABLE' | 'PROTOCOL' | 'TIMEOUT' | 'CONFLICT' | 'INVALID_INPUT' | 'MODEL_UNAVAILABLE' | 'ISOLATION_UNVERIFIED', message: string) { super(message); this.name = 'BackendError'; } }
+/** Only bounded metadata; raw backend messages may contain credentials and paths. */
+export interface BackendDiagnostic { reason?: 'unsupported_version' | 'invalid_handshake' | 'invalid_catalog'; method?: string; timeoutMs?: number; rpcCode?: number; version?: string }
+export class BackendError extends Error { constructor(readonly code: 'UNAVAILABLE' | 'PROTOCOL' | 'TIMEOUT' | 'CONFLICT' | 'INVALID_INPUT' | 'MODEL_UNAVAILABLE' | 'ISOLATION_UNVERIFIED', message: string, readonly diagnostic?: BackendDiagnostic) { super(message); this.name = 'BackendError'; } }

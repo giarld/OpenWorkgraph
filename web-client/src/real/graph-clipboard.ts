@@ -159,7 +159,7 @@ export function assertResourcePasteTarget(raw: string, target: ClipboardScope): 
       payload.source.projectId !== target.projectId)
   )
     throw Error(
-      translate("Pasting resources across Runtimes or projects is not supported. Use Work Graph export and import. No resources were created."),
+      translate("Pasting resources across Workspaces or projects is not supported. Use Work Graph export and import. No resources were created."),
     );
 }
 
@@ -495,7 +495,7 @@ export function createResourcePasteJob(
   }))
     throw Error(translate("An untrusted reference-node clipboard cannot read project files. No resources were created."));
   if (projectFiles.length && payload.source.serviceId !== target.serviceId)
-    throw Error(translate("Pasting reference nodes across Runtimes is not supported. Use Work Graph export and import. No resources were created."));
+    throw Error(translate("Pasting reference nodes across Workspaces is not supported. Use Work Graph export and import. No resources were created."));
   const copies = new Map<string, CanvasCreated>();
   const projectCopies = new Map<string, ProjectFilePasteCopy>();
   const projectStatuses = new Map<string, { mime: string }>();

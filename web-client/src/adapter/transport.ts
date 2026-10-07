@@ -36,6 +36,7 @@ export interface TransportOptions {
 }
 function immutableMediaPath(path: string): boolean {
   const pathname = path.split('?')[0] ?? path;
+  if (pathname.endsWith('/thumbnail') && new URLSearchParams(path.slice(pathname.length + 1)).get('video') === '1') return false;
   if (/^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/thumbnail$/.test(pathname) &&
       /\.(?:mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(new URLSearchParams(path.slice(pathname.length + 1)).get('path') ?? ''))
     return false;
@@ -133,14 +134,14 @@ export class Transport {
       /^\/v1\/projects\/[A-Za-z0-9_-]+\/files(?:\/(?:search|content|link-content|media|thumbnail))?$/.test(pathname);
     const skillsQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
       /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills\/search$/.test(pathname);
-    const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(path);
+    const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(pathname);
     if (
       parts.length > 2 || path.includes('#') ||
       !/^\/(?:health|v1(?:\/[A-Za-z0-9_.-]+)*)$/.test(pathname) ||
       pathname.split("/").some((p) => p === "." || p === "..") ||
       (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery)
     )
-      throw new TransportError("INVALID_REQUEST", translate("Only standard API paths for this Runtime are allowed"));
+      throw new TransportError("INVALID_REQUEST", translate("Only standard API paths for this Workspace are allowed"));
   }
   async open(
     path: string,
@@ -217,7 +218,7 @@ export class Transport {
       method ?? (body === undefined ? "GET" : "POST")
     ).toUpperCase();
     if (!["GET", "POST", "DELETE", "BLOB", "RANGE"].includes(verb))
-      throw new TransportError("INVALID_REQUEST", translate("The Runtime only supports GET, POST, and DELETE"));
+      throw new TransportError("INVALID_REQUEST", translate("The Workspace only supports GET, POST, and DELETE"));
     if ((verb === "GET" || verb === "BLOB" || verb === "RANGE") && body !== undefined)
       throw new TransportError("INVALID_REQUEST", translate("GET requests do not accept a request body"));
     if (verb === "RANGE" && (!options.range || !Number.isSafeInteger(options.range.start) || !Number.isSafeInteger(options.range.end) || options.range.start < 0 || options.range.end < options.range.start))
@@ -295,11 +296,11 @@ export class Transport {
         method === "RANGE"
           ? await (async (): Promise<RangeBlob> => {
               const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("Content-Range") ?? "");
-              if (response.status !== 206 || !match) throw new TransportError("INVALID_REQUEST", translate("The Runtime did not return a valid media byte range"));
+              if (response.status !== 206 || !match) throw new TransportError("INVALID_REQUEST", translate("The Workspace did not return a valid media byte range"));
               const [, start, end, total] = match;
               const blob = await response.blob();
               if (![start,end,total].every(value => Number.isSafeInteger(Number(value))) || Number(total) <= Number(end) || Number(start) !== options.range?.start || Number(end) < Number(start) || Number(end) > options.range!.end || blob.size !== Number(end) - Number(start) + 1)
-                throw new TransportError("INVALID_REQUEST", translate("The Runtime returned inconsistent media bytes"));
+                throw new TransportError("INVALID_REQUEST", translate("The Workspace returned inconsistent media bytes"));
               return { blob, start:Number(start), end:Number(end), total:Number(total), mime:response.headers.get("Content-Type") ?? blob.type };
             })()
           : method === "BLOB"
@@ -340,7 +341,7 @@ export class Transport {
       }
       if (method === "POST" && body instanceof Blob && body.type === GRAPH_BINARY_MIME &&
           error instanceof TransportError && error.code === "UNSUPPORTED_MEDIA_TYPE")
-        throw new TransportError(error.code, translate("This Runtime does not support Work Graph binary import. Update the Runtime and try again."), error.status, error.details);
+        throw new TransportError(error.code, translate("This Workspace does not support Work Graph binary import. Update the Workspace and try again."), error.status, error.details);
       throw error;
     }
   }

@@ -33,6 +33,8 @@
   color: var(--muted);
   margin-left: auto;
 }
+.real-header .github-repository-link { margin-left: 0; text-decoration: none; }
+.real-header .github-repository-link:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
 .desktop-notification-button { position: relative; }
 .language-switcher { position: relative; }
 .language-menu {

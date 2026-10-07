@@ -14,7 +14,7 @@ export interface TemporaryServiceBinding {
   /** Must check connection generation, selected graph and selected project. */
   isCurrent: () => boolean;
 }
-export const temporaryExecutionReason = 'The current Runtime can only execute Work Graphs in its database. A temporary execution contract that preserves browser Work Graph identity, resources, and run results is not available yet.';
+export const temporaryExecutionReason = 'The current Workspace can only execute Work Graphs in its database. A temporary execution contract that preserves browser Work Graph identity, resources, and run results is not available yet.';
 const failure = (code: string, message: string) => Object.assign(Error(message), { code });
 const digest = (value: string) => bytesToHex(sha256(new TextEncoder().encode(value)));
 type Store = Pick<TemporaryCanvasStore, 'request' | 'readResource' | 'reserveServiceOperation' | 'finishServiceOperation'>;
@@ -27,8 +27,8 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
   const local = graphPath('temporary', graphId);
   const remote = binding ? '/v1/projects/' + encodeURIComponent(binding.projectId) : '';
   const guard = () => {
-    if (!binding) throw failure('SERVICE_UNAVAILABLE', translate("Connect a Runtime and select the project that owns the asset library."));
-    if (!binding.isCurrent()) throw failure('REQUEST_CANCELLED', translate("The Work Graph, project, or Runtime connection for this request changed."));
+    if (!binding) throw failure('SERVICE_UNAVAILABLE', translate("Connect a Workspace and select the project that owns the asset library."));
+    if (!binding.isCurrent()) throw failure('REQUEST_CANCELLED', translate("The Work Graph, project, or Workspace connection for this request changed."));
   };
   const send: Request = async <T>(path: string, body?: unknown, method?: string) => {
     guard();
@@ -95,7 +95,7 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
     try { return await promise; } finally { pending.delete(key); }
   }
   const request: Request = async <T>(path: string, body?: unknown, method?: string): Promise<T> => {
-    if (path === '/v1/models') throw failure('TEMPORARY_MODELS_UNAVAILABLE', translate("Temporary Work Graphs do not use the Runtime model catalog."));
+    if (path === '/v1/models') throw failure('TEMPORARY_MODELS_UNAVAILABLE', translate("Temporary Work Graphs do not use the Workspace model catalog."));
     if (path === local + '/runs' || path === local + '/input-preview') {
       guard();
       throw failure('TEMPORARY_EXECUTION_UNSUPPORTED', translate(temporaryExecutionReason));

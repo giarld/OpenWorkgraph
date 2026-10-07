@@ -1,5 +1,5 @@
 {
-  "name": "@openworkgraph/protocol", "version": "0.2.11", "private": true, "type": "module",
+  "name": "@openworkgraph/protocol", "version": "0.2.13", "private": true, "type": "module",
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json" }
 }

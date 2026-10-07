@@ -1,6 +1,7 @@
 import type { Json } from '../../../packages/protocol/src/index';
 import '../i18n/catalogs/runs';
 import { translate } from '../i18n/translate';
+import { displayTerminology } from '../i18n/display-terminology';
 
 export interface RunProgressHistory {
   historyState: 'retained' | 'cleared';
@@ -24,7 +25,7 @@ const runStates: Record<string, string> = {
   interrupted: 'Run interrupted', reconciling: 'Verifying execution result', paused_restore: 'Paused after restore, waiting to continue',
 };
 const events: Record<string, string> = {
-  'interaction.reply': 'Interaction reply submitted, waiting for Runtime confirmation',
+  'interaction.reply': 'Interaction reply submitted, waiting for Workspace confirmation',
   'generation.accepted': 'Generated candidate accepted', 'generation.discarded': 'Generated candidate discarded',
   'scheduler.error': 'A scheduling error occurred. Check the run status.', 'reconcile.error': 'Execution result verification failed. The result is still pending confirmation.',
 };
@@ -66,7 +67,7 @@ function parseProgressEntries(history: RunProgressHistory | null | undefined, ma
       const payload = object(record.payload);
       const to = payload?.to;
       if (typeof to === 'string' && Object.hasOwn(runStates, to)) pushState(translate(runStates[to]));
-      if (to === 'failed' && typeof payload?.reason === 'string' && payload.reason.trim()) push('message', translate('Failure reason: {reason}', { reason: payload.reason.trim() }));
+      if (to === 'failed' && typeof payload?.reason === 'string' && payload.reason.trim()) push('message', translate('Failure reason: {reason}', { reason: displayTerminology(payload.reason.trim()) }));
       continue;
     }
     if (record.kind !== 'backend.progress') continue;

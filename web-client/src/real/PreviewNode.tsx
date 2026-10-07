@@ -1,5 +1,6 @@
+import { FilePreviewMetadata } from './FilePreviewMetadata';
 import { PreviewActionButton } from './PreviewActionButton';
-import { Component, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Component, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { graphPath, type GraphSnapshot, type Request } from './contracts';
 import { CanvasProjectFilePreview, CanvasResourcePreview } from './ResourcesPanel';
 import { hexDump, previewFormat, type PreviewMode } from './preview-formats';
@@ -113,35 +114,41 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
     {state?.status==='unavailable'&&<p role="status">{state.error?t('The project file is currently unavailable: {error}', {error:state.error}):t('The project file is currently unavailable.')} <button onClick={()=>setRetry(value=>value+1)}>{t('Retry preview')}</button></p>}
     {state?.blob&&<FileContent blob={state.blob} name={name} mime={mime||state.blob.type} preferredMode={preferredMode} onModeChange={onModeChange} showName={showName}/>}
     {state?.stream&&<StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} showName={showName} download={download}/>}
-    {download&&state?.blob&&<FileDownload blob={state.blob} name={name}/>}
+    {download&&state?.blob&&<FileDownload blob={state.blob} name={name} mime={mime}/>}
   </div>;
 }
 
 /** Resource-scoped entry point shared by node previews and file dialogs. */
 export function ResourceFilePreview({request,projectId,graphId,resourceId,version,name,mime,showName=true}: {request:Request;projectId:string;graphId:string;resourceId:string;version:number;name:string;mime:string;showName?:boolean}) {
   const path = graphPath(projectId,graphId) + '/resources/' + encodeURIComponent(resourceId) + '/versions/' + version;
-  const registryVersion = useSyncExternalStore(subscribePreviewRegistry, getPreviewRegistryVersion, getPreviewRegistryVersion);
-  return <PreviewBoundary resetKey={path + ':' + registryVersion}><FilePreview key={path} request={request} path={path} name={name} mime={mime} download showName={showName}/></PreviewBoundary>;
+  return <VersionedFilePreview request={request} path={path} name={name} mime={mime} showName={showName}/>;
 }
 
-function FileDownload({blob,name,children}: {blob:Blob;name:string;children?:ReactNode}) {
+/** Asset and Work Graph dialogs resolve formats through the same registry. */
+export function VersionedFilePreview({request,path,name,mime,showName=false,onError}: {request:Request;path:string;name:string;mime:string;showName?:boolean;onError?:(error:unknown)=>void}) {
+  const registryVersion = useSyncExternalStore(subscribePreviewRegistry, getPreviewRegistryVersion, getPreviewRegistryVersion);
+  return <PreviewBoundary resetKey={path + ':' + registryVersion}><FilePreview key={path} request={request} path={path} name={name} mime={mime} download showName={showName} onError={onError}/></PreviewBoundary>;
+}
+
+function FileDownload({blob,name,mime,children}: {blob:Blob;name:string;mime?:string;children?:ReactNode}) {
   const [url,setUrl] = useState('');
   useEffect(() => {
     const next = URL.createObjectURL(new Blob([blob], {type:'application/octet-stream'}));
     setUrl(next);
     return () => URL.revokeObjectURL(next);
   }, [blob]);
-  return <footer className="ow-preview-download"><PreviewActionButton action="download" disabled={!url} onClick={() => {
+  return <footer className="ow-preview-download"><FilePreviewMetadata blob={blob} name={name} mime={mime}/><PreviewActionButton action="download" disabled={!url} onClick={() => {
     const anchor = document.createElement('a');
     anchor.href=url; anchor.download=name.replaceAll(/[\\/]/g,'_');
     document.body.append(anchor); anchor.click(); anchor.remove();
   }}/>{children}</footer>;
 }
 
-function FilePreview({ request, path, name, mime, download=false, preferredMode, onModeChange, showName=true }: { request: Request; path: string; name: string; mime: string; download?:boolean; preferredMode?:PreviewMode; onModeChange?:(mode:PreviewMode)=>void; showName?:boolean }) {
+function FilePreview({ request, path, name, mime, download=false, preferredMode, onModeChange, showName=true, onError }: { request: Request; path: string; name: string; mime: string; download?:boolean; preferredMode?:PreviewMode; onModeChange?:(mode:PreviewMode)=>void; showName?:boolean; onError?:(error:unknown)=>void }) {
   const {t} = useI18n();
   const [state, setState] = useState<{ blob?: Blob; stream?:{path:string;bytes:number}; error?: string }>();
   const [retry, setRetry] = useState(0);
+  const errors = useRef(onError); errors.current = onError;
   useEffect(() => {
     let active = true;
     setState(undefined);
@@ -155,7 +162,7 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
       }
       const blob=await request<Blob>(path + '/content', undefined, 'BLOB');
       if (active) setState({ blob });
-    })().catch(e => { if (active) setState({ error: e instanceof Error ? e.message : String(e) }); });
+    })().catch(e => { if (active) { setState({ error: e instanceof Error ? e.message : String(e) }); errors.current?.(e); } });
     return () => { active = false; };
   }, [request, path, retry]);
   return <div className="ow-preview-node" data-canvas-interactive>
@@ -163,7 +170,7 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
     {state?.error && <p role="status">{t('Preview failed: {error}', {error:state.error})} <button onClick={() => setRetry(n => n + 1)}>{t('Retry preview')}</button></p>}
     {state?.blob && <FileContent blob={state.blob} name={name} mime={mime || state.blob.type} preferredMode={preferredMode} onModeChange={onModeChange} showName={showName}/>}
     {state?.stream && <StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} showName={showName} download={download}/>}
-    {download && state?.blob && <FileDownload blob={state.blob} name={name}/>}
+    {download && state?.blob && <FileDownload blob={state.blob} name={name} mime={mime}/>}
   </div>;
 }
 
@@ -198,7 +205,7 @@ function StreamFileDownload({request,path,bytes,name,children}: {request:Request
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setProgress(undefined); }
   };
-  return <footer className="ow-preview-download"><PreviewActionButton action="download" busy={progress!==undefined} progress={progress} onClick={() => void download()}/>{children}{error && <span role="status">{error}</span>}</footer>;
+  return <footer className="ow-preview-download"><FilePreviewMetadata bytes={bytes} name={name}/><PreviewActionButton action="download" busy={progress!==undefined} progress={progress} onClick={() => void download()}/>{children}{error && <span role="status">{error}</span>}</footer>;
 }
 
 function FileContent({ blob, name, mime, preferredMode, onModeChange, showName=true }: { blob: Blob; name: string; mime: string; preferredMode?:PreviewMode; onModeChange?:(mode:PreviewMode)=>void; showName?:boolean }) {

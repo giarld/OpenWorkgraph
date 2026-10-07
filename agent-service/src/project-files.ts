@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import sharp from 'sharp';
+import { videoThumbnail as extractVideoThumbnail } from './video-thumbnail.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -338,17 +339,12 @@ export class ProjectFiles {
     if (cached) return cached;
     try {
       // ffmpeg reads the local file directly; no full-video Buffer or HTTP download.
-      const { stdout } = await execFileAsync('ffmpeg', [
-        '-v', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-i', file.path,
-        '-map', '0:v:0', '-frames:v', '1', '-vf',
-        'scale=' + size + ':' + size + ':force_original_aspect_ratio=decrease',
-        '-threads', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
-      ], { encoding:'buffer', timeout:10_000, maxBuffer:2 * 1024 * 1024, windowsHide:true });
+      const bytes = await extractVideoThumbnail(file.path, size);
       const current = await this.resolve(projectId, path, 'file');
       const after = await fs.stat(current.path, { bigint:true });
       if (current.path !== file.path || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)
         throw new ServiceError('CONFLICT', '视频文件在生成封面时已变化，请重试。');
-      const result = { bytes:await sharp(stdout).webp({ quality:75 }).toBuffer(), mime:'image/webp' };
+      const result = { bytes, mime:'image/webp' };
       if (this.videoFrames.size >= 32) this.videoFrames.delete(this.videoFrames.keys().next().value!);
       this.videoFrames.set(key, result);
       return result;

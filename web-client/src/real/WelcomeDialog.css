@@ -50,6 +50,12 @@
 .welcome-setup-steps h3 { margin: 0 0 8px; font-size: 16px; }
 .welcome-setup-steps p { margin: 8px 0; color: var(--muted); line-height: 1.6; }
 .welcome-setup-steps a { color: var(--link); text-underline-offset: 4px; line-height: 1.7; overflow-wrap: anywhere; }
+.welcome-setup-steps .welcome-start-note { font-size: 12px; }
+.welcome-start-options { margin-top: 12px; }
+.welcome-start-options summary { display: list-item; width: fit-content; padding-block: 6px; color: var(--welcome-muted); cursor: pointer; font-size: 13px; }
+.welcome-start-options summary:focus-visible { outline: 2px solid var(--active); outline-offset: 4px; border-radius: 2px; }
+.welcome-start-options-content { display: grid; gap: 8px; padding-top: 4px; }
+.welcome-start-options-content p { font-size: 13px; }
 .welcome-command { min-width: 0; }
 .welcome-command-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); }
 .welcome-install-command { flex: 1; min-width: 0; margin: 0; padding: 4px; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; }
@@ -62,7 +68,7 @@
 .welcome-pairing form { display: grid; gap: 12px; }
 .welcome-pairing button { justify-self: start; }
 .welcome-pairing [role=alert] { color: var(--danger, #d33); overflow-wrap: anywhere; }
-.welcome-agent-page { overflow: auto; padding: 32px 40px 40px; scrollbar-gutter: stable; }
+.welcome-agent-page { overflow: hidden; padding: 0; }
 .welcome-agent-setup { display: grid; gap: 14px; }
 .welcome-agent-setup > header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
 .welcome-agent-setup h2 { margin: 0; font-size: 24px; }
@@ -80,17 +86,12 @@
 .welcome-agent-status.success svg { color: var(--text); }
 .welcome-agent-status.error svg, .welcome-agent-save-error { color: var(--danger, #d33); }
 .welcome-agent-card button { display: inline-flex; align-items: center; justify-self: start; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); }
-.welcome-agent-finish { justify-self: end; min-height: 40px; padding: 9px 16px; }
 .welcome-agent-save-error { margin: 0; overflow-wrap: anywhere; }
 .welcome-image-setup .welcome-agent-card > h3 { margin: 0; }
 .welcome-workspace-setup .welcome-agent-card > h3 { margin: 0; }
 .welcome-workspace-setup input { width: 100%; min-width: 0; min-height: 44px; }
 .welcome-workspace-path { overflow-wrap: anywhere; }
 .welcome-graph-setup input { width: 100%; min-width: 0; min-height: 44px; }
-.welcome-graph-actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-top: 12px; }
-.welcome-graph-actions .primary-button { background: var(--text); color: var(--panel); }
-.welcome-workspace-actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
-.welcome-workspace-actions .primary-button { background: var(--text); color: var(--panel); }
 .welcome-image-setup .welcome-agent-card input:not([type=checkbox]) { width: 100%; min-width: 0; min-height: 44px; }
 .welcome-image-models { display: grid; gap: 8px; }
 .welcome-image-models > label { display: flex; flex-direction: row; align-items: center; gap: 12px; min-height: 44px; margin: 0; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; }
@@ -98,10 +99,12 @@
 .welcome-image-models span { min-width: 0; overflow-wrap: anywhere; }
 .welcome-image-models code { display: block; margin-top: 4px; color: var(--welcome-muted); }
 /* Keep the action row outside the scrollport so no form content can leak below it. */
-.welcome-page.welcome-image-page { padding: 0; overflow: hidden; scrollbar-gutter: auto; }
-.welcome-image-setup { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100%; min-height: 0; }
-.welcome-image-content { min-height: 0; overflow: auto; align-content: start; padding: 32px 40px 24px; scrollbar-gutter: stable; scroll-padding-block: 24px; }
-.welcome-image-actions { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 40px; background: var(--panel); border-top: 1px solid var(--stroke); }
+.welcome-step-layout { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100%; min-height: 0; min-width: 0; }
+.welcome-step-content { min-height: 0; min-width: 0; overflow: auto; align-content: start; padding: 32px 40px 24px; scrollbar-gutter: stable; scroll-padding-block: 24px; }
+.welcome-step-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: center; gap: 12px; padding: 16px 40px; background: var(--panel); border-top: 1px solid var(--stroke); }
+.welcome-step-actions > button { min-width: 0; justify-content: center; overflow-wrap: anywhere; }
+.welcome-step-actions > .secondary-button { justify-self: start; }
+.welcome-step-actions > .primary-button { justify-self: end; background: var(--text); color: var(--panel); }
 .welcome-progress-label { min-width: 0; }
 @media (min-width: 601px) {
   .welcome-progress { gap: 12px; }
@@ -119,9 +122,10 @@
   .welcome-progress li { gap: 6px; }
   .welcome-progress li:not([aria-current]) .welcome-progress-label { display: none; }
   .welcome-progress-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .welcome-intro, .welcome-tutorial, .welcome-agent-page { padding: 24px 20px; }
-  .welcome-image-content { padding: 24px 20px; }
-  .welcome-image-actions { padding: 16px 20px; }
+  .welcome-intro, .welcome-tutorial { padding: 24px 20px; }
+  .welcome-step-content { padding: 24px 20px; }
+  .welcome-step-actions { padding: 16px 20px; }
+  .welcome-step-actions > button { width: 100%; }
   .welcome-graph-preview { flex-basis: 116px; margin-bottom: 24px; }
   .welcome-preview-node { width: 62px; padding: 10px; }
   .welcome-preview-agent { width: 72px; padding-block: 16px; }
@@ -131,7 +135,6 @@
   .welcome-setup-steps > li::before { top: 16px; left: 16px; }
   .welcome-setup-steps > li > h3 { padding-left: 32px; }
   .welcome-agent-card { padding: 16px; }
-  .welcome-agent-finish { justify-self: stretch; }
   .welcome-agent-fields { grid-template-columns: 1fr; }
   .welcome-intro p { margin: 16px 0 24px; font-size: 14px; }
 }

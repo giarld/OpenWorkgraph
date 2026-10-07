@@ -1,9 +1,11 @@
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import { useRunProgress, useRunPrompts, useInputChanges } from "./use-run-progress";
+import { NodeRunInteractions } from './NodeRunInteractions';
 import { PromptEditor } from "../components/RunPanels";
 import { DocumentDialog } from "../components/DocumentDialog";
 import { LinkedVideoPreview, LinkedFilePreview, PreviewNode, ProjectFilePreview, ResourceFilePreview } from "./PreviewNode";
-import { previewMode, type PreviewMode } from './preview-formats';
+import { previewFormat, previewMode, type PreviewMode } from './preview-formats';
+import { VideoNodeSummary } from './VideoNodeSummary';
 import { ExecutionOutputList } from "./ExecutionOutputList";
 import { Toast } from './Toast';
 import { createPortal } from "react-dom";
@@ -142,7 +144,7 @@ function ProjectFileContent({ request, projectId, source, mime, name, compact = 
   if (value.state === 'loading') return <p className="muted">{t('Reading {path}…', {path})}</p>;
   if (value.state === 'missing') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{t('The project file no longer exists. Its reference and connections are preserved.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Check again')}</button></div>;
   if (value.state === 'too-large') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{t('The file exceeds 50 MiB and cannot be previewed. Reduce its size and try again.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry reading')}</button></div>;
-  if (value.state === 'unavailable') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{value.error || t('The project file is currently unavailable. Check the runtime or project directory.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry reading')}</button></div>;
+  if (value.state === 'unavailable') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{value.error || t('The project file is currently unavailable. Check the workspace or project directory.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry reading')}</button></div>;
   if (mime.startsWith('image/')) return <div className="ow-project-reference-preview"><img src={'data:' + mime + ';base64,' + value.data} alt={name} onContextMenu={e => e.preventDefault()}/><small>{path}</small></div>;
   if (mime.startsWith('text/') || ['application/json','application/xml','application/yaml'].includes(mime)) {
     const bytes = Uint8Array.from(atob(value.data ?? ''), character => character.charCodeAt(0));
@@ -723,6 +725,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const legacySize = legacyFileSizes[wire.id];
     return [wire.id, JSON.stringify([
       wire.contentVersion,
+      readOnly,
+      wire.readOnly,
       projectFilesRevision,
       legacySize?.key,
       legacySize?.bytes,
@@ -732,7 +736,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       runProgress?.error,
       run ? submittedPrompts[run.id] : undefined,
     ])] as const;
-  })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision]);
+  })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly]);
   const selectedRun = graphRuns.filter(r => r.nodeId === node?.id).at(-1);
   const inputChanged = useInputChanges(props.request, selectedRun, props.online, g.executionRevision);
   const draft = state.drafts.find((d) => d.nodeId === node?.id);
@@ -1259,7 +1263,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         }
         if (pending.size) await new Promise(resolve=>setTimeout(resolve,1000));
       }
-      if (pending.size) throw Error(t('The Runtime has not finished stopping the task. Try undo again after it settles.'));
+      if (pending.size) throw Error(t('The Workspace has not finished stopping the task. Try undo again after it settles.'));
       await editor.refresh();
       const current=editor.getSnapshot().graph;
       if (current.graphId!==before.graphId || current.history?.cursor!==before.history?.cursor)
@@ -1355,7 +1359,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       props.onError(new Error(customSizeIssue));
     }
   }, [customSizeIssue, props.onError]);
-  const apiBlock = selectedRoute.type==='api' ? !selectedProvider ? t('The selected image generation provider does not exist. Select it again in Runtime management.')
+  const apiBlock = selectedRoute.type==='api' ? !selectedProvider ? t('The selected image generation provider does not exist. Select it again in Workspace management.')
     : !selectedProvider.enabled ? t('The selected image generation provider is disabled.')
     : !selectedProvider.credentialConfigured ? t('The selected provider credentials are not configured or have been revoked.')
     : !selectedImageModel ? t('The selected image model does not exist.')
@@ -1365,13 +1369,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     : undefined : undefined;
   const missingInput = node?.type==='image' && !String(content.prompt??'').trim() && !(imagePreview?.nodeId===node.id && imagePreview.hasImage);
   const missingImageInputHint = t('Enter a prompt or connect an existing image resource.');
-  const imageIssue = imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a frozen reference image'
+  const imageIssue = imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a reference image'
+    || imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a frozen reference image'
     ? missingImageInputHint : imagePreview?.issues[0];
   const imageBlock = node?.type==='image' ? (imagePreview?.nodeId!==node.id ? t('Checking frozen image inputs…') : imageIssue ?? (missingInput?missingImageInputHint:selectedRoute.type==='api'?apiBlock??customSizeIssue:customSizeIssue??(!props.imageAvailable?props.imageReason??t('Codex image generation is unavailable.'):undefined))) : undefined;
   const runDisabled = promptDisabled || running || (node?.type==='image' ? Boolean(imageBlock) || (selectedRoute.type==='codex' && !props.executionAvailable) : !String(content.prompt ?? "").trim() || !props.executionAvailable);
-  const unavailableReason = !props.online ? t('The Runtime is disconnected or synchronizing. Connect and try again.')
+  const unavailableReason = !props.online ? t('The Workspace is disconnected or synchronizing. Connect and try again.')
     : node?.type==='image' ? imageBlock ?? (selectedRoute.type==='codex' && !props.executionAvailable ? props.executionReason ?? t('Codex execution is unavailable.') : undefined)
-    : !props.executionAvailable ? props.executionReason ?? t('Runtime execution is unavailable.') : undefined;
+    : !props.executionAvailable ? props.executionReason ?? t('Workspace execution is unavailable.') : undefined;
   const inlinePromptStatus = unavailableReason === missingImageInputHint ? undefined : unavailableReason;
   const submitNodeRun = async () => {
     if (!node || runDisabled) return;
@@ -1455,6 +1460,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (projectFileImport.state === 'loading' || projectFileImport.state === 'failed') return <div className="node-content ow-resource-import-state">{projectFileImport.state === 'loading' ? <LoaderCircle size={28} className="ow-resource-import-spinner" aria-hidden="true"/> : <CircleAlert size={28} aria-hidden="true"/>}<strong>{n.title}</strong><span>{projectFileImport.state === 'loading' ? t('Linking project file…') : t('Project file linking failed. Add the same file again to retry.')}</span></div>;
     const projectSource = object(c.source);
     if (projectSource.kind === 'project-file-empty') return <div className="node-content ow-empty-reference-node" aria-label={t('Empty reference node. Drop any project file here to associate it.')}><Link2 size={32} aria-hidden="true"/></div>;
+    if (wire.schemaVersion === 1 && (wire.type === 'video' || wire.type === 'file' && previewFormat(String(projectSource.relativePath ?? n.title), String(c.mime ?? '')) === 'video')) {
+      const relativePath = projectSource.kind === 'project-file' ? String(projectSource.relativePath) : undefined;
+      const resourcePath = typeof c.resourceId === 'string' ? graphPath(g.projectId, g.graphId) + '/resources/' + encodeURIComponent(c.resourceId) + '/versions/' + Number(c.resourceVersion) : undefined;
+      if (relativePath !== undefined || resourcePath) return <VideoNodeSummary key={[wire.id, wire.contentVersion, projectFilesRevision].join(':')} request={relativePath !== undefined ? props.serviceRequest ?? props.request : props.request} projectId={g.projectId} relativePath={relativePath} resourcePath={resourcePath} name={n.title} mime={String(c.mime ?? '')} bytes={typeof c.bytes === 'number' ? c.bytes : undefined}/>;
+    }
     if (projectSource.kind === 'project-file') {
       if (wire.type === 'file') return <div className="node-content ow-file-node"><FileIcon size={32}/><div className="ow-file-metadata"><strong title={n.title}>{n.title}</strong><span className="ow-file-size" title={String(projectSource.relativePath)}>{String(projectSource.relativePath)}</span></div></div>;
       if (wire.type === 'image' || wire.type === 'video') return <CanvasProjectFilePreview key={String(projectSource.relativePath) + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(projectSource.relativePath)} mime={String(c.mime ?? 'application/octet-stream')} name={n.title} imageNode={wire.type === 'image'} onError={props.onError}/>;
@@ -1468,7 +1478,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     }
     if (wire.schemaVersion === 1 && !c.resourceId && n.type === "execution") {
       const run = graphRuns.filter(r => r.nodeId === n.id).at(-1);
-      return <div className="node-content"><RunSummary node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedPrompts[run.id] ?? n.prompt } : undefined}/></div>;
+      return <div className="node-content"><RunSummary interaction={run ? <NodeRunInteractions key={run.id} run={run} request={props.request} disabled={readOnly || !!n.readonly} onChanged={props.onChanged} onError={props.onError}/> : undefined} node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedPrompts[run.id] ?? n.prompt } : undefined}/></div>;
     }
     if (wire.schemaVersion === 1 && n.type === "document") return <DocumentNodeContent node={n} wire={wire} request={props.request} imageRequest={props.serviceRequest ?? props.request} imageRevision={projectFilesRevision} onOpenLink={openMarkdownLink}/>;
     if (wire.schemaVersion === 1 && !c.resourceId && ["image", "video", "audio"].includes(n.type)) return <div className="node-content"><ContentPlaceholder node={n}/></div>;
@@ -1555,7 +1565,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       </Toast>
     ))}
     <Toast open={!state.online && props.runtimeUnavailable !== false && !pasteState.count} duration={null}>
-      {t('The Runtime is unavailable. The Work Graph remains read-only with pan and zoom enabled. Accepted tasks continue running in the Runtime, and drafts are not overwritten automatically.')}
+      {t('The Workspace is unavailable. The Work Graph remains read-only with pan and zoom enabled. Accepted tasks continue running in the Workspace, and drafts are not overwritten automatically.')}
     </Toast>
   </>;
   return (
@@ -1614,7 +1624,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       />}
       {confirmUndoRunIds && <div className="modal-backdrop markdown-link-confirm-backdrop" onClick={()=>{if(!stoppingUndoRuns)setConfirmUndoRunIds(undefined);}}><section className="reference-preview panel markdown-link-confirm" role="alertdialog" aria-modal="true" aria-label={t('Undo running task')} tabIndex={-1} ref={undoRunDialog} onClick={event=>event.stopPropagation()} onKeyDown={event=>{event.stopPropagation();if(event.key==='Escape'&&!stoppingUndoRuns){event.preventDefault();setConfirmUndoRunIds(undefined);}if(event.key==='Tab'){const buttons=Array.from(undoRunDialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')??[]);const first=buttons[0],last=buttons.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}}}>
         <div className="panel-heading"><strong>{t('Undo running task')}</strong></div>
-        <p>{stoppingUndoRuns?t('Waiting for the Runtime to stop the task…'):t('Undo has reached a running task. Stop it and continue undoing the Work Graph?')}</p>
+        <p>{stoppingUndoRuns?t('Waiting for the Workspace to stop the task…'):t('Undo has reached a running task. Stop it and continue undoing the Work Graph?')}</p>
         <div className="button-row"><button type="button" disabled={stoppingUndoRuns} onClick={()=>setConfirmUndoRunIds(undefined)}>{t('Keep task')}</button><button type="button" className="primary-button" disabled={stoppingUndoRuns} onClick={()=>act(confirmUndoRunGate)}>{t('Stop task and undo')}</button></div>
       </section></div>}
       {imageSettingsOpen && node?.type==='image' && <div className="modal-backdrop" onClick={()=>setImageSettingsOpen(false)}><section className="image-settings-dialog panel" role="dialog" aria-modal="true" aria-label={t('Image settings')} onClick={event=>event.stopPropagation()}>
@@ -1797,7 +1807,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             if (n.type === 'execution') return;
             if (n.type === 'image') { if (!openImageNodePreview(n.id)) setReferenceId(n.id); return; }
             if (n.type === 'document') { openDocument(n.id, true); return; }
-            if (n.type === 'text' || n.type === 'file' || n.type === 'preview') setReferenceId(n.id);
+            if (n.type === 'text' || n.type === 'file' || n.type === 'video' || n.type === 'preview') setReferenceId(n.id);
           }}
           onCreateMenu={readOnly ? undefined : (world, screen) => setCreateMenu({ world, screen })}
           onConnectCreate={readOnly ? undefined : (nodeId, world, screen, port) => { if (activeChainNodeIds.has(nodeId)) { props.onError(new Error(chainTopologyError)); return; } setCreateMenu({ world, screen, connection: { nodeId, port } }); }}
@@ -1949,12 +1959,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                   const providerModel=provider?(provider.models.find(item=>item.isDefault)??provider.models[0]):undefined;
                   saveImageRoute(provider?{type:'api',providerId:provider.id,modelId:providerModel?.id??'',options:providerModel?normalizeImageOptionsForModel(imageOptions,providerModel):imageOptions}:{type:'codex',options:imageOptions});
                 }}><option value="codex">{t('Codex image generation')}</option>{imageProviders.map(provider=><option key={provider.id} value={provider.id}>{provider.models.length ? provider.name : t('{name} (no model selected)', {name:provider.name})}</option>)}</select></label>
-                {selectedRoute.type==='api' && <label className="image-toolbar-model" title={t('Image model')}><select aria-label={t('Image model')} value={selectedRoute.modelId} disabled={promptDisabled||!selectedProvider?.models.length} onChange={event=>{const nextModel=selectedProvider?.models.find(item=>item.id===event.target.value);saveImageRoute({...selectedRoute,modelId:event.target.value,options:nextModel?normalizeImageOptionsForModel(imageOptions,nextModel):imageOptions});}}>{selectedProvider?.models.length?<>{selectedProvider.models.map(item=><option key={item.id} value={item.id}>{item.name || item.id}</option>)}</>:<option value="">{t('No image model has been added. Configure one in Runtime management first.')}</option>}</select></label>}
+                {selectedRoute.type==='api' && <label className="image-toolbar-model" title={t('Image model')}><select aria-label={t('Image model')} value={selectedRoute.modelId} disabled={promptDisabled||!selectedProvider?.models.length} onChange={event=>{const nextModel=selectedProvider?.models.find(item=>item.id===event.target.value);saveImageRoute({...selectedRoute,modelId:event.target.value,options:nextModel?normalizeImageOptionsForModel(imageOptions,nextModel):imageOptions});}}>{selectedProvider?.models.length?<>{selectedProvider.models.map(item=><option key={item.id} value={item.id}>{item.name || item.id}</option>)}</>:<option value="">{t('No image model has been added. Configure one in Workspace management first.')}</option>}</select></label>}
 
                 </>}
                 {showModelControls && (node.type!=='image'||selectedRoute.type==='codex') && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
                   setModel(e.target.value); setEffort(""); act(() => editor.edit(node.id, { ...content, modelOverride: e.target.value ? { model: e.target.value, reasoningEffort: null } : null }));
-                }}><option value="">{models?.selection?.model ?? t('Runtime default')}</option>{models?.available.map(m => <option key={m.id}>{m.id}</option>)}{model && !models?.available.some(m => m.id === model) && <option value={model}>{t('{model} (currently unavailable)', {model})}</option>}</select>
+                }}><option value="">{models?.selection?.model ?? t('Workspace default')}</option>{models?.available.map(m => <option key={m.id}>{m.id}</option>)}{model && !models?.available.some(m => m.id === model) && <option value={model}>{t('{model} (currently unavailable)', {model})}</option>}</select>
                 {node.type !== 'image' && reasoningControl}</>}
                 {node.type === 'image' && <button type="button" className="image-settings-trigger" aria-label={t('Image settings')} aria-haspopup="dialog" aria-expanded={imageSettingsOpen} title={t('Image settings: quality, size, aspect ratio, and reasoning effort')} disabled={promptDisabled} onClick={()=>setImageSettingsOpen(true)}><Settings2 size={14}/><span>{imageOptions.quality==='auto'?t('Auto'):t({high:'High',medium:'Medium',low:'Low'}[imageOptions.quality!])} · {imageOptions.aspectRatio === 'auto' ? t('Auto ratio') : imageOptions.aspectRatio}</span></button>}
               </div>}
@@ -2121,7 +2131,7 @@ function Conflict({
             : "Body version conflict"}
       </h3>
       <p>
-        Review the latest Runtime content first. Keeping local content or merging still requires version validation; nothing is force-overwritten and no run is restarted automatically.
+        Review the latest Workspace content first. Keeping local content or merging still requires version validation; nothing is force-overwritten and no run is restarted automatically.
       </p>
       <div className="real-conflict">
         <label>
@@ -2132,12 +2142,12 @@ function Conflict({
           />
         </label>
         <label>
-          Latest Runtime content
+          Latest Workspace content
           <textarea readOnly value={JSON.stringify(remote, null, 2)} />
         </label>
       </div>
       <button disabled={disabled} onClick={() => resolve()}>
-        Use Runtime content
+        Use Workspace content
       </button>
       <button disabled={disabled} onClick={() => resolve(draft.content)}>
         Recover local content and validate

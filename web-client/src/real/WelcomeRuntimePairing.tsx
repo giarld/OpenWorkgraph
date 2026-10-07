@@ -37,7 +37,7 @@ export function WelcomeRuntimePairing({ registry, onStart, onBusy, onComplete }:
       behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
     });
   }, [clientCode, connection]);
-  const command = 'openworkgraph pair --client-code ' + clientCode;
+  const command = 'npx openworkgraph pair --client-code ' + clientCode;
   async function run(operation: (value: { identity?: PairingIdentity; controller?: AbortController }) => Promise<void>) {
     const value = pairing.current;
     if (!value || busy) return;
@@ -54,16 +54,15 @@ export function WelcomeRuntimePairing({ registry, onStart, onBusy, onComplete }:
       onComplete(connection.serviceId);
     } catch (failure) { setError(messageOf(failure)); }
   }}>
-    <h3>{t('Name your Runtime')}</h3>
+    <h3>{t('Name your Workspace')}</h3>
     <p>{t('Connected successfully. Choose a name, then continue to Agent settings.')}</p>
-    <label>{t('Runtime name')}<input ref={nameInput} required maxLength={RUNTIME_NAME_MAX_LENGTH} value={name} onChange={event => setName(event.target.value)} /></label>
+    <label>{t('Workspace name')}<input ref={nameInput} required maxLength={RUNTIME_NAME_MAX_LENGTH} value={name} onChange={event => setName(event.target.value)} /></label>
     {error && <p role="alert">{error}</p>}
     <button className="primary-button" disabled={!name.trim()}>{t('Confirm name and continue')}</button>
   </form>;
   return <div className="welcome-pairing">
-    <p>{t('Start the Runtime on its device, then enter its address below. For another device, use its network address instead of localhost.')}</p>
-    <WelcomeCommand command="openworkgraph start" copyLabel={t('Copy start command')} />
-    <label>{t('Runtime address')}<input type="url" required disabled={busy} value={address} onChange={event => {
+    <p>{t('Once your Workspace is running, enter its address below. For another device, use its network address instead of localhost.')}</p>
+    <label>{t('Workspace address')}<input type="url" required disabled={busy} value={address} onChange={event => {
       pairing.current?.controller?.abort(); pairing.current?.identity?.dispose(); pairing.current = {};
       setAddress(event.target.value); setClientCode(''); setError('');
     }} /></label>
@@ -84,12 +83,12 @@ export function WelcomeRuntimePairing({ registry, onStart, onBusy, onComplete }:
         identity.dispose(); value.identity = undefined;
         if (pairing.current === value) setConnection(result);
       } catch (failure) { identity.dispose(); value.identity = undefined; throw failure; }
-    })}>{busy ? t('Connecting…') : clientCode ? t('Regenerate pairing command') : t('Pair Runtime')}</button>
+    })}>{busy ? t('Connecting…') : clientCode ? t('Regenerate pairing command') : t('Pair Workspace')}</button>
     {clientCode && <div ref={commandStep} className="welcome-pairing">
-      <p>{t('Run this command on the Runtime device and approve the client. This page will connect automatically after the private handshake completes.')}</p>
+      <p>{t('Run this command on the Workspace device and approve the client. This page will connect automatically after the private handshake completes.')}</p>
       <WelcomeCommand key={clientCode} command={command} label={t('Pairing command')} copyLabel={t('Copy pairing command')} />
       <small>{t('The client code is valid for 5 minutes. Keep this page open; refreshing or regenerating requires authorization again.')}</small>
-      <p role="status">{t('Waiting for Runtime approval…')}</p>
+      <p role="status">{t('Waiting for Workspace approval…')}</p>
     </div>}
     {error && <p role="alert">{error}</p>}
   </div>;

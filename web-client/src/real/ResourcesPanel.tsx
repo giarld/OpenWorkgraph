@@ -1,8 +1,10 @@
+import { ConfirmationDialog } from '../components/ConfirmationDialog';
+import { ImagePreviewMetadata } from './ImagePreviewMetadata';
 import { PreviewActionButton } from './PreviewActionButton';
 import { randomId } from "../adapter/random";
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, ChevronDown, ChevronLeft, ChevronRight, File, FileText, Image, MoreHorizontal, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
+import { Archive, ChevronDown, ChevronLeft, ChevronRight, File, FileText, FileVideo, Image, Play, MoreHorizontal, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
 import './ResourcesPanel.css';
 import type { Point } from '../canvas/geometry';
 import { beginAssetDrag } from './asset-drag';
@@ -11,8 +13,10 @@ import { FILE_NODE_MAX_BYTES, fileMime, PROJECT_FILE_PREVIEW_MAX_BYTES } from '.
 import { translate } from '../i18n/translate';
 import { cachedImageBlob } from './image-preview-cache';
 import { useI18n } from '../i18n/I18nProvider';
+import type { Request } from './contracts';
+import { VersionedFilePreview } from './PreviewNode';
 
-export type ResourceRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
+export type ResourceRequest = Request;
 export interface CanvasCreated { resource: { id: string; name: string; current: { version: number; mime: string; bytes: number } }; referenceId: string }
 export interface LibraryAsset { id: string; projectId: string; name: string; deleted: boolean; shared: boolean; current: { version: number; mime: string; bytes: number } }
 export interface ResourcePlacement { complete: (created: CanvasCreated) => Promise<void>; fail: (error: unknown) => Promise<void> }
@@ -23,6 +27,10 @@ const projectPath = (id: string) => '/v1/projects/' + encodeURIComponent(id);
 const key = () => randomId();
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const CHUNK = 1024 * 1024;
+const videoCoverKey = (asset: Pick<LibraryAsset, 'projectId' | 'name'>) => {
+  const dot = asset.name.lastIndexOf('.');
+  return JSON.stringify([asset.projectId, dot < 0 ? asset.name : asset.name.slice(0, dot)]);
+};
 export function isConfirmedResourceConflict(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'status' in error && error.status === 409 && 'code' in error && error.code === 'REVISION_CONFLICT';
 }
@@ -138,6 +146,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
   const [expanded, setExpanded] = useState(false);
   const [thumbnailSize, setThumbnailSize] = useState(suppliedThumbnailSize ?? 320);
   const [originalUrl, setOriginalUrl] = useState<string>();
+  const [originalBlob, setOriginalBlob] = useState<Blob>();
   const originalTransientUrl = useRef<string | undefined>(undefined);
   const downloadEpoch = useRef(0);
   const downloadUrls = useRef(new Set<string>());
@@ -173,6 +182,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     setDownloading(false);
     setExpanded(false);
     setOriginalUrl(undefined);
+    setOriginalBlob(undefined);
     return () => {
       downloadEpoch.current++;
       if (originalTransientUrl.current) { URL.revokeObjectURL(originalTransientUrl.current); originalTransientUrl.current = undefined; }
@@ -181,17 +191,19 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     };
   }, [request, path]);
   useEffect(() => {
-    if (!expanded) return;
+    if (!expanded) { setOriginalBlob(undefined); return; }
     if (!imageNode || !current?.url) return;
     let active = true;
     if (originalTransientUrl.current) { URL.revokeObjectURL(originalTransientUrl.current); originalTransientUrl.current = undefined; }
     setOriginalUrl(undefined);
+    setOriginalBlob(undefined);
     const load = request<Blob>(path + '/content', undefined, 'BLOB');
     void load.then(blob => {
       const url = URL.createObjectURL(blob);
       if (active) {
         originalTransientUrl.current = url;
         setOriginalUrl(url);
+        setOriginalBlob(blob);
       } else URL.revokeObjectURL(url);
     }).catch(e => { if (active) errors.current(e); });
     dialog.current?.focus();
@@ -226,10 +238,11 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     // is loading. Clear it only when the image source itself changes.
     setState(previous => previous?.path === path ? previous : undefined);
     setOriginalUrl(undefined);
+    setOriginalBlob(undefined);
     void (async () => {
       const resolvedMime = mime ?? (await request<{ mime: string }>(path)).mime;
       if (!active) return;
-      if (media.has(resolvedMime)) {
+      if (media.has(resolvedMime) || resolvedMime.startsWith('video/')) {
         const thumbnailPath = path + '/thumbnail?size=' + thumbnailSize;
         const previewPath = path + '/preview';
         const mediaPath = imageNode ? thumbnailPath : previewPath;
@@ -261,11 +274,11 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
         if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
       }
-    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <img src={originalUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /> : <p role="status">{t('Reading original image…')}</p>}<footer className="ow-preview-download"><PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer></section></div>, document.body)}
+    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <img src={originalUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /> : <p role="status">{t('Reading original image…')}</p>}<footer className="ow-preview-download">{originalBlob && <ImagePreviewMetadata blob={originalBlob} name={name} mime={mime}/>}<PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer></section></div>, document.body)}
   </div>;
 }
 
-function AssetThumbnail({ request, path, name, onPreview }: { request: ResourceRequest; path: string; name: string; onPreview: () => void }) {
+function AssetThumbnail({ request, path, name, video = false, thumbnailRevision = 0, onPreview }: { request: ResourceRequest; path: string; name: string; video?: boolean; thumbnailRevision?: number; onPreview: () => void }) {
   const { t } = useI18n();
   const button = useRef<HTMLButtonElement>(null);
   const objectUrl = useRef<string | undefined>(undefined);
@@ -278,7 +291,8 @@ function AssetThumbnail({ request, path, name, onPreview }: { request: ResourceR
       const bounds = button.current?.getBoundingClientRect();
       if (!bounds) return;
       const pixels = Math.ceil(Math.max(bounds.width, bounds.height) * Math.max(window.devicePixelRatio || 1, 1));
-      setSize(THUMBNAIL_LEVELS.find(level => level >= pixels) ?? THUMBNAIL_LEVELS.at(-1)!);
+      const levels = video ? [80, 160, 320] : THUMBNAIL_LEVELS;
+      setSize(levels.find(level => level >= pixels) ?? levels.at(-1)!);
     };
     const observer = new IntersectionObserver(entries => {
       if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
@@ -289,12 +303,18 @@ function AssetThumbnail({ request, path, name, onPreview }: { request: ResourceR
     if (button.current) resize?.observe(button.current);
     window.addEventListener('resize', update);
     return () => { observer.disconnect(); resize?.disconnect(); window.removeEventListener('resize', update); };
-  }, []);
+  }, [video]);
+  useEffect(() => {
+    if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+    objectUrl.current = undefined;
+    setUrl(undefined);
+  }, [thumbnailRevision]);
   useEffect(() => {
     if (!visible) return;
     let active = true;
     setFailed(false);
-    void cachedImageBlob(request, path + '/thumbnail?size=' + size).then(blob => {
+    const thumbnailPath = path + '/thumbnail?size=' + size + (video ? '&video=1' : '');
+    void (video ? request<Blob>(thumbnailPath, undefined, 'BLOB') : cachedImageBlob(request, thumbnailPath)).then(blob => {
       const next = URL.createObjectURL(blob);
       if (!active) { URL.revokeObjectURL(next); return; }
       const previous = objectUrl.current;
@@ -303,23 +323,26 @@ function AssetThumbnail({ request, path, name, onPreview }: { request: ResourceR
       if (previous) URL.revokeObjectURL(previous);
     }).catch(() => { if (active && !objectUrl.current) setFailed(true); });
     return () => { active = false; };
-  }, [request, path, visible, size]);
+  }, [request, path, visible, size, video, thumbnailRevision]);
   useEffect(() => () => { if (objectUrl.current) URL.revokeObjectURL(objectUrl.current); }, []);
-  return <button ref={button} type="button" className="ow-assets-thumbnail" aria-label={t('Preview image: {name}', { name })} onClick={onPreview}>
-    {url && !failed ? <img src={url} alt={name} draggable={false} decoding="async" onContextMenu={e => e.preventDefault()} onError={() => setFailed(true)} /> : <span><Image size={28} aria-hidden="true" /><small>{failed ? t('Thumbnail unavailable; click to preview') : t('Loading thumbnail…')}</small></span>}
+  return <button ref={button} type="button" className={'ow-assets-thumbnail' + (video ? ' ow-assets-video-thumbnail' : '')} aria-label={t(video ? 'Preview video: {name}' : 'Preview image: {name}', { name })} onClick={onPreview}>
+    {url && !failed ? <img src={url} alt={name} draggable={false} decoding="async" onContextMenu={e => e.preventDefault()} onError={() => setFailed(true)} /> : <span>{video ? <FileVideo size={28} aria-hidden="true" /> : <Image size={28} aria-hidden="true" />}<small>{failed ? t('Thumbnail unavailable; click to preview') : t('Loading thumbnail…')}</small></span>}
+    {video && <span className="ow-assets-video-badge" aria-hidden="true"><Play size={14} fill="currentColor" /></span>}
   </button>;
 }
 
-function TextThumbnail({ request, path, name, onPreview }: { request: ResourceRequest; path: string; name: string; onPreview: () => void }) {
+function TextThumbnail({ request, path, name, mime, onPreview }: { request: ResourceRequest; path: string; name: string; mime: string; onPreview: () => void }) {
   const { t } = useI18n();
   const [excerpt, setExcerpt] = useState('');
   useEffect(() => {
+    setExcerpt('');
+    if (mime === 'application/pdf') return;
     let active = true;
     void request<{ state: string; text: string | null }>(path + '/representation').then(result => {
       if (active && result.state === 'ready') setExcerpt(result.text ?? '');
     }).catch(() => { /* Preview remains available from the asset dialog. */ });
     return () => { active = false; };
-  }, [request, path]);
+  }, [request, path, mime]);
   return <button className="ow-assets-file-preview" onClick={onPreview} aria-label={t('Preview: {name}', { name })}><span>{excerpt || name}</span></button>;
 }
 
@@ -349,19 +372,19 @@ function AssetPreviewDialog({ request, path, asset, onClose, onError }: { reques
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true });
     };
   }, []);
-  return createPortal(<div ref={backdrop} className="ow-asset-preview-backdrop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialog} className="ow-asset-preview-dialog" role="dialog" aria-labelledby={titleId} aria-modal="true" onKeyDown={e => {
+  return createPortal(<div ref={backdrop} className="ow-asset-preview-backdrop" onClick={event => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialog} className="ow-asset-preview-dialog ow-asset-file-dialog" role="dialog" aria-labelledby={titleId} aria-modal="true" onKeyDown={e => {
     e.stopPropagation();
     if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
-    if (e.code === 'Space' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) { e.preventDefault(); onClose(); return; }
+    if (e.code === 'Space' && e.target === e.currentTarget && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) { e.preventDefault(); onClose(); return; }
     if (e.key === 'Tab') {
-      const controls = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled),video[controls],[tabindex="0"]'));
+      const controls = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled),input:not(:disabled),video[controls],iframe,[tabindex="0"]')).filter(control => control.checkVisibility());
       const first = controls[0], last = controls.at(-1);
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     }
   }} onPointerDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
     <header><div><small>{t('Asset preview · v{version}', { version: asset.current.version })}</small><h2 id={titleId}>{asset.name}</h2></div><button type="button" aria-label={t('Close preview')} onClick={onClose} autoFocus><X size={20} aria-hidden="true" /></button></header>
-    <ResourcePreview request={request} path={path} mime={asset.current.mime} name={asset.name} onError={onError} />
+    <VersionedFilePreview request={request} path={path} mime={asset.current.mime} name={asset.name} onError={onError}/>
   </section></div>, document.body);
 }
 
@@ -389,6 +412,7 @@ export function ResourcesPanel(props: ResourcesPanelProps) { return <ResourcesPa
 function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectId, ownerProjectId = projectId, projects = [], graphId, readOnly, onPlace, onError }: ResourcesPanelProps) {
   const { t } = useI18n();
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
+  const [videoCoverRevisions, setVideoCoverRevisions] = useState<Record<string, number>>({});
   const [deleted, setDeleted] = useState(false);
   const [scope, setScope] = useState<'project' | 'shared' | 'available'>('project');
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -409,6 +433,8 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmation, setConfirmation] = useState<{ text: string; run(): void }>();
+  useEffect(() => setConfirmation(undefined), [request, projectId, ownerProjectId, graphId]);
   const [preview, setPreview] = useState<LibraryAsset>();
   const [selection, setSelection] = useState<{ file: File; matches: LibraryAsset[]; projectId: string; shared: boolean }>();
   const [choice, setChoice] = useState('');
@@ -455,6 +481,11 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     return asset.projectId === ownerProjectId || (asset.shared && !asset.deleted);
   }
   function mergeAsset(asset: LibraryAsset, operationViewKey: string) {
+    // Covers are mutable independently of video versions and may be filtered out.
+    if (/\.(jpg|jpeg|png|webp)$/.test(asset.name)) {
+      const coverKey = videoCoverKey(asset);
+      setVideoCoverRevisions(current => ({ ...current, [coverKey]: (current[coverKey] ?? 0) + 1 }));
+    }
     if (currentViewKey.current !== operationViewKey) { setRefresh(value => value + 1); return; }
     setAssets(current => {
       const existing = current.some(item => item.id === asset.id);
@@ -520,7 +551,6 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     } });
   }
   function emptyTrash() {
-    if (!window.confirm(t('Permanently remove all deleted assets from the current workspace? This applies regardless of search, scope filters, or pagination and cannot be undone. Independent Work Graph copies are unaffected.'))) return;
     const body = { idempotencyKey: key() };
     setTrashResult('');
     void execute({ label: t('Empty trash'), refreshOnSuccess: true, run: async () => {
@@ -532,8 +562,9 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   dragAllowed.current = !disabled && !loading;
   const groups = [
     { id: 'images', label: t('Images'), Icon: Image, items: assets.filter(a => a.current.mime.startsWith('image/')) },
-    { id: 'texts', label: t('Text'), Icon: FileText, items: assets.filter(a => a.current.mime.startsWith('text/') || a.current.mime === 'application/pdf') },
-    { id: 'files', label: t('Other files'), Icon: File, items: assets.filter(a => !a.current.mime.startsWith('image/') && !a.current.mime.startsWith('text/') && a.current.mime !== 'application/pdf') },
+    { id: 'videos', label: t('Videos'), Icon: FileVideo, items: assets.filter(a => a.current.mime.startsWith('video/')) },
+    { id: 'texts', label: t('Documents'), Icon: FileText, items: assets.filter(a => a.current.mime.startsWith('text/') || a.current.mime === 'application/pdf') },
+    { id: 'files', label: t('Other files'), Icon: File, items: assets.filter(a => !a.current.mime.startsWith('image/') && !a.current.mime.startsWith('video/') && !a.current.mime.startsWith('text/') && a.current.mime !== 'application/pdf') },
   ];
   const availableProjects = projects.filter(p => p.state === 'active');
   return <section className="ow-resources-panel" aria-label={t('Asset library')} aria-busy={busy}>
@@ -542,10 +573,10 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     <div className="ow-assets-toolbar">
       <label className="ow-assets-search"><Search size={15} aria-hidden="true" /><input aria-label={t('Search assets')} placeholder={t('Search assets')} value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} />{search && <button aria-label={t('Clear name filter')} onClick={() => { setSearch(''); setPage(0); }}><X size={14} /></button>}</label>
       <div className="ow-assets-upload-anchor" ref={uploadMenu}><button ref={uploadTrigger} className="ow-assets-upload-trigger" aria-label={t('Add asset')} aria-controls={uploadMenuId} aria-expanded={uploadOpen} disabled={disabled || !!selection} onClick={() => setUploadOpen(v => !v)}><Plus size={16} />{t('Add')}</button>
-        {<div id={uploadMenuId} className={"ow-assets-upload-menu" + (uploadOpen ? " is-open" : "")} inert={!uploadOpen} aria-hidden={!uploadOpen} role="group" aria-label={t('Asset upload settings')}><label>{t('Target workspace')}<select aria-label={t('Target workspace')} value={uploadProjectId} onChange={e => setUploadProjectId(e.target.value)}>{availableProjects.length ? availableProjects.map(p => <option key={p.projectId} value={p.projectId}>{p.name}</option>) : <option value={ownerProjectId}>{t('Current workspace')}</option>}</select></label><label>{t('Sharing scope')}<select aria-label={t('Sharing scope')} value={uploadShared ? 'shared' : 'private'} onChange={e => setUploadShared(e.target.value === 'shared')}><option value="private">{t('Target workspace only')}</option><option value="shared">{t('Shared within Runtime')}</option></select></label><button className="ow-assets-upload" disabled={disabled} onClick={() => uploadInput.current?.click()}><Upload size={15} />{t('Choose file to upload')}</button></div>}
+        {<div id={uploadMenuId} className={"ow-assets-upload-menu" + (uploadOpen ? " is-open" : "")} inert={!uploadOpen} aria-hidden={!uploadOpen} role="group" aria-label={t('Asset upload settings')}><label>{t('Target project workspace')}<select aria-label={t('Target project workspace')} value={uploadProjectId} onChange={e => setUploadProjectId(e.target.value)}>{availableProjects.length ? availableProjects.map(p => <option key={p.projectId} value={p.projectId}>{p.name}</option>) : <option value={ownerProjectId}>{t('Current project workspace')}</option>}</select></label><label>{t('Sharing scope')}<select aria-label={t('Sharing scope')} value={uploadShared ? 'shared' : 'private'} onChange={e => setUploadShared(e.target.value === 'shared')}><option value="private">{t('Target project workspace only')}</option><option value="shared">{t('Shared with all projects in this Workspace')}</option></select></label><button className="ow-assets-upload" disabled={disabled} onClick={() => uploadInput.current?.click()}><Upload size={15} />{t('Choose file to upload')}</button></div>}
       </div>
     </div>
-    <div className="ow-assets-library-settings" role="group" aria-label={t('Asset library management')}><div className="ow-assets-filters"><label>{t('Asset scope')}<select value={scope} onChange={e => { setScope(e.target.value as typeof scope); setPage(0); }}><option value="project">{t('Current workspace')}</option><option value="shared">{t('Shared within Runtime')}</option><option value="available">{t('Current workspace and shared')}</option></select></label><label className="ow-resources-check"><input type="checkbox" checked={deleted} onChange={e => { setDeleted(e.target.checked); setPage(0); }} />{t('Show deleted assets')}</label><button className="ow-assets-icon-button" aria-label={t('Refresh')} disabled={loading || busy} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16} /></button></div>{deleted && <button className="ow-assets-empty-trash" disabled={disabled || loading} onClick={emptyTrash}><Trash2 size={14} aria-hidden="true" />{t('Empty trash')}</button>}</div>
+    <div className="ow-assets-library-settings" role="group" aria-label={t('Asset library management')}><div className="ow-assets-filters"><label>{t('Asset scope')}<select value={scope} onChange={e => { setScope(e.target.value as typeof scope); setPage(0); }}><option value="project">{t('Current project workspace')}</option><option value="shared">{t('Shared with all projects in this Workspace')}</option><option value="available">{t('Current project workspace and shared')}</option></select></label><label className="ow-resources-check"><input type="checkbox" checked={deleted} onChange={e => { setDeleted(e.target.checked); setPage(0); }} />{t('Show deleted assets')}</label><button className="ow-assets-icon-button" aria-label={t('Refresh')} disabled={loading || busy} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16} /></button></div>{deleted && <button className="ow-assets-empty-trash" disabled={disabled || loading} onClick={() => setConfirmation({ text: t('Permanently remove all deleted assets from the current workspace? This applies regardless of search, scope filters, or pagination and cannot be undone. Independent Work Graph copies are unaffected.'), run: emptyTrash })}><Trash2 size={14} aria-hidden="true" />{t('Empty trash')}</button>}</div>
     </div>
     <input ref={uploadInput} className="ow-assets-file-input" aria-label={t('Upload to asset library')} type="file" disabled={disabled || !!selection} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) chooseFile(file); }} />
 
@@ -555,7 +586,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     {busy && <div role="status">{pending?.label}…<progress max={100} value={progress} aria-label={t('Upload progress')} /></div>}
     {pending && !busy && <div className="ow-resource-recovery">{canEnd ? <><p>{t('The resource version changed. End this attempt and choose again.')}</p><button disabled={readOnly} onClick={() => { if (locked.current || !pending.canEnd?.()) return; setPending(undefined); setCanEnd(false); setSelection(undefined); setChoice(''); setProgress(0); setError(''); setRefresh(v => v + 1); }}>{t('End this attempt and choose again')}</button></> : <><p>{t('The operation is not confirmed. Retrying will reuse the original submission.')}</p><button disabled={readOnly} onClick={() => void execute(pending)}>{t('Retry: {action}', { action: pending.label })}</button></>}</div>}
     <div className="ow-assets-groups">
-      {loading ? <div className="ow-assets-empty" role="status">{ready ? t('Loading assets…') : t('Connecting to Runtime; assets will load automatically when ready…')}</div> : assets.length === 0 ? <div className="ow-assets-empty"><Archive size={24} /><strong>{error ? t('Assets are temporarily unavailable') : t('No matching assets')}</strong><p>{error ? t('Refresh and try again.') : t('No assets match the current filters.')}</p>{!error && <button onClick={() => { setSearch(''); setDeleted(false); setScope('project'); setPage(0); }}>{t('Reset filters')}</button>}</div> : groups.filter(g => g.items.length).map((group, index) => <React.Fragment key={group.id}>
+      {loading ? <div className="ow-assets-empty" role="status">{ready ? t('Loading assets…') : t('Connecting to Workspace; assets will load automatically when ready…')}</div> : assets.length === 0 ? <div className="ow-assets-empty"><Archive size={24} /><strong>{error ? t('Assets are temporarily unavailable') : t('No matching assets')}</strong><p>{error ? t('Refresh and try again.') : t('No assets match the current filters.')}</p>{!error && <button onClick={() => { setSearch(''); setDeleted(false); setScope('project'); setPage(0); }}>{t('Reset filters')}</button>}</div> : groups.filter(g => g.items.length).map((group, index) => <React.Fragment key={group.id}>
         <button className="ow-assets-group-heading" style={{ top: 'calc(var(--asset-controls-height, 140px) + ' + index * 32 + 'px)' }} aria-expanded={!collapsed[group.id]} onClick={() => setCollapsed(v => ({ ...v, [group.id]: !v[group.id] }))}><ChevronDown size={14} className={collapsed[group.id] ? 'is-collapsed' : ''} /><group.Icon size={15} /><strong>{group.label}</strong><span>{group.items.length}</span></button>
         {!collapsed[group.id] && <ul className="ow-assets-list">{group.items.map(asset => <li key={asset.id} className="ow-assets-card" title={asset.name} draggable={!disabled && !asset.deleted} onDragStart={event => {
             if (!dragAllowed.current || asset.deleted || (event.target as Element).closest('.ow-assets-card-menu, .ow-assets-quick-actions')) { event.preventDefault(); return; }
@@ -563,17 +594,19 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
             cancelDrag.current = beginAssetDrag(event.dataTransfer, { request, projectId, graphId }, position => { if (dragAllowed.current && mounted.current) mutate(asset, 'copy', position); });
             setOpenAssetMenu(undefined); setUploadOpen(false);
           }} onDragEnd={() => { cancelDrag.current?.(); cancelDrag.current = undefined; }}>
-          {asset.current.mime.startsWith('image/') ? <AssetThumbnail key={asset.current.version} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : group.id === 'texts' ? <TextThumbnail request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : <button className="ow-assets-file-preview" onClick={() => setPreview(asset)} aria-label={t('Preview: {name}', { name: asset.name })}><File size={22} /><span>{asset.name}</span></button>}
+          {group.id === 'images' || group.id === 'videos' ? <AssetThumbnail key={base + ':' + asset.current.version} video={group.id === 'videos'} thumbnailRevision={group.id === 'videos' ? videoCoverRevisions[videoCoverKey(asset)] : undefined} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : group.id === 'texts' ? <TextThumbnail request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} mime={asset.current.mime} onPreview={() => setPreview(asset)} /> : <button className="ow-assets-file-preview" onClick={() => setPreview(asset)} aria-label={t('Preview: {name}', { name: asset.name })}><File size={22} /><span>{asset.name}</span></button>}
           <div className="ow-assets-quick-actions" role="group" aria-label={t('Quick actions: {name}', { name: asset.name })}>
             {!asset.deleted && <button type="button" disabled={disabled} aria-label={t('Copy independently to Work Graph: {name}', { name: asset.name })} title={t('Copy independently to Work Graph')} onClick={() => mutate(asset, 'copy')}><Plus size={18} aria-hidden="true" /></button>}
-            {!asset.deleted && asset.projectId === ownerProjectId && <button type="button" disabled={disabled} aria-label={t('Delete asset: {name}', { name: asset.name })} title={t('Delete asset')} onClick={() => { if (window.confirm(t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }))) mutate(asset, 'delete'); }}><Trash2 size={16} aria-hidden="true" /></button>}
+            {!asset.deleted && asset.projectId === ownerProjectId && <button type="button" disabled={disabled} aria-label={t('Delete asset: {name}', { name: asset.name })} title={t('Delete asset')} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}><Trash2 size={16} aria-hidden="true" /></button>}
           </div>
-          <div className="ow-assets-card-details"><strong title={asset.name}>{asset.name}</strong><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={() => setPreview(asset)}>{t('Preview')}</button>{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => { if (window.confirm(t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }))) mutate(asset, 'delete'); }}>{t('Delete')}</button></>}</AssetMenu></div>
+          <div className="ow-assets-card-details"><strong title={asset.name}>{asset.name}</strong><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={() => setPreview(asset)}>{t('Preview')}</button>{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}>{t('Delete')}</button></>}</AssetMenu></div>
         </li>)}</ul>}
       </React.Fragment>)}
       {(page > 0 || assets.length === 100) && <nav className="ow-assets-pagination" aria-label={t('Asset pagination')}><button aria-label={t('Previous page')} disabled={page === 0 || loading} onClick={() => setPage(v => v - 1)}><ChevronLeft size={16} /></button><span>{t('Page {page}', { page: page + 1 })}</span><button aria-label={t('Next page')} disabled={assets.length < 100 || loading} onClick={() => setPage(v => v + 1)}><ChevronRight size={16} /></button></nav>}
     </div>
 
+    {confirmation && <ConfirmationDialog title={t('Confirm management action')} text={confirmation.text} disabled={disabled}
+      onCancel={() => setConfirmation(undefined)} onConfirm={() => { const run = confirmation.run; setConfirmation(undefined); run(); }}/>}
     {preview && <AssetPreviewDialog request={request} path={base + '/assets/' + encodeURIComponent(preview.id) + '/versions/' + preview.current.version} asset={preview} onClose={() => setPreview(undefined)} onError={onError} />}
   </section>;
 }

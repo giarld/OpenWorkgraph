@@ -59,7 +59,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
     catch(e){setError(e instanceof Error?e.message:String(e));onError(e);}
     finally{setBusy(false);}
   };
-  if(run.executionStart==='dependencies')return <section className="interaction-box"><strong>{t('Confirmed execution plan')}</strong><p>{t('Execution will start automatically after predecessors deliver successfully. The Runtime schedules nodes in topological order.')}</p></section>;
+  if(run.executionStart==='dependencies')return <section className="interaction-box"><strong>{t('Confirmed execution plan')}</strong><p>{t('Execution will start automatically after predecessors deliver successfully. The Workspace schedules nodes in topological order.')}</p></section>;
   if(!open)return <section className="interaction-box"><strong>{t('Submitted, waiting to start')}</strong><p>{t('The task record was saved. Start it to confirm the execution depth.')}</p><button className="primary-button" disabled={disabled} onClick={()=>setOpen(true)}>{t('Start now')}</button></section>;
   return <section className="interaction-box execution-depth-panel" aria-label={t('Execution depth selection')}>
     <div className="execution-depth-heading"><strong>{t('Select execution depth')}</strong>{plan&&<span className="execution-depth-count">{t('{selected} / {total} will run', { selected: selected.size, total: plan.nodes.length })}</span>}</div>

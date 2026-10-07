@@ -9,7 +9,7 @@ import {
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from 'remark-gfm';
 import { ArrowDown, ChevronRight, File } from "lucide-react";
-import { forwardRef, type UIEventHandler } from "react";
+import { forwardRef, type ReactNode, type UIEventHandler } from "react";
 import type {
   AssetRef,
   Run,
@@ -120,14 +120,16 @@ export const RunProcessList = forwardRef<HTMLDivElement, {
   live?: boolean;
   collapseLongItems?: boolean;
   canvasDraggable?: boolean;
+  children?: ReactNode;
   onScroll?: UIEventHandler<HTMLDivElement>;
-}>(function RunProcessList({ items, status, className = "", ariaLabel, live = false, collapseLongItems = false, canvasDraggable = false, onScroll }, ref) {
+}>(function RunProcessList({ items, status, className = "", ariaLabel, live = false, collapseLongItems = false, canvasDraggable = false, onScroll, children }, ref) {
   return <div className={(className + " run-process-list").trim()} data-canvas-interactive data-canvas-draggable={canvasDraggable ? "" : undefined} ref={ref} tabIndex={0} role="log" aria-label={ariaLabel} aria-live={live ? "polite" : "off"} onScroll={onScroll}>
     {items.map((text, index) => {
       const last = index === items.length - 1;
       const state = last && !completedRunStatuses.has(status) ? "running" : last && failedRunStatuses.has(status) ? "failed" : "succeeded";
-      return <div className="run-process-row" data-process-state={state} key={index}><span className="run-process-marker" aria-hidden="true"/><RunProcessText text={text} collapsible={collapseLongItems}/></div>;
+      return <div className="run-process-row" data-process-state={state} data-process-last={last ? 'true' : undefined} key={index}><span className="run-process-marker" aria-hidden="true"/><RunProcessText text={text} collapsible={collapseLongItems}/></div>;
     })}
+    {children}
   </div>;
 });
 
@@ -203,15 +205,25 @@ function SubmittedPrompt({ text }: { text: string }) {
 export function RunSummary({
   run,
   node,
-}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string }; statusLabel?: string }) {
+  interaction,
+}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string }; statusLabel?: string; interaction?: ReactNode }) {
   const { t } = useI18n();
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
   const submittedPrompt = run ? (run.prompt ?? node.prompt).trim() : "";
+  useEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const observer = new MutationObserver(() => {
+      if (following) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [following, run?.status]);
   useLayoutEffect(() => {
     if (following && list.current)
       list.current.scrollTop = list.current.scrollHeight;
-  }, [following, run?.summaries.length]);
+  }, [following, run?.summaries.length, run?.status]);
   return (
     <div className="execution-content">
       {run && submittedPrompt && <SubmittedPrompt text={submittedPrompt} />}
@@ -229,7 +241,7 @@ export function RunSummary({
               const element = event.currentTarget;
               setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight < 24);
             }}
-          />
+          >{interaction}</RunProcessList>
           {!following && <button className="execution-process-jump" type="button" data-canvas-interactive aria-label={t("Jump to latest execution progress")} title={t("Jump to latest execution progress")} onClick={() => list.current?.scrollTo({ top: list.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })}><ArrowDown size={18} aria-hidden="true" /></button>}
         </div>
       ) : (

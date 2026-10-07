@@ -69,6 +69,9 @@
 .ow-asset-preview-dialog .ow-resource-preview { padding: 20px 0 0; }
 .ow-asset-preview-dialog .ow-resource-preview img, .ow-asset-preview-dialog .ow-resource-preview video { max-height: 65dvh; margin-bottom: 16px; }
 .ow-asset-preview-dialog .ow-resource-preview pre { max-height: 60dvh; padding: 16px; background: var(--fill, #e7e5df); border-radius: 8px; }
+.ow-asset-file-dialog { height: min(820px, 100%); display: flex; flex-direction: column; overflow: hidden; }
+.ow-asset-file-dialog > header { flex-shrink: 0; }
+.ow-asset-file-dialog > .ow-preview-node { flex: 1; height: auto; padding-top: 16px; }
 @media (max-width: 480px) { .ow-asset-preview-dialog { padding: 14px; } }
 @media (prefers-reduced-motion: reduce) { .ow-resources-panel .ow-assets-card { transition: none; } }
 .ow-resources-panel [role=alert] { padding: 8px; border: 1px solid currentColor; overflow-wrap: anywhere; }
@@ -126,6 +129,9 @@
 .ow-resources-panel .ow-assets-thumbnail, .ow-resources-panel .ow-assets-file-preview { box-sizing: border-box; width: 100%; height: 100%; min-height: 0; aspect-ratio: 1; border-radius: inherit; overflow: hidden; }
 .ow-resources-panel .ow-assets-thumbnail { padding: 0; border: 0; }
 .ow-assets-thumbnail img { object-fit: cover; }
+.ow-assets-video-thumbnail { position: relative; }
+.ow-assets-video-thumbnail img { object-fit: contain; }
+.ow-assets-thumbnail > .ow-assets-video-badge { position: absolute; right: 8px; bottom: 8px; width: 24px; height: 20px; display: grid; place-items: center; border: 1px solid #ffffff60; border-radius: 4px; background: #101216c9; color: #fff; pointer-events: none; }
 .ow-resources-panel .ow-assets-file-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; text-align: left; }
 .ow-assets-file-preview span { display: block; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.4; }
 .ow-assets-quick-actions { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity 150ms ease; }

@@ -92,6 +92,33 @@ export class BlobStore {
   const file=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
   try {const stat=await file.stat();if(!stat.isFile()) throw new ServiceError('INVALID_REQUEST','Expected regular blob file');if (stat.size>this.maxBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','Blob exceeds maximum'); return await readBounded(file,this.maxBytes); } finally {await file.close();}
  }
+ /** Verify immutable media without allocating a full-video Buffer. */
+ async withVerifiedFile<T>(path: string, expected: {bytes: number; sha256: string}, use: (path: string) => Promise<T>): Promise<T> {
+  this.validatePath(path);
+  if (await realpath(path)!==path) throw new ServiceError('INVALID_REQUEST','Blob symlinks are forbidden');
+  const file=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+  try {
+   const before=await file.stat({bigint:true});
+   if (!before.isFile() || before.size!==BigInt(expected.bytes) || before.size>BigInt(this.maxBytes)) throw new ServiceError('INTERNAL_ERROR','Stored blob integrity check failed');
+   const hash=createHash('sha256');const buffer=Buffer.alloc(64*1024);let total=0;
+   while (true) {
+    const {bytesRead}=await file.read(buffer,0,buffer.length,null);
+    if (!bytesRead) break;
+    total+=bytesRead;
+    if (total>expected.bytes) throw new ServiceError('INTERNAL_ERROR','Stored blob integrity check failed');
+    hash.update(buffer.subarray(0,bytesRead));
+   }
+   if (total!==expected.bytes || hash.digest('hex')!==expected.sha256) throw new ServiceError('INTERNAL_ERROR','Stored blob integrity check failed');
+   const result=await use(path);
+   if (await realpath(path)!==path) throw new ServiceError('INVALID_REQUEST','Blob symlinks are forbidden');
+   const current=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+   try {
+    const after=await current.stat({bigint:true});
+    if (after.dev!==before.dev || after.ino!==before.ino || after.size!==before.size || after.mtimeNs!==before.mtimeNs || after.ctimeNs!==before.ctimeNs) throw new ServiceError('INTERNAL_ERROR','Stored blob changed during preview');
+   } finally {await current.close();}
+   return result;
+  } finally {await file.close();}
+ }
  async remove(path: string): Promise<void> {
   this.validatePath(path);
   // Never traverse a replaced parent symlink, even when a deletion was queued.

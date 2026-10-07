@@ -144,7 +144,7 @@ export class GraphEditor {
   }
   private writable(confirmed = false) {
     if (this.disposed || (!this.state.online && !confirmed))
-      throw Error(translate("The Runtime is disconnected and the cache is read-only. Reconnect, then explicitly restore the draft."));
+      throw Error(translate("The Workspace is disconnected and the cache is read-only. Reconnect, then explicitly restore the draft."));
     const graph = confirmed ? this.confirmed : this.state.graph;
     if (graph.archived || graph.trashed)
       throw Error(translate("Archived or trashed Work Graphs are read-only."));
@@ -279,7 +279,7 @@ export class GraphEditor {
       const graph = this.confirmed;
       if (this.historyRequest && this.historyRequest.direction !== direction) throw Error(translate('Retry the pending history operation first.'));
       if (!this.historyRequest) {
-        if (!graph.history) throw Error(translate('This Runtime does not support document history. Update the Runtime.'));
+        if (!graph.history) throw Error(translate('This Workspace does not support document history. Update the Workspace.'));
         if (!(direction === 'undo' ? graph.history.canUndo : graph.history.canRedo) || !graph.history.cursor)
           throw Error(direction === 'undo' ? translate('There is nothing to undo.') : translate('There is nothing to redo.'));
         this.historyRequest = { direction, body: { idempotencyKey: randomId(), expectedExecutionRevision: graph.executionRevision, expectedLayoutRevision: graph.layoutRevision, expectedCursor: graph.history.cursor, direction } };
@@ -295,7 +295,7 @@ export class GraphEditor {
           if (attempt + 1 === COMMAND_MAX_ATTEMPTS) throw error;
         }
       }
-      if (epoch !== this.connectionEpoch || this.disposed) throw Error(translate('The connection changed. Verify the Runtime state first.'));
+      if (epoch !== this.connectionEpoch || this.disposed) throw Error(translate('The connection changed. Verify the Workspace state first.'));
       this.acceptCommitted(result);
       this.historyRequest = undefined;
       return result;
@@ -390,7 +390,7 @@ export class GraphEditor {
             expectedContentVersion: draft.baseVersion, content: draft.content,
           }])();
           if (epoch !== this.connectionEpoch)
-            throw Error(translate("The connection changed. Read the Runtime state before restoring the draft."));
+            throw Error(translate("The connection changed. Read the Workspace state before restoring the draft."));
           ++this.readSequence;
           const accepted = result.nodes.find((n) => n.id === draft.nodeId);
           this.acceptCommitted(result);

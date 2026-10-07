@@ -97,7 +97,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
   constructor(options: DevelopmentAdapterOptions = {}) {
     for (const capacity of Object.values(options.serviceCapacities ?? {}))
       if (!Number.isSafeInteger(capacity) || capacity! < 1)
-        fail("invalid", translate("The Runtime fixture capacity must be a positive integer"));
+        fail("invalid", translate("The Workspace fixture capacity must be a positive integer"));
     this.options = {
       ...options,
       serviceCapacities: { ...options.serviceCapacities },
@@ -116,7 +116,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
   private service(id: string) {
     return (
       this.state.services.find((s) => s.id === id) ??
-      fail("not_found", translate("Runtime not found"))
+      fail("not_found", translate("Workspace not found"))
     );
   }
   private graph(id: string) {
@@ -139,7 +139,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
   private writable(serviceId: string) {
     this.assertAlive();
     if (!this.service(serviceId).connected)
-      fail("offline", translate("The simulated Runtime is offline. The cache is read-only and the run status is pending confirmation"));
+      fail("offline", translate("The simulated Workspace is offline. The cache is read-only and the run status is pending confirmation"));
   }
   private touch(graph: WorkGraph) {
     graph.revision++;
@@ -294,7 +294,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
     this.assertAlive();
     const graph = this.graph(graphId);
     if (serviceId && graph.serviceId !== serviceId)
-      fail("scope", translate("The Work Graph does not belong to the specified Runtime"));
+      fail("scope", translate("The Work Graph does not belong to the specified Workspace"));
     if (
       this.state.activeGraphId === graphId &&
       this.state.activeServiceId === graph.serviceId
@@ -311,7 +311,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         (p) => p.serviceId === serviceId && p.id === projectId,
       )
     )
-      fail("scope", translate("The project does not belong to the Runtime"));
+      fail("scope", translate("The project does not belong to the Workspace"));
     if (!name.trim()) fail("invalid", translate("Enter a Work Graph name"));
     const id = this.id("graph");
     const graph: WorkGraph = {
@@ -382,7 +382,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         asset.serviceId !== graph.serviceId ||
         asset.projectId !== graph.projectId
       )
-        fail("scope", translate("The asset must belong to the current Runtime and project"));
+        fail("scope", translate("The asset must belong to the current Workspace and project"));
     }
   }
   createNode(graphId: string, input: CreateNodeInput): WorkNode {
@@ -751,7 +751,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         node.serviceId !== graph.serviceId ||
         node.projectId !== graph.projectId
       )
-        fail("scope", translate("Clipboard nodes must belong to the current Runtime and project"));
+        fail("scope", translate("Clipboard nodes must belong to the current Workspace and project"));
       if (!node.id || node.id !== node.nodeId || byId.has(node.id))
         fail("invalid_clipboard", translate("Clipboard node identities are duplicated or inconsistent"));
       this.validatePatch(graph, node);
@@ -779,7 +779,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         edge.serviceId !== graph.serviceId ||
         edge.projectId !== graph.projectId
       )
-        fail("scope", translate("Clipboard connections must belong to the current Runtime and project"));
+        fail("scope", translate("Clipboard connections must belong to the current Workspace and project"));
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
       if (
@@ -1108,8 +1108,8 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
     if (run.occupiesSlot) run.status = "cancelling";
     run.summaries.push(
       run.occupiesSlot
-        ? translate("Stop requested. Waiting for confirmation from the simulated Runtime")
-        : translate("Queue cancellation requested. Waiting for confirmation from the simulated Runtime"),
+        ? translate("Stop requested. Waiting for confirmation from the simulated Workspace")
+        : translate("Queue cancellation requested. Waiting for confirmation from the simulated Workspace"),
     );
     const timer = this.timers.get(runId);
     if (timer) clearTimeout(timer);
@@ -1626,7 +1626,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         break;
       case "cancelled":
         run.status = "cancelled";
-        run.summaries.push(translate("The simulated Runtime confirmed the cancellation"));
+        run.summaries.push(translate("The simulated Workspace confirmed the cancellation"));
         break;
     }
     if (isTerminal(run.status)) {
@@ -1762,7 +1762,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         {
           id: "service-local",
           serviceId: "service-local",
-          name: translate("Local development Runtime · Simulated"),
+          name: translate("Local development Workspace · Simulated"),
           capacity: 2,
           connected: true,
           development: true,
@@ -1770,7 +1770,7 @@ export class DevelopmentAdapter implements WorkgraphAdapter {
         {
           id: "service-studio",
           serviceId: "service-studio",
-          name: translate("Studio development Runtime · Simulated"),
+          name: translate("Studio development Workspace · Simulated"),
           capacity: 1,
           connected: true,
           development: true,

@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile, mkdir, copyFile, chmod } from 'node:fs/promises';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = dirname(dirname(fileURLToPath(import.meta.url))), dist = join(root, 'dist');
@@ -23,3 +23,6 @@ async function rewrite(directory) {
   }
 }
 await rewrite(dist);
+// TypeScript creates a fresh CLI file without executable permissions.
+// Workspace bin links execute this file directly, so every build must restore them.
+await chmod(join(dist, 'cli.js'), 0o755);

@@ -1,3 +1,4 @@
+import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { randomId } from "../adapter/random";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, Image, ArrowLeftRight, ChevronDown, Settings2, Pencil, HardDrive } from 'lucide-react';
@@ -38,7 +39,7 @@ const formatSize = (bytes: number) => {
 };
 type Resource<T> = { data?: T; loading: boolean; error?: string };
 type DiscoveredImageModel = { id: string; name: string; selected: boolean };
-const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Request failed. Check the Runtime connection and try again.';
+const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Request failed. Check the Workspace connection and try again.';
 const encode = encodeURIComponent;
 const localTime = (value: string) => {
   const date = new Date(value);
@@ -116,11 +117,6 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const [busy, setBusy] = useState('');
   const [revoked, setRevoked] = useState(false);
   const [confirmation, setConfirmation] = useState<{ text: string; run: () => void }>();
-  const confirmDialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    if (confirmation && !confirmDialog.current?.open) confirmDialog.current?.showModal();
-    else if (!confirmation && confirmDialog.current?.open) confirmDialog.current.close();
-  }, [confirmation]);
   const mounted = useRef(false);
   const lock = useRef(false);
   const backupKey = useRef<string | undefined>(undefined);
@@ -177,7 +173,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
     await act(label, async valid => {
       await props.request(endpoint, body, method);
       if (!valid()) return;
-      setNotice(t('{action} was confirmed by the Runtime.', { action: label })); latest.current.onChanged();
+      setNotice(t('{action} was confirmed by the Workspace.', { action: label })); latest.current.onChanged();
       if (endpoint === '/v1/models') latest.current.onModelsChanged?.();
       await reload();
     });
@@ -200,11 +196,11 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const resourceSummary = (value: Resource<unknown>, summary: string) => value.loading ? t('Loading…') : value.error ? t('Loading failed · Expand to retry') : summary;
   const settingsSections = {
     'Agent permissions': { icon: ShieldCheck, group: t('Agents and models'), summary: resourceSummary(execution, t('{mode} · Applies to new tasks', { mode: { 'read-only': t('Read-only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') }[execution.data?.sandboxMode ?? 'workspace-write'] })) },
-    'Runtime default model': { icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
+    'Workspace default model': { icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
     'Image generation agent · API providers': { icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
     'Work Graph import and export': { icon: ArrowLeftRight, group: t('Data and backups'), summary: t('Import or export ZIP Work Graph packages') },
-    'Storage data management': { icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Runtime data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Runtime storage and clean unused resource copies')) },
-    'Runtime backups and local restore': { icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Local restore', { count: backups.data.length }) : t('Back up the entire Runtime and view local restore guidance')) },
+    'Storage data management': { icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Workspace data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Workspace storage and clean unused resource copies')) },
+    'Workspace backups and local restore': { icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Local restore', { count: backups.data.length }) : t('Back up the entire Workspace and view local restore guidance')) },
     'Browser sessions': { icon: Monitor, group: t('Connections and access'), summary: resourceSummary(sessions, t('{count} browser sessions · View and revoke', { count: sessions.data?.length ?? 0 })) },
   } satisfies Record<string, { icon: typeof Monitor; summary: string; group?: string }>;
   function section(title: keyof typeof settingsSections, children: ReactNode) {
@@ -220,25 +216,20 @@ export function ManagementPanel(props: ManagementPanelProps) {
     </section>;
   }
 
-  return <div className="management-panel" aria-label={t('Runtime management')}>
+  return <div className="management-panel" aria-label={t('Workspace management')}>
     <header>
-      <nav className="management-navigation" aria-label={t('Runtime management navigation')}>
-        <button className="management-back" type="button" aria-label={page === 'projects' ? t('Back to Runtime list') : t('Back to project management')} title={page === 'projects' ? t('Back to Runtime list') : t('Back to project management')} disabled={Boolean(busy)} hidden={page === 'projects' && !props.onBack} onClick={() => { if (page === 'projects') props.onBack?.(); else { setPage('projects'); setConfirmation(undefined); setFailure(''); } }}><ArrowLeft size={20} aria-hidden="true" /></button>
+      <nav className="management-navigation" aria-label={t('Workspace management navigation')}>
+        <button className="management-back" type="button" aria-label={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} title={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} disabled={Boolean(busy)} hidden={page === 'projects' && !props.onBack} onClick={() => { if (page === 'projects') props.onBack?.(); else { setPage('projects'); setConfirmation(undefined); setFailure(''); } }}><ArrowLeft size={20} aria-hidden="true" /></button>
         <h2>{page === 'projects' ? t('Project management') : page === 'add' ? t('Add project') : t('More management')}</h2>
       </nav>
       {props.runtimeAddress && <code>{props.runtimeAddress}</code>}
-      <p>{page === 'add' ? t('Choose an existing project or add a directory manually.') : page === 'settings' ? t('Expand settings as needed to manage Runtime capabilities and data.') : t('Manage projects and work content for this Runtime.')}</p>
+      <p>{page === 'add' ? t('Choose an existing project or add a directory manually.') : page === 'settings' ? t('Expand settings as needed to manage Workspace capabilities and data.') : t('Manage projects and work content for this Workspace.')}</p>
     </header>
     <div aria-live="polite">{busy && <p role="status">{t('{action}…', { action: busy })}</p>}{notice && <p role="status">{notice}</p>}{failure && !manualOpen && <p role="alert">{failure}</p>}</div>
     {props.readOnly && <p role="status">{t('Read-only: registration, changes, revocation, creation, and import are disabled. Refresh, viewing, and downloads remain available.')}</p>}
     {revoked && <p role="status">{t('The current browser session was revoked. Pair again to use management features.')}</p>}
-    <dialog ref={confirmDialog} className="management-confirm-dialog" role="alertdialog" aria-label={t('Confirm management action')} aria-describedby="management-confirm-text" onCancel={event => { event.preventDefault(); setConfirmation(undefined); }} onClose={() => setConfirmation(undefined)}>
-      <p id="management-confirm-text">{confirmation?.text}</p>
-      <div className="management-form-actions">
-        <button type="button" autoFocus onClick={() => setConfirmation(undefined)}>{t('Cancel')}</button>
-        <button type="button" className="management-primary" disabled={writeDisabled} onClick={() => { const run = confirmation?.run; setConfirmation(undefined); run?.(); }}>{t('Confirm action')}</button>
-      </div>
-    </dialog>
+    {confirmation && <ConfirmationDialog title={t('Confirm management action')} text={confirmation.text} disabled={writeDisabled}
+      onCancel={() => setConfirmation(undefined)} onConfirm={() => { const run = confirmation.run; setConfirmation(undefined); run(); }}/>}
     <fieldset disabled={disabled} className="management-controls">
     {page === 'add' && <section className="management-section" aria-label={t('Add project')}>
       <button className="candidate-manual" type="button" disabled={writeDisabled} onClick={() => { setPath(''); setFailure(''); setManualOpen(true); }}><FolderPlus size={16} aria-hidden="true" />{t('Add a new project directory')}</button>
@@ -257,7 +248,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
             <div className="candidate-info">
               <strong>{name}</strong>
               <code className="candidate-path">{candidate.path}</code>
-              <span className="candidate-state">{registered || available ? <Check size={12} aria-hidden="true" /> : <CircleAlert size={12} aria-hidden="true" />}{registered ? t('Added to Runtime') : available ? t('Directory available') : t('Directory unavailable')}</span>
+              <span className="candidate-state">{registered || available ? <Check size={12} aria-hidden="true" /> : <CircleAlert size={12} aria-hidden="true" />}{registered ? t('Added to Workspace') : available ? t('Directory available') : t('Directory unavailable')}</span>
             </div>
             <button className="candidate-add" type="button" aria-label={registered ? t('Added') : t('Add this project')} title={registered ? t('This project is already added') : available ? t('Add {name}', { name }) : t('Directory unavailable')} disabled={writeDisabled || registered || !available} onClick={() => { void addProject(candidate.path); }}>{registered ? <Check size={18} aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}</button>
           </li>;
@@ -268,8 +259,8 @@ export function ManagementPanel(props: ManagementPanelProps) {
       <h3 id="directory-dialog-title">{t('Add project directory manually')}</h3>
       <form onSubmit={event => { event.preventDefault(); void addProject(path.trim()); }}>
         {failure && <p role="alert">{failure}</p>}
-        <label>{t('Absolute directory path on Runtime')}<input placeholder={t('For example, D:\Projects\MyProject or /home/me/project')} disabled={writeDisabled} value={path} onChange={event => setPath(event.target.value)} required /></label>
-        <p>{t('Enter an existing directory on the Runtime computer. No directory will be created.')}</p>
+        <label>{t('Absolute directory path on Workspace')}<input placeholder={t('For example, D:\Projects\MyProject or /home/me/project')} disabled={writeDisabled} value={path} onChange={event => setPath(event.target.value)} required /></label>
+        <p>{t('Enter an existing directory on the Workspace computer. No directory will be created.')}</p>
         <div className="management-form-actions"><button className="management-primary" disabled={writeDisabled || !path.trim()} type="submit">{t('Register project')}</button>
         <button disabled={disabled} type="button" onClick={() => setManualOpen(false)}>{t('Cancel')}</button></div>
       </form>
@@ -285,7 +276,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
       <ul>{projects.data?.map(project => <li data-current={project.projectId === projectId} key={project.projectId}>
         <div className="management-item-heading"><Folder size={18} aria-hidden="true" /><strong>{project.name}</strong>{project.projectId === projectId && <span className="management-badge">{t('Current project')}</span>}</div><code>{project.canonicalPath}</code>
         <div className="management-item-meta"><span className="management-badge">{project.state === 'active' ? t('Enabled') : t('Disabled')}</span><span>{project.availability === 'available' ? t('Path available') : project.availability === 'unavailable' ? t('Path unavailable') : t('Path status unknown')}</span><span>{project.isGit ? 'Git' : t('Not Git')}</span></div>
-        <div className="management-actions"><button type="button" disabled={writeDisabled} onClick={() => confirm(t('{action} project “{name}”? Disabled projects are read-only, and the Runtime will reject disabling a project with unfinished tasks.', { action: project.state === 'active' ? t('Disable') : t('Enable'), name: project.name }), () => { void mutate(t('Update project state'), `/v1/projects/${encode(project.projectId)}/state`, { state: project.state === 'active' ? 'inactive' : 'active' }, projects.reload); })}>{project.state === 'active' ? t('Disable project') : t('Enable project')}</button>
+        <div className="management-actions"><button type="button" disabled={writeDisabled} onClick={() => confirm(t('{action} project “{name}”? Disabled projects are read-only, and the Workspace will reject disabling a project with unfinished tasks.', { action: project.state === 'active' ? t('Disable') : t('Enable'), name: project.name }), () => { void mutate(t('Update project state'), `/v1/projects/${encode(project.projectId)}/state`, { state: project.state === 'active' ? 'inactive' : 'active' }, projects.reload); })}>{project.state === 'active' ? t('Disable project') : t('Enable project')}</button>
         <button type="button" disabled={writeDisabled || project.state !== 'active'} onClick={() => setRepair({ id: project.projectId, path: project.canonicalPath })}>{t('Change path')}</button></div>
         {repair?.id === project.projectId && <form onSubmit={event => { event.preventDefault(); const nextPath = repair.path.trim(); confirm(t('Change the path for “{name}” to {path}? This will not move the directory or files.', { name: project.name, path: nextPath }), () => { void mutate(t('Change project path'), `/v1/projects/${encode(project.projectId)}/path`, { path: nextPath }, projects.reload); }); }}>
           <label>{t('New absolute directory path')}<input disabled={writeDisabled} required value={repair.path} onChange={event => setRepair({ id: project.projectId, path: event.target.value })} /></label>
@@ -295,7 +286,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
 
     </section>}
     {page === 'settings' && props.onRenameRuntime && <div className="management-actions">
-      <button type="button" onClick={props.onRenameRuntime}><Pencil size={16} aria-hidden="true" />{t('Rename Runtime')}</button>
+      <button type="button" onClick={props.onRenameRuntime}><Pencil size={16} aria-hidden="true" />{t('Rename Workspace')}</button>
     </div>}
     {section('Agent permissions', <>
       <Status value={execution} retry={execution.reload} />
@@ -306,18 +297,18 @@ export function ManagementPanel(props: ManagementPanelProps) {
           <option value="workspace-write">{t('Workspace write')}</option>
           <option value="danger-full-access">{t('Full access')}</option>
         </select></label>
-        <p>{sandbox === 'read-only' ? t('Files can be read. Write operations require Codex approval.') : sandbox === 'workspace-write' ? t('The task workspace and output directories can be modified. Operations outside that scope require Codex approval.') : t('Codex sandbox restrictions are disabled. Agents can use the file and network permissions of the Runtime process.')}</p>
+        <p>{sandbox === 'read-only' ? t('Files can be read. Write operations require Codex approval.') : sandbox === 'workspace-write' ? t('The task workspace and output directories can be modified. Operations outside that scope require Codex approval.') : t('Codex sandbox restrictions are disabled. Agents can use the file and network permissions of the Workspace process.')}</p>
         <button type="submit" disabled={writeDisabled}>{t('Save permission scope')}</button>
       </form>}
     </>)}
-    {section('Runtime default model', <>
+    {section('Workspace default model', <>
       <Status value={models} retry={models.reload} /><button type="button" onClick={models.reload}>{t('Refresh model capabilities')}</button>
-      <p>{t('Models and reasoning effort come from this Runtime’s actual catalog. No hard-coded model or automatic substitute is used.')}</p>
-      {models.data && <><p>{t('Saved:')} {models.data.selection ? `${models.data.selection.model} / ${models.data.selection.reasoningEffort ?? t('Runtime default')}` : t('Not set')} · {t('Revision')} {models.data.revision}</p>
-      {models.data.available.length === 0 && <p>{t('No models are currently available. Check Runtime sign-in and capabilities on the Runtime computer.')}</p>}
+      <p>{t('Models and reasoning effort come from this Workspace’s actual catalog. No hard-coded model or automatic substitute is used.')}</p>
+      {models.data && <><p>{t('Saved:')} {models.data.selection ? `${models.data.selection.model} / ${models.data.selection.reasoningEffort ?? t('Workspace default')}` : t('Not set')} · {t('Revision')} {models.data.revision}</p>
+      {models.data.available.length === 0 && <p>{t('No models are currently available. Check Workspace sign-in and capabilities on the Workspace computer.')}</p>}
       <form onSubmit={event => { event.preventDefault(); void mutate(t('Save default model'), '/v1/models', { selection: { model, reasoningEffort: effort || null }, expectedRevision: models.data!.revision }, models.reload); }}>
         <label>{t('Model')}<select disabled={writeDisabled} aria-label={t('Model')} value={selectedModel ? model : ''} onChange={event => { setModel(event.target.value); setEffort(''); }}><option value="">{t('Choose an available model')}</option>{models.data.available.map(option => <option key={option.id} value={option.id}>{option.id}</option>)}</select></label>
-        <label>{t('Reasoning effort')}<select aria-label={t('Reasoning effort')} value={effort} onChange={event => setEffort(event.target.value)} disabled={writeDisabled || !selectedModel}><option value="">{t('Use Runtime default effort')}</option>{selectedModel?.reasoningEfforts.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>{t('Reasoning effort')}<select aria-label={t('Reasoning effort')} value={effort} onChange={event => setEffort(event.target.value)} disabled={writeDisabled || !selectedModel}><option value="">{t('Use Workspace default effort')}</option>{selectedModel?.reasoningEfforts.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <button type="submit" disabled={writeDisabled || !selectedModel || Boolean(effort && !selectedModel.reasoningEfforts.includes(effort))}>{t('Save default model')}</button>
       </form></>}
     </>)}
@@ -338,12 +329,12 @@ export function ManagementPanel(props: ManagementPanelProps) {
           if(!valid())return;
           setImageSecret('');
         }
-        setNotice(secret ? t('Provider settings and API key were confirmed by the Runtime.') : t('Provider settings were confirmed by the Runtime.'));latest.current.onChanged();await imageProviders.reload();
+        setNotice(secret ? t('Provider settings and API key were confirmed by the Workspace.') : t('Provider settings were confirmed by the Workspace.'));latest.current.onChanged();await imageProviders.reload();
       }); }}>
         <label>{t('Display name')}<input value={providerName} onChange={event => setProviderName(event.target.value)} disabled={writeDisabled} required /></label>
         <label>{t('Registered API base URL')}<input type="url" value={providerEndpoint} onChange={event => setProviderEndpoint(event.target.value)} disabled={writeDisabled} required /></label>
         <label>API Key<input type="password" autoComplete="new-password" value={imageSecret} onChange={event => setImageSecret(event.target.value)} disabled={writeDisabled} placeholder={selectedProvider?.credentialConfigured ? t('Leave blank to keep the current API key') : t('Enter provider API key')} /></label>
-        <p>{selectedProvider ? t('Current credential: {state}. Leaving this blank keeps the credential unchanged.', { state: selectedProvider.credentialConfigured ? t('configured (cannot be read back)') : t('not configured or must be re-entered after restore') }) : t('Save it while creating the provider, or leave it blank and add it later.')} {t('The API key is stored only on the Runtime computer and is not included in Work Graphs or backups.')}</p>
+        <p>{selectedProvider ? t('Current credential: {state}. Leaving this blank keeps the credential unchanged.', { state: selectedProvider.credentialConfigured ? t('configured (cannot be read back)') : t('not configured or must be re-entered after restore') }) : t('Save it while creating the provider, or leave it blank and add it later.')} {t('The API key is stored only on the Workspace computer and is not included in Work Graphs or backups.')}</p>
         <label className="management-checkbox"><input type="checkbox" checked={providerEnabled} onChange={event => setProviderEnabled(event.target.checked)} disabled={writeDisabled} />{t('Enable new task submissions')}</label>
         <button type="submit" disabled={writeDisabled || !providerId.trim() || !providerName.trim()}>{t('Save provider settings')}</button>
       </form>
@@ -360,7 +351,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
         {!selectedProvider.enabled && <p>{t('This provider is disabled. Enable new task submissions and save provider settings before fetching models.')}</p>}
         {!selectedProvider.credentialConfigured && <p>{selectedProvider.credentialRevision === null
           ? t('This provider has no API key configured. Enter the API key again above and save provider settings before fetching models.')
-          : t('This provider had an API key, but the Runtime cannot read it from local credential storage. Enter the API key again above and save provider settings before fetching models.')}</p>}
+          : t('This provider had an API key, but the Workspace cannot read it from local credential storage. Enter the API key again above and save provider settings before fetching models.')}</p>}
         {discoveredModels.length>0 && <div className="image-model-catalog" role="group" aria-label={t('Provider model catalog')}>
           {discoveredModels.map(item => <label className="management-checkbox" key={item.id}><input type="checkbox" checked={item.selected} disabled={writeDisabled} onChange={event => setDiscoveredModels(current=>current.map(model=>model.id===item.id?{...model,selected:event.target.checked}:model))} /><span>{item.name}<code>{item.id}</code></span></label>)}
           <button type="button" disabled={writeDisabled} onClick={() => { void act(t('Save image generation model selection'),async valid => {
@@ -374,7 +365,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
     </>)}
     {section('Work Graph import and export', <>
       <p>{t('Import target:')} {selectedProject ? `${selectedProject.name} (${selectedProject.projectId})` : projectId ? t('{projectId} (project not loaded or unavailable)', { projectId }) : t('No project selected')}. {t('Import creates a new Work Graph and does not overwrite the current graph.')}</p>
-      <p>{t('Export target:')} {graphId ?? t('No Work Graph selected')}. {t('Import and export run only after an explicit click and do not migrate Runtime sessions.')}</p>
+      <p>{t('Export target:')} {graphId ?? t('No Work Graph selected')}. {t('Import and export run only after an explicit click and do not migrate Workspace sessions.')}</p>
       <button type="button" disabled={!projectId || !graphId || !selectedProject} onClick={() => { void act(t('Export Work Graph'), async valid => {
         const bundle = await props.request<GraphBundle>(`/v1/projects/${encode(projectId!)}/graphs/${encode(graphId!)}/export`, undefined, 'GET');
         if (!valid()) return;
@@ -391,17 +382,17 @@ export function ManagementPanel(props: ManagementPanelProps) {
           await props.request(`/v1/projects/${encode(target)}/graphs/import`, { bundle, idempotencyKey: importAttempt.current.key }, 'POST', { journal:'memory' });
           if (!valid()) return;
           importAttempt.current = undefined;
-          setNotice(t('Work Graph import was confirmed by the Runtime. View it in the current project’s Work Graph list.')); setFile(undefined); latest.current.onChanged();
+          setNotice(t('Work Graph import was confirmed by the Workspace. View it in the current project’s Work Graph list.')); setFile(undefined); latest.current.onChanged();
         }, true);
       })}>{t('Import into current project')}</button>
     </>)}
     {section('Storage data management', <>
-      <p>{t('Storage counts files in this Runtime’s data directory, including all projects. Project source files outside that directory are not counted.')}</p>
+      <p>{t('Storage counts files in this Workspace’s data directory, including all projects. Project source files outside that directory are not counted.')}</p>
       <Status value={storage} retry={storage.reload} />
       {storage.data && <>
-        <div className="management-storage-total"><span>{t('Total Runtime data')}</span><strong>{formatSize(storage.data.totalBytes)}</strong></div>
+        <div className="management-storage-total"><span>{t('Total Workspace data')}</span><strong>{formatSize(storage.data.totalBytes)}</strong></div>
         <dl className="management-storage-breakdown">{storageCategories.map(item => <div key={item.key}><dt>{t(item.label)}</dt><dd>{formatSize(storage.data!.categories[item.key])}</dd></div>)}</dl>
-        <p>{t('Measured at {time}. Sizes may change while the Runtime is active.', { time: localTime(storage.data.measuredAt) })}</p>
+        <p>{t('Measured at {time}. Sizes may change while the Workspace is active.', { time: localTime(storage.data.measuredAt) })}</p>
       </>}
       <h4 className="management-form-heading">{t('Cache cleanup')}</h4>
       <div className="management-actions"><button type="button" disabled={disabled} onClick={() => { void storage.reload(); }}>{t('Refresh storage usage')}</button>
@@ -414,21 +405,21 @@ export function ManagementPanel(props: ManagementPanelProps) {
         }); })}>{t('Clear cache')}</button></div>
       <p>{t('Cleanup checks current references before removal. Shared files and protected history are retained; failed file removals stay queued for retry.')}</p>
     </>)}
-    {section('Runtime backups and local restore', <>
-      <p>{t('A backup covers the entire Runtime, not only the current project. Restore can only be performed by an administrator on the Runtime computer.')}</p>
+    {section('Workspace backups and local restore', <>
+      <p>{t('A backup covers the entire Workspace, not only the current project. Restore can only be performed by an administrator on the Workspace computer.')}</p>
       <Status value={backups} retry={backups.reload} />
       <button type="button" disabled={writeDisabled} onClick={() => { void act(t('Create backup'), async valid => {
         backupKey.current ??= randomId();
         const backup = await props.request<LocatedBackup>('/v1/backups', { idempotencyKey: backupKey.current }, 'POST');
         if (!valid()) return;
         backupKey.current = undefined;
-        if (backup.state === 'failed') throw new Error(t('The Runtime reported that backup creation failed. Check Runtime logs and try again.'));
+        if (backup.state === 'failed') throw new Error(t('The Workspace reported that backup creation failed. Check Workspace logs and try again.'));
         setNotice(backup.state === 'ready' ? t('Backup is ready.') : t('Backup is being created. Refresh the list to see the result.'));
         latest.current.onChanged(); await backups.reload();
       }); }}>{t('Create backup')}</button><button type="button" onClick={backups.reload}>{t('Refresh backups')}</button>
       {backups.data?.length === 0 && <p>{t('No backups.')}</p>}
       <ul>{backups.data?.map(backup => <li key={backup.id}><div className="management-item-heading"><Archive size={18} aria-hidden="true" /><strong>{backup.createdAt}</strong><span className="management-badge">{backup.state === 'ready' ? t('Ready') : backup.state === 'creating' ? t('Creating') : t('Failed')}</span></div><code>{backup.id}</code><span>{backup.bytes === null ? t('Size unknown') : t('{bytes} bytes', { bytes: backup.bytes })}</span>{backup.sha256 && <code>Manifest SHA-256: {backup.sha256}</code>}
-        <span>{t('Runtime location:')}{backup.location ? <code>{backup.location}</code> : t('Runtime did not provide a location')}</span>
+        <span>{t('Workspace location:')}{backup.location ? <code>{backup.location}</code> : t('Workspace did not provide a location')}</span>
         <button type="button" disabled={backup.state !== 'ready'} onClick={() => { void act(t('Download backup'), async valid => {
           const blob = await props.request<Blob>(`/v1/backups/${encode(backup.id)}/download`, undefined, 'BLOB');
           if (!valid()) return;
@@ -437,16 +428,16 @@ export function ManagementPanel(props: ManagementPanelProps) {
         }, false, false); }}>{t('Authenticated backup download')}</button>
       </li>)}</ul>
       <Status value={guidance} retry={guidance.reload} />
-      {guidance.data && <details><summary>{t('Local restore guidance (not executed in the browser)')}</summary><p>{t('After safely preserving current data and stopping the Runtime, a local administrator should run restore preview to inspect the backup, verify the returned manifest SHA-256, and replace the placeholders below. The digest shown in the list is not the SHA-256 of the complete downloaded file. Restore invalidates all browser sessions and pauses queued tasks; pair again afterward.')}</p><pre>{guidance.data.command}</pre></details>}
+      {guidance.data && <details><summary>{t('Local restore guidance (not executed in the browser)')}</summary><p>{t('After safely preserving current data and stopping the Workspace, a local administrator should run restore preview to inspect the backup, verify the returned manifest SHA-256, and replace the placeholders below. The digest shown in the list is not the SHA-256 of the complete downloaded file. Restore invalidates all browser sessions and pauses queued tasks; pair again afterward.')}</p><pre>{guidance.data.command}</pre></details>}
     </>)}
     {section('Browser sessions', <>
       <Status value={sessions} retry={sessions.reload} /><button type="button" onClick={sessions.reload}>{t('Refresh sessions')}</button>
       {sessions.data?.length === 0 && <p>{t('No browser sessions.')}</p>}
       <ul>{sessions.data?.map(session => <li data-current={session.current} key={session.id}><div className="management-item-heading"><Monitor size={18} aria-hidden="true" /><strong>{session.browserName}</strong>{session.current && <span className="management-badge">{t('Current browser')}</span>}</div><span>{session.origin}</span><span className="management-badge">{session.state === 'active' ? t('Valid') : t('Session expired')}</span><dl className="management-details"><dt>{t('Paired at')}</dt><dd>{localTime(session.pairedAt)}</dd><dt>{t('Last used')}</dt><dd>{localTime(session.lastUsedAt)}</dd><dt>{t('Expires at')}</dt><dd>{localTime(session.expiresAt)}</dd></dl>
-        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Revoke the session for “{name}”? {effect}', { name: session.browserName, effect: session.current ? t('This disconnects the current browser and requires pairing again.') : t('That browser must pair again to access this Runtime.') }), () => { void act(t('Revoke session'), async valid => {
+        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Revoke the session for “{name}”? {effect}', { name: session.browserName, effect: session.current ? t('This disconnects the current browser and requires pairing again.') : t('That browser must pair again to access this Workspace.') }), () => { void act(t('Revoke session'), async valid => {
           await props.request(`/v1/sessions/${encode(session.id)}`, undefined, 'DELETE');
           if (!valid()) return;
-          setNotice(t('Session revocation was confirmed by the Runtime.'));
+          setNotice(t('Session revocation was confirmed by the Workspace.'));
           if (session.current) setRevoked(true);
           latest.current.onChanged();
           if (!session.current) await sessions.reload();

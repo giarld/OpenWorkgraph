@@ -29,7 +29,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (ext === 'svg') return 'svg';
   if (imageMimeByExtension[ext]) return 'image';
   if (ext === 'pdf') return 'pdf';
-  if (ext === 'mp4') return 'video';
+  if (['mp4','m4v','mov','webm','mkv','avi','mpg','mpeg','ogv'].includes(ext)) return 'video';
   if (Object.hasOwn(languages, ext)) return 'code';
   if (ext === 'bin') return 'hex';
   if (mime === 'text/html') return 'html';
@@ -38,7 +38,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (mime === 'image/svg+xml') return 'svg';
   if (previewImageMime('', mime)) return 'image';
   if (mime === 'application/pdf') return 'pdf';
-  if (mime === 'video/mp4') return 'video';
+  if (mime.startsWith('video/')) return 'video';
   return 'hex';
 }
 export function codeMarkdown(text: string, name: string): string {

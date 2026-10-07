@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { Folder } from 'lucide-react';
 import type { Project, ProjectCandidates } from '../../../packages/protocol/src/index';
 import type { ConnectionRegistry } from '../adapter/connections';
 import { Transport } from '../adapter/transport';
 import { useI18n } from '../i18n/I18nProvider';
 import { messageOf } from './contracts';
+import { WelcomeStepActions, WelcomeStepLayout } from './WelcomeStepLayout';
 
 export function WelcomeWorkspaceSetup({ registry, serviceId, onBusy, onComplete, onSkip }: {
   registry: ConnectionRegistry;
@@ -14,6 +15,7 @@ export function WelcomeWorkspaceSetup({ registry, serviceId, onBusy, onComplete,
   onSkip: () => void;
 }) {
   const { t } = useI18n();
+  const formId = useId();
   const transport = useMemo(() => new Transport(registry, serviceId), [registry, serviceId]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [candidates, setCandidates] = useState<ProjectCandidates>();
@@ -53,23 +55,23 @@ export function WelcomeWorkspaceSetup({ registry, serviceId, onBusy, onComplete,
       const project = selected
         ? (await transport.request<Project[]>('/v1/projects/all')).find(item => item.projectId === selected.projectId)
         : await transport.request<Project>('/v1/projects', { path: path.trim() });
-      if (!project || !usable(project)) throw new Error(t('This workspace is disabled or its directory is unavailable. Choose another workspace.'));
+      if (!project || !usable(project)) throw new Error(t('This project workspace is disabled or its directory is unavailable. Choose another project workspace.'));
       onComplete(project.projectId);
     } catch (failure) { setError(messageOf(failure)); }
     finally { setBusy(false); onBusy(false); }
   }
 
-  return <div className="welcome-agent-setup welcome-workspace-setup">
+  return <WelcomeStepLayout className="welcome-workspace-setup" actions={<WelcomeStepActions busy={busy} disabled={selected ? !usable(selected) : !path.trim()} onSkip={onSkip} form={formId} />}>
     <header>
       <span className="welcome-agent-icon"><Folder size={22} aria-hidden="true" /></span>
-      <div><h2>{t('Set up workspace')}</h2><p>{t('Choose a project directory on the Runtime computer as your workspace for Work Graphs and Agent tasks.')}</p></div>
+      <div><h2>{t('Set up project workspace')}</h2><p>{t('Choose a project directory on the Workspace computer as your project workspace for Work Graphs and Agent tasks.')}</p></div>
     </header>
-    <form className="welcome-agent-card" onSubmit={event => { event.preventDefault(); void continueSetup(); }}>
-      <h3>{t('Workspace directory')}</h3>
+    <form id={formId} className="welcome-agent-card" onSubmit={event => { event.preventDefault(); void continueSetup(); }}>
+      <h3>{t('Project workspace directory')}</h3>
       {loading && <p role="status">{t('Loading…')}</p>}
       {loadError && <p role="alert">{loadError}</p>}
-      <label>{t('Registered workspaces')}<select aria-label={t('Registered workspaces')} value={projectId} disabled={loading || busy} onChange={event => { setProjectId(event.target.value); setError(''); }}>
-        <option value="">{t('Add a workspace directory')}</option>
+      <label>{t('Registered project workspaces')}<select aria-label={t('Registered project workspaces')} value={projectId} disabled={loading || busy} onChange={event => { setProjectId(event.target.value); setError(''); }}>
+        <option value="">{t('Add a project workspace directory')}</option>
         {projects.map(project => <option key={project.projectId} value={project.projectId} disabled={!usable(project)}>{project.name} · {project.canonicalPath}{!usable(project) ? ' · ' + t('Disabled') : ''}</option>)}
       </select></label>
       {selected ? <p className="welcome-workspace-path">{selected.canonicalPath}</p> : <>
@@ -78,16 +80,12 @@ export function WelcomeWorkspaceSetup({ registry, serviceId, onBusy, onComplete,
           {candidates.candidates.filter(candidate => !projects.some(project => project.canonicalPath === candidate.path)).map(candidate => <option key={candidate.path} value={candidate.path} disabled={candidate.availability !== 'available'}>{candidate.path}{candidate.availability !== 'available' ? ' · ' + t('Directory unavailable') : ''}</option>)}
         </select></label>}
         {(candidateError || candidates?.status === 'unavailable') && <p>{t('Codex project directories could not be loaded. You can enter a directory manually.')}</p>}
-        <label>{t('Absolute directory path on Runtime')}<input required disabled={busy} value={path} onChange={event => { setPath(event.target.value); setError(''); }} placeholder={t('Enter an absolute directory path')} /></label>
-        <p>{t('Enter an existing directory on the Runtime computer. No directory will be created.')}</p>
+        <label>{t('Absolute directory path on Workspace')}<input required disabled={busy} value={path} onChange={event => { setPath(event.target.value); setError(''); }} placeholder={t('Enter an absolute directory path')} /></label>
+        <p>{t('Enter an existing directory on the Workspace computer. No directory will be created.')}</p>
       </>}
-      <button type="button" disabled={loading || busy} onClick={() => setReload(value => value + 1)}>{t('Refresh workspaces')}</button>
+      <button type="button" disabled={loading || busy} onClick={() => setReload(value => value + 1)}>{t('Refresh project workspaces')}</button>
       {error && <p role="alert" className="welcome-agent-save-error">{error}</p>}
-      {busy && <p role="status">{t('Saving workspace…')}</p>}
-      <div className="welcome-workspace-actions">
-        <button className="secondary-button" type="button" disabled={busy} onClick={onSkip}>{t('Skip')}</button>
-        <button className="primary-button" type="submit" disabled={busy || (selected ? !usable(selected) : !path.trim())}>{t('Confirm workspace and continue')}</button>
-      </div>
+      {busy && <p role="status">{t('Saving project workspace…')}</p>}
     </form>
-  </div>;
+  </WelcomeStepLayout>;
 }

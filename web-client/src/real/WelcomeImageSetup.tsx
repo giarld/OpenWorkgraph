@@ -5,6 +5,7 @@ import type { ConnectionRegistry } from '../adapter/connections';
 import { Transport } from '../adapter/transport';
 import { useI18n } from '../i18n/I18nProvider';
 import { messageOf } from './contracts';
+import { WelcomeStepActions, WelcomeStepLayout } from './WelcomeStepLayout';
 
 type CatalogModel = { id: string; name: string; selected: boolean };
 
@@ -47,7 +48,7 @@ export function WelcomeImageSetup({ registry, serviceId, onBusy, onComplete }: {
 
   useEffect(() => {
     const target = modelSection.current;
-    const viewport = target?.closest<HTMLElement>('.welcome-image-content');
+    const viewport = target?.closest<HTMLElement>('.welcome-step-content');
     if (!target || !viewport) return;
     viewport.scrollTo({ top: viewport.scrollTop + target.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 24,
       behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
@@ -83,11 +84,14 @@ export function WelcomeImageSetup({ registry, serviceId, onBusy, onComplete }: {
   }
 
   const canFinish = provider?.enabled && provider.credentialConfigured && (catalog ? catalog.some(item => item.selected) : provider.models.length > 0);
-  return <div className="welcome-image-setup">
-    <div className="welcome-agent-setup welcome-image-content">
+  return <WelcomeStepLayout className="welcome-image-setup" actions={<WelcomeStepActions busy={busy} disabled={!canFinish} onSkip={onComplete} onConfirm={() => void act(async () => {
+    if (!provider || !canFinish) return;
+    if (catalog) await transport.request('/v1/image-providers/' + encodeURIComponent(provider.id) + '/models/select', { models: catalog.filter(item => item.selected).map(({ id, name }) => ({ id, name })), expectedRevision: catalogRevision });
+    onComplete();
+  })} />}>
     <header>
       <span className="welcome-agent-icon"><Image size={22} aria-hidden="true" /></span>
-      <div><h2>{t('Set up image models')}</h2><p>{t('Add an image API provider and choose models. You can skip this step and configure it later in Runtime management.')}</p></div>
+      <div><h2>{t('Set up image models')}</h2><p>{t('Add an image API provider and choose models. You can skip this step and configure it later in Workspace management.')}</p></div>
     </header>
     {!provider ? <form className="welcome-agent-card" autoComplete="off" onSubmit={event => { event.preventDefault(); void act(saveProvider); }}>
       <h3>{t('Image generation provider')}</h3>
@@ -100,7 +104,7 @@ export function WelcomeImageSetup({ registry, serviceId, onBusy, onComplete }: {
         <label>{t('Display name')}<input required disabled={busy} value={name} onChange={event => setName(event.target.value)} /></label>
         <label>{t('Registered API base URL')}<input required type="url" disabled={busy} value={endpoint} onChange={event => setEndpoint(event.target.value)} /></label>
         <label>API Key<input type="password" autoComplete="new-password" required={!selected?.credentialConfigured} disabled={busy} value={secret} onChange={event => setSecret(event.target.value)} placeholder={selected?.credentialConfigured ? t('Leave blank to keep the current API key') : t('Enter provider API key')} /></label>
-        <p>{t('The API key is stored only on the Runtime computer and is not included in Work Graphs or backups.')}</p>
+        <p>{t('The API key is stored only on the Workspace computer and is not included in Work Graphs or backups.')}</p>
         <button type="submit" disabled={busy || !id.trim() || !name.trim() || (!selected?.credentialConfigured && !secret.trim())}>{t('Save provider and continue')}</button>
       </>}
     </form> : <section ref={modelSection} className="welcome-agent-card">
@@ -119,14 +123,5 @@ export function WelcomeImageSetup({ registry, serviceId, onBusy, onComplete }: {
     </section>}
     {busy && <p role="status">{t('Saving or fetching image settings…')}</p>}
     {error && <div role="alert" className="welcome-agent-save-error">{error}<button type="button" className="secondary-button" disabled={busy || loading} onClick={() => setReload(value => value + 1)}>{t('Refresh image generation catalog')}</button></div>}
-    </div>
-    <div className="welcome-image-actions">
-      <button type="button" className="secondary-button" disabled={busy} onClick={onComplete}>{t('Skip')}</button>
-      <button type="button" className="primary-button" disabled={busy || !canFinish} onClick={() => void act(async () => {
-        if (!provider || !canFinish) return;
-        if (catalog) await transport.request('/v1/image-providers/' + encodeURIComponent(provider.id) + '/models/select', { models: catalog.filter(item => item.selected).map(({ id, name }) => ({ id, name })), expectedRevision: catalogRevision });
-        onComplete();
-      })}>{t('Save image models and continue')}</button>
-    </div>
-  </div>;
+  </WelcomeStepLayout>;
 }

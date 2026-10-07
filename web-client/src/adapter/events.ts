@@ -122,7 +122,7 @@ export class EventSubscription {
     if (transport.serviceId !== serviceId)
       throw new TransportError(
         "SERVICE_MISMATCH",
-        translate("The event Runtime does not match the Transport Runtime"),
+        translate("The event Workspace does not match the Transport Workspace"),
       );
     this.cursor = options.cursor ?? "";
   }
@@ -219,7 +219,7 @@ export class EventSubscription {
             ?.toLowerCase()
             .startsWith("text/event-stream")
         )
-          throw new TransportError("INVALID_EVENT", translate("The Runtime did not return an SSE stream"));
+          throw new TransportError("INVALID_EVENT", translate("The Workspace did not return an SSE stream"));
         this.handlers.onStatus?.("connected");
         this.transport.registry.setEventConnected(lease, true);
         this.connected = true;
@@ -230,7 +230,7 @@ export class EventSubscription {
             const error = JSON.parse(frame.data);
             throw new TransportError(
               error.code ?? "INVALID_EVENT",
-              translate("The Runtime terminated the event stream"),
+              translate("The Workspace terminated the event stream"),
             );
           }
           if (frame.event !== "workgraph") continue;
@@ -303,7 +303,7 @@ export class EventSubscription {
     lease: ConnectionLease,
   ): void {
     if (!event || event.serviceId !== lease.serviceId)
-      throw new TransportError("SERVICE_MISMATCH", translate("Ignoring an event from another Runtime"));
+      throw new TransportError("SERVICE_MISMATCH", translate("Ignoring an event from another Workspace"));
     if (
       typeof event.eventId !== "string" ||
       !event.eventId ||

@@ -1,4 +1,5 @@
 import { translate } from "../i18n/translate";
+import { displayTerminology } from "../i18n/display-terminology";
 import {
   PROTOCOL_VERSION,
   isProtocolCompatible,
@@ -54,7 +55,7 @@ export class TransportError extends Error {
 }
 function validateRuntimeName(name: string | undefined): void {
   if (name && name.trim().length > RUNTIME_NAME_MAX_LENGTH)
-    throw new TransportError('INVALID_REQUEST', translate('Runtime name must be at most {max} characters', { max: RUNTIME_NAME_MAX_LENGTH }));
+    throw new TransportError('INVALID_REQUEST', translate('Workspace name must be at most {max} characters', { max: RUNTIME_NAME_MAX_LENGTH }));
 }
 
 /** Raised only with proof that the owning connection/lifecycle was superseded. */
@@ -85,7 +86,7 @@ export function normalizeAddress(input: string): string {
   )
     throw new TransportError(
       "INVALID_ADDRESS",
-      translate("The Runtime address must be an HTTP(S) origin without credentials or a path"),
+      translate("The Workspace address must be an HTTP(S) origin without credentials or a path"),
     );
   return url.origin;
 }
@@ -94,7 +95,7 @@ export async function checkResponse(response: Response): Promise<void> {
   const body = await response.json().catch(() => null);
   throw new TransportError(
     body?.error?.code ?? "HTTP_ERROR",
-    body?.error?.message ?? `HTTP ${response.status}`,
+    typeof body?.error?.message === 'string' ? displayTerminology(body.error.message) : `HTTP ${response.status}`,
     response.status,
     body?.error,
   );
@@ -201,7 +202,7 @@ export class ConnectionRegistry {
   lease(serviceId: string): ConnectionLease {
     const row = this.rows.get(serviceId);
     if (this.disposed || !row || row.status === "invalid")
-      throw new TransportError("UNAUTHENTICATED", translate("Pair with the Runtime or restore its session"));
+      throw new TransportError("UNAUTHENTICATED", translate("Pair with the Workspace or restore its session"));
     if (this.storage) {
       const saved = this.readSaved(serviceId);
       if (
@@ -282,7 +283,7 @@ export class ConnectionRegistry {
     const lease = this.lease(serviceId);
     const runtimeName = name.trim();
     validateRuntimeName(runtimeName);
-    if (!runtimeName) throw new TransportError('INVALID_REQUEST', translate('Runtime name is required'));
+    if (!runtimeName) throw new TransportError('INVALID_REQUEST', translate('Workspace name is required'));
     if (lease.sessionId !== expectedSessionId) throw new LifecycleCancelledError();
     const row = { ...this.rows.get(serviceId)!, runtimeName };
     this.storage?.setItem(this.storagePrefix + serviceId, JSON.stringify(row));
@@ -310,9 +311,9 @@ export class ConnectionRegistry {
       !info.serviceId ||
       !isProtocolCompatible(info.protocolVersion)
     )
-      throw new TransportError("PROTOCOL_INCOMPATIBLE", translate("The Runtime did not return a compatible protocol"));
+      throw new TransportError("PROTOCOL_INCOMPATIBLE", translate("The Workspace did not return a compatible protocol"));
     if (expectedServiceId && info.serviceId !== expectedServiceId)
-      throw new TransportError("SERVICE_MISMATCH", translate("The address does not belong to the expected Runtime"));
+      throw new TransportError("SERVICE_MISMATCH", translate("The address does not belong to the expected Workspace"));
     return info;
   }
   async requestClientPairing(address: string, identity: PairingIdentity): Promise<ClientPairingTicket> {
@@ -325,7 +326,7 @@ export class ConnectionRegistry {
     await checkResponse(response);
     const result = await response.json() as ClientPairingRequest;
     if (!result || !normalizeShortPairingCode(result.code) || typeof result.serviceId !== 'string' || !result.serviceId || Number.isNaN(Date.parse(result.expiresAt)))
-      throw new TransportError('PROTOCOL_INCOMPATIBLE', translate('The Runtime returned an invalid client code.'));
+      throw new TransportError('PROTOCOL_INCOMPATIBLE', translate('The Workspace returned an invalid client code.'));
     return { ...result, address };
   }
   async waitForClientPairing(
@@ -409,7 +410,7 @@ export class ConnectionRegistry {
     if (short && !identity) throw new TransportError('PAIRING_CODE_INVALID', translate("Complete pairing on the original page that generated the client code."));
     if (grant) {
       if (!identity) throw new TransportError('PAIRING_CODE_INVALID', translate("Complete pairing on the original page that generated the client code."));
-      if (expectedServiceId && expectedServiceId !== grant.serviceId) throw new TransportError('SERVICE_MISMATCH', translate("The authorization code belongs to another Runtime."));
+      if (expectedServiceId && expectedServiceId !== grant.serviceId) throw new TransportError('SERVICE_MISMATCH', translate("The authorization code belongs to another Workspace."));
       expectedServiceId = grant.serviceId;
     }
     const epochs = new Map(this.epochs);

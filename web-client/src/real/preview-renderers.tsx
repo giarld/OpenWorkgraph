@@ -60,6 +60,7 @@ const renderedModes = ['rendered','text','hex'] as const;
 /** Fallback first; resolution searches newest registrations first. */
 export const builtInPreviewRenderers: readonly PreviewRendererDefinition[] = [
   {id:'core.binary',label:'Hexadecimal',matches:()=>true,input:'blob',initialView:'metadata',modes:['hex','text'],defaultMode:'hex'},
+  {id:'core.text',label:'Plain text',matches:file=>file.mime.split(';')[0].trim().toLowerCase().startsWith('text/') && previewFormat(file.name,file.mime)==='hex' && !file.name.toLowerCase().endsWith('.bin'),input:'text',modes:['text','hex'],defaultMode:'text'},
   {id:'core.image',label:'Image',matches:file=>previewFormat(file.name,file.mime)==='image',input:'blob',Component:ImagePreview,modes:['rendered','hex'],defaultMode:'rendered'},
   {id:'core.video',label:'Video',matches:file=>previewFormat(file.name,file.mime)==='video',input:'blob',Component:VideoPreview,layout:'fill',modes:['rendered','hex'],defaultMode:'rendered'},
   ...([

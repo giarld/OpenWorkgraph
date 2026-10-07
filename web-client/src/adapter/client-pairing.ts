@@ -46,7 +46,7 @@ export async function createPairingIdentity(origin: string, cryptoProvider: Pick
         if (disposed) throw new Error(translate("The client code is no longer valid. Generate a new one."));
         if (!normalizeShortPairingCode(authorization)) {
           const grant = parsePairAuthorization(authorization);
-          if (grant.serviceId !== serviceId) throw new Error(translate("The authorization code belongs to another Runtime. Check the Runtime address."));
+          if (grant.serviceId !== serviceId) throw new Error(translate("The authorization code belongs to another Workspace. Check the Workspace address."));
           if (grant.clientHash !== clientHash) throw new Error(translate("The authorization code does not match this page’s client code. Copy the client code again and authorize it."));
         }
         // Expiry is authoritative on the service, not the client's wall clock.

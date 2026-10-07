@@ -6,8 +6,8 @@
 .management-panel .management-back[hidden] { display: none; }
 .management-navigation span { color: var(--muted); font-size: 12px; }
 .management-page-actions { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--stroke); padding-top: 16px; }
-.management-directory-dialog, .management-confirm-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; padding: 24px; color: var(--text); background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); }
-.management-directory-dialog::backdrop, .management-confirm-dialog::backdrop { background: #0006; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.management-directory-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; box-sizing: border-box; padding: 24px; color: var(--text); background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); }
+.management-directory-dialog::backdrop { background: #0006; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .management-panel p { margin: 8px 0 12px; }
 .management-panel .management-controls { border: 0; padding: 0; margin: 0; min-width: 0; }
 .management-panel .management-section { padding: 16px 0; }
@@ -45,7 +45,6 @@
 .management-form-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .management-panel .management-form-actions button { margin: 0; }
 .management-directory-dialog p { color: var(--muted); font-size: 12px; }
-.management-confirm-dialog p { margin: 0; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
 .management-panel .management-directory-dialog input { font-size: 13px; }
 .management-panel > header > code { display: block; font-family: inherit; color: var(--muted); font-size: 12px; }
 .management-panel > header > p { color: var(--muted); font-size: 12px; font-weight: normal; }

@@ -1,3 +1,5 @@
+import { displayTerminology } from '../i18n/display-terminology';
+
 export type {
   GraphSnapshot,
   GraphOperation,
@@ -23,4 +25,4 @@ export const errorCode = (error: unknown) =>
     ? String(error.code)
     : "";
 export const messageOf = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
+  displayTerminology(error instanceof Error ? error.message : String(error));

@@ -45,7 +45,7 @@ const runStatusMessages: Record<RunStatus, string> = {
 
 /** Reject mixed services; graph selection must never merge service queues. */
 export function singleServiceRuns(runs: Run[]): Run[] {
-  if (new Set(runs.map(run => run.serviceId)).size > 1) throw new Error(translate('A task queue can only contain tasks from the currently connected Runtime.'));
+  if (new Set(runs.map(run => run.serviceId)).size > 1) throw new Error(translate('A task queue can only contain tasks from the currently connected Workspace.'));
   return [...runs].sort((a, b) => {
     const left = BigInt(a.submissionSequence), right = BigInt(b.submissionSequence);
     return left < right ? -1 : left > right ? 1 : 0;
@@ -95,7 +95,7 @@ export async function readRunDetails(request: Request, run: Run): Promise<RunDet
   if (candidate?.state === 'pending') {
     const graph = await read<GraphSnapshot>('/v1/projects/' + encodeURIComponent(run.projectId) + '/graphs/' + encodeURIComponent(run.graphId));
     if (graph) {
-      if (graph.serviceId !== run.serviceId || graph.projectId !== run.projectId || graph.graphId !== run.graphId) throw new Error(translate('The candidate target Runtime or Work Graph does not match.'));
+      if (graph.serviceId !== run.serviceId || graph.projectId !== run.projectId || graph.graphId !== run.graphId) throw new Error(translate('The candidate target Workspace or Work Graph does not match.'));
       const node = graph.nodes.find(n => n.id === run.nodeId);
       if (node) target = { contentVersion: node.contentVersion, content: node.content, readOnly: node.readOnly || graph.archived || graph.trashed };
     }
@@ -138,7 +138,7 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
   const questions = interactionQuestions(interaction);
   const payload = object(interaction.payload);
   const valid = questions.length > 0 && new Set(questions.map(q => q.id)).size === questions.length && questions.every(q => typeof answers[q.id] === 'string' && answers[q.id].trim() && answers[q.id].length <= 16000);
-  useEffect(() => { if (interaction.kind === 'question' && questions.length === 0) onError(new Error(t('The question format is not recognized, so it cannot be submitted. Check again later or contact the Runtime administrator.'))); }, [interaction.id, interaction.kind, questions.length, onError, t]);
+  useEffect(() => { if (interaction.kind === 'question' && questions.length === 0) onError(new Error(t('The question format is not recognized, so it cannot be submitted. Check again later or contact the Workspace administrator.'))); }, [interaction.id, interaction.kind, questions.length, onError, t]);
   const reason = typeof payload.reason === 'string' ? payload.reason.trim() : '';
   const command = typeof payload.command === 'string' ? payload.command : '';
   return <section className={`interaction-box${interaction.kind === 'approval' ? ' run-approval' : ''}`} aria-label={t('Current question or approval awaiting action')}>
@@ -147,7 +147,7 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
       <div><strong>{t('Approval requested')}</strong><p>{t('Review the operation before deciding whether to approve it.')}</p></div>
     </header>}
 
-    {interaction.status !== 'pending' ? <p role="status">{t('The answer was submitted and is awaiting Runtime confirmation. Later interactions are not available yet.')}</p> : interaction.kind === 'question' ? <form onSubmit={event => { event.preventDefault(); if (!disabled && valid) onReply(questionAnswer(interaction, answers)); }}>
+    {interaction.status !== 'pending' ? <p role="status">{t('The answer was submitted and is awaiting Workspace confirmation. Later interactions are not available yet.')}</p> : interaction.kind === 'question' ? <form onSubmit={event => { event.preventDefault(); if (!disabled && valid) onReply(questionAnswer(interaction, answers)); }}>
       {questions.length === 0 && <p role="status">{t('The current question cannot be submitted. Check the notification.')}</p>}
       {questions.map(q => <label key={q.id} style={{ display: 'block', marginBlock: 12 }}>
         {q.text}
@@ -164,7 +164,7 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
           <pre tabIndex={0} aria-label={t('Full operation awaiting approval')}><code>{command}</code></pre>
         </div> : <p className="run-approval-note">{t('No command was provided. Expand the request details to verify the operation scope.')}</p>}
         <details className="run-approval-details"><summary>{t('Request details')}</summary><JsonBlock value={interaction.payload} /></details>
-        {payload.canApprove !== true && <p className="run-approval-note" role="status">{t('The Runtime does not allow this operation to be approved. You can still decline it.')}</p>}
+        {payload.canApprove !== true && <p className="run-approval-note" role="status">{t('The Workspace does not allow this operation to be approved. You can still decline it.')}</p>}
       </div>
       <div className="run-approval-actions">
         <button type="button" className="secondary-button" disabled={disabled} onClick={() => onReply({ kind: 'approval', decision: 'decline' })}><X size={16} aria-hidden="true" />{t('Decline')}</button>
@@ -172,6 +172,26 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
       </div>
     </>}
   </section>;
+}
+
+/** Confirmed approvals no longer need a history entry in progress. */
+export function visibleRunInteractions(interactions: Interaction[]): Interaction[] {
+  return interactions.filter(item => item.kind !== 'approval' || item.status !== 'answered');
+}
+
+/** Keep active requests actionable and question history inspectable in progress. */
+export function RunInteractionRecords({ interactions, active, disabled, onReply, onError, submittedId }: {
+  interactions: Interaction[]; active: Interaction | null; disabled: boolean;
+  onReply: (answer: Json) => void; onError: (error: unknown) => void; submittedId?: string;
+}) {
+  const { t } = useI18n();
+  return <div className="run-process-interactions" data-canvas-interactive data-canvas-no-zoom onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+    {visibleRunInteractions(interactions).filter(item => item.id !== active?.id).map(item => <details className="run-interaction-record" key={item.id}>
+      <summary>{t(item.kind === 'question' ? 'Question' : 'Operation approval')} · {t({ pending: 'Pending', answered: 'Answered', expired: 'Expired' }[item.status])}</summary>
+      <JsonBlock value={item.payload}/>
+    </details>)}
+    {active && <InteractionForm key={active.id + ':' + active.epoch} interaction={submittedId === active.id ? { ...active, status: 'answered' } : active} disabled={disabled} onReply={onReply} onError={onError}/>}
+  </div>;
 }
 
 /** request is session-scoped to the same service as runs; remount on service switch. */
@@ -191,6 +211,7 @@ export function RunsPanel(props: RunsPanelProps) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [submittedInteraction, setSubmittedInteraction] = useState<string>();
   const [confirmCancel, setConfirmCancel] = useState<Run | null>(null);
   const [confirmStopChain, setConfirmStopChain] = useState<string | null>(null);
   const [confirmCandidate, setConfirmCandidate] = useState<'accept' | 'discard' | null>(null);
@@ -257,12 +278,12 @@ export function RunsPanel(props: RunsPanelProps) {
   };
   const disabled = readOnly || busy || loading;
   const queue = ordered.filter(run => !isTerminalRunStatus(run.status));
-  return <section className="panel real-runs-panel" aria-label={t('Runtime tasks and run history')} data-canvas-no-zoom style={{ padding: 16, minWidth: 0, overflowWrap: 'anywhere' }}>
-    {mode !== 'details' && <div className="panel-heading run-panel-controls"><strong>{t('Runtime task queue')}</strong><span className="run-refresh-control"><button className="secondary-button run-refresh-button" disabled={disabled || !!scopeError} onClick={() => { setError(''); setRevision(n => n + 1); onChanged(); }}>{t('Refresh')}</button><span className={'run-loading-ring' + (loading ? ' active' : '')} role="status" aria-label={loading ? t('Reading current Runtime records') : undefined} aria-hidden={!loading}/></span></div>}
-    {scopeError ? <p role="status">{t('The Runtime task scope is invalid. Check the notification and correct it.')}</p> : <>
+  return <section className="panel real-runs-panel" aria-label={t('Workspace tasks and run history')} data-canvas-no-zoom style={{ padding: 16, minWidth: 0, overflowWrap: 'anywhere' }}>
+    {mode !== 'details' && <div className="panel-heading run-panel-controls"><strong>{t('Workspace task queue')}</strong><span className="run-refresh-control"><button className="secondary-button run-refresh-button" disabled={disabled || !!scopeError} onClick={() => { setError(''); setRevision(n => n + 1); onChanged(); }}>{t('Refresh')}</button><span className={'run-loading-ring' + (loading ? ' active' : '')} role="status" aria-label={loading ? t('Reading current Workspace records') : undefined} aria-hidden={!loading}/></span></div>}
+    {scopeError ? <p role="status">{t('The Workspace task scope is invalid. Check the notification and correct it.')}</p> : <>
       {mode !== 'details' && <>
-      <p className="muted">{t('Current connected Runtime only · FIFO within the project · Read-only capacity')}{capacity?.request === request ? t(' · {occupied}/{capacity} occupied', { occupied: capacity.value.occupied, capacity: capacity.value.capacity }) : t(' · Capacity pending confirmation')}</p>
-      {readOnly && <p role="status">{t('Read-only mode: showing the last known status. Answers, approvals, cancellations, and candidate actions are disabled. Disconnecting the web page does not cancel Runtime tasks.')}</p>}
+      <p className="muted">{t('Current connected Workspace only · FIFO within the project · Read-only capacity')}{capacity?.request === request ? t(' · {occupied}/{capacity} occupied', { occupied: capacity.value.occupied, capacity: capacity.value.capacity }) : t(' · Capacity pending confirmation')}</p>
+      {readOnly && <p role="status">{t('Read-only mode: showing the last known status. Answers, approvals, cancellations, and candidate actions are disabled. Disconnecting the web page does not cancel Workspace tasks.')}</p>}
       <div className="queue-list">
         {!queue.length && <p>{readOnly ? t('No active tasks are cached. Connect to confirm the actual queue.') : t('There are no active tasks.')}</p>}
         {queue.map(run => <article className="queue-row real-queue-item" key={run.id}>
@@ -277,13 +298,13 @@ export function RunsPanel(props: RunsPanelProps) {
           </div>
         </article>)}
       </div>
-      {confirmCancel && <div role="group" aria-label={t('Confirm task cancellation')} className="interaction-box"><p>{t('Cancel task #{sequence}? The Runtime must still confirm the cancellation after the request is sent. Closing this panel does not cancel the task.', { sequence: confirmCancel.submissionSequence })}</p><div className="button-row"><button className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(confirmCancel, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm task cancellation')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Keep task')}</button></div></div>}
+      {confirmCancel && <div role="group" aria-label={t('Confirm task cancellation')} className="interaction-box"><p>{t('Cancel task #{sequence}? The Workspace must still confirm the cancellation after the request is sent. Closing this panel does not cancel the task.', { sequence: confirmCancel.submissionSequence })}</p><div className="button-row"><button className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(confirmCancel, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm task cancellation')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Keep task')}</button></div></div>}
       </>}
       {mode === 'queue' && ordered.length > 0 && <button className="secondary-button" onClick={() => { const run = selected ?? ordered.at(-1)!; props.onSelectRun?.(run); }}>{t('View run history')}</button>}
       {mode !== 'queue' && <>
       <h3>{t('Run history')}</h3>
       <label>{t('Select run')} <select aria-label={t('Select run')} value={selected?.id ?? ''} onChange={event => { setSelectedId(event.target.value); const run = ordered.find(r => r.id === event.target.value); if (run) props.onSelectRun?.(run); }}><option value="" disabled>{t('Select run')}</option>{[...ordered].reverse().map(run => <option key={run.id} value={run.id}>#{run.submissionSequence} · {t(runStatusMessages[run.status])} · {run.graphId} / {run.nodeId}</option>)}</select></label>
-      {busy && <p role="status">{t('Submitting. Waiting for Runtime confirmation…')}</p>}
+      {busy && <p role="status">{t('Submitting. Waiting for Workspace confirmation…')}</p>}
       {!selected && <p>{t('There are no run records yet.')}</p>}
       {selected && <button className="secondary-button" onClick={() => onLocate(selected)}>{t('Locate this task')}</button>}
       {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
@@ -295,16 +316,17 @@ export function RunsPanel(props: RunsPanelProps) {
         {current.changes?.state !== 'unchanged' && <p className="input-changed">{!current.changes ? t('Input changes could not be read, so changes cannot be determined.') : current.changes.state === 'changed' ? t('The input has changed. This run still uses the frozen input.') : t('Input changes are unknown because the current input has issues.')}</p>}
         {!!current.changes?.issues.length && <JsonBlock value={current.changes.issues} />}
         <details className="run-section" open><RunSectionSummary>{t('Run progress')}</RunSectionSummary>{!current.history ? <p>{t('History could not be read. It will be retried automatically.')}</p> : current.history.historyState === 'cleared' ? <p>{t('Detailed progress was cleared. Run and delivery records remain available.')}</p> : current.history.records.length ? <div className="run-detail-log-wrap">
-          <RunProcessList className="detail-log" ariaLabel={t('Run progress list')} status={selected.status} items={runProgressEntries(current.history).map(entry => entry.text)} collapseLongItems ref={logRef} onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28; setPaused(!follow.current); }}/>
+          <RunProcessList className="detail-log" ariaLabel={t('Run progress list')} status={selected.status} items={runProgressEntries(current.history).map(entry => entry.text)} collapseLongItems ref={logRef} onScroll={e => { const el = e.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28; setPaused(!follow.current); }}>
+            <RunInteractionRecords interactions={current.interactions} active={current.active} disabled={readOnly || busy || !!current.errors.length || !['waiting_answer', 'waiting_approval'].includes(selected.status)} onReply={answer => void mutate(async () => { await replyToInteraction(request, selected, current.active!, answer, randomId()); setSubmittedInteraction(current.active!.id); })} submittedId={submittedInteraction} onError={onError}/>
+          </RunProcessList>
           {paused && <button className="run-detail-jump" type="button" aria-label={t('Jump to latest record')} title={t('Jump to latest record')} onClick={() => logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })}><ArrowDown size={18} aria-hidden="true" /></button>}
-        </div> : <p>{t('The Runtime has no progress records yet.')}</p>}
-          {mode === 'details' && selected.status === 'running' && (confirmCancel?.id === selected.id ? <div role="group" aria-label={t('Confirm stopping the run')} className="interaction-box"><p>{t('Stop the current run? The Runtime must still confirm the stop after the request is sent. Closing this panel does not stop the task.')}</p><div className="button-row"><button type="button" className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm stop')}</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Continue run')}</button></div></div> : <button type="button" className="danger-button run-detail-stop" disabled={readOnly} onClick={() => setConfirmCancel(selected)}>{t('Stop run')}</button>)}
+        </div> : <p>{t('The Workspace has no progress records yet.')}</p>}
+          {(!current.history || current.history.historyState === 'cleared' || !current.history.records.length) && <RunInteractionRecords interactions={current.interactions} active={current.active} disabled={readOnly || busy || !!current.errors.length || !['waiting_answer', 'waiting_approval'].includes(selected.status)} onReply={answer => void mutate(async () => { await replyToInteraction(request, selected, current.active!, answer, randomId()); setSubmittedInteraction(current.active!.id); })} submittedId={submittedInteraction} onError={onError}/>}
+          {mode === 'details' && selected.status === 'running' && (confirmCancel?.id === selected.id ? <div role="group" aria-label={t('Confirm stopping the run')} className="interaction-box"><p>{t('Stop the current run? The Workspace must still confirm the stop after the request is sent. Closing this panel does not stop the task.')}</p><div className="button-row"><button type="button" className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm stop')}</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Continue run')}</button></div></div> : <button type="button" className="danger-button run-detail-stop" disabled={readOnly} onClick={() => setConfirmCancel(selected)}>{t('Stop run')}</button>)}
           {selected.chainControl === 'active' && (confirmStopChain === selectedKey ? <div role="group" aria-label={t('Confirm stopping the entire schedule')} className="interaction-box run-detail-chain-control"><p>{t('Stop all unfinished tasks in this chain? Waiting nodes are cancelled immediately, running nodes wait for stop confirmation, and completed outputs are kept.')}</p><div className="button-row"><button className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(async () => { await request(pathFor(selected, 'cancel-chain'), {idempotencyKey:randomId()}, 'POST'); setConfirmStopChain(null); })}>{t('Confirm stop entire schedule')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmStopChain(null)}>{t('Continue execution')}</button></div></div> : <button className="danger-button run-detail-chain-control" disabled={readOnly} onClick={() => setConfirmStopChain(selectedKey)}>{t('Stop entire schedule')}</button>)}
           {selected.chainControl === 'stopping' && <p className="run-detail-chain-control" role="status">{t('The entire schedule has stopped and is waiting for running nodes to confirm stopping…')}</p>}
           {selected.chainControl === 'stopped' && <p className="run-detail-chain-control" role="status">{t('This chain has stopped.')}</p>}
         </details>
-        {current.active && <InteractionForm key={selectedKey + ':' + current.active.id + ':' + current.active.epoch + ':' + current.active.version} interaction={current.active} disabled={readOnly || busy || !!current.errors.length || !['waiting_answer', 'waiting_approval'].includes(selected.status)} onReply={answer => void mutate(() => replyToInteraction(request, selected, current.active!, answer, randomId()))} onError={onError} />}
-        <details className="run-section"><RunSectionSummary>{t('Questions and approvals ({count})', { count: current.interactions.length })}</RunSectionSummary>{current.interactions.length ? <><p>{t('Questions and operation approvals requested by the Agent during this run. Pending requests are handled in order. Answer or approve above, then wait for Runtime confirmation.')}</p>{current.interactions.map(interaction => <article key={interaction.id}><p>{interaction.kind === 'question' ? t('Question') : t('Operation approval')} · {t({ pending: 'Pending', answered: 'Answered', expired: 'Expired' }[interaction.status])}</p><JsonBlock value={interaction.payload} /></article>)}</> : <p>{t('There are no question or approval records. They will appear here when the Agent needs more information or permission.')}</p>}</details>
         {current.candidate && <section className="interaction-box" aria-label={t('Generated candidate')}><strong>{t('Generated candidate · {state}', { state: current.candidate.state })}</strong><p>{t('Generation baseline version {version}; the candidate did not automatically replace the current body.', { version: current.candidate.baseVersion })}</p><JsonBlock value={current.candidate.content} />{current.candidate.state === 'pending' && <>
           {current.target ? <><p>{t('Current body version {version}', { version: current.target.contentVersion })}</p><JsonBlock value={current.target.content} /></> : <p role="status">{t('The current candidate cannot be handled yet. Check the notification.')}</p>}
           <div className="button-row"><button className="primary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('accept')}>{t('Accept candidate')}</button><button className="secondary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('discard')}>{t('Discard candidate')}</button></div>

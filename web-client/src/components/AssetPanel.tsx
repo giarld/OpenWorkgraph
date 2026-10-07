@@ -168,7 +168,7 @@ export function AssetPanel({
           <X size={18} />
         </button>
       </header>
-      <p className="muted">{t("Development file import · Current Runtime / Project")}</p>
+      <p className="muted">{t("Development file import · Current Workspace / Project")}</p>
       <p className="muted">
         {snapshot.services.find((service) => service.id === graph.serviceId)
           ?.name ?? graph.serviceId}{" "}

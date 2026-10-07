@@ -21,6 +21,7 @@ import type {
 } from "../domain/types";
 import { isTerminal } from "../domain/types";
 import { canDropProjectFile, takeProjectFileDrag } from "../real/project-file-drag";
+import { insertReferenceMention, type ReferenceMentionCandidate } from "../real/reference-mentions";
 import { PromptTextInput, type PromptTextInputHandle } from "./PromptTextInput";
 import {
   findMentionQuery,
@@ -95,7 +96,8 @@ export function PromptPanel({
 }
 type MentionRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
 type SkillCandidate = { name: string; description: string; kind: "skill" };
-type MentionCandidate = ProjectFileMentionCandidate | SkillCandidate;
+type MentionCandidate = ProjectFileMentionCandidate | SkillCandidate | ReferenceMentionCandidate;
+const mentionGroup = (item: MentionCandidate) => item.kind === "directory" ? "file" : item.kind;
 type MentionState = {
   start: number;
   query: string;
@@ -162,28 +164,34 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     mentionEpoch.current++;
     setMention(null);
   };
+  const referenceCandidates = (query: string): ReferenceMentionCandidate[] => references
+    .filter(ref => ref.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    .map(ref => ({ id: ref.id, name: ref.title, kind: "reference" }));
   const runMentionSearch = (start: number, query: string) => {
     const epoch = ++mentionEpoch.current;
     const trimmed = query.trim();
     const base = "/v1/projects/" + encodeURIComponent(mentionProjectId ?? "");
-    const files = trimmed ? mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(base + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) })) : Promise.resolve({ items: [] });
-    const skills = skillEnabled ? mentionRequest!<{ items: { name: string; description: string }[] }>(base + "/skills/search?" + new URLSearchParams({ query: trimmed })) : Promise.resolve({ items: [] });
+    const referencesFound = referenceCandidates(query);
+    const remoteEnabled = mentionEnabled && !!mentionRequest && !!mentionProjectId;
+    const files = remoteEnabled && trimmed ? mentionRequest!<{ items: ProjectFileMentionCandidate[] }>(base + "/files/search?" + new URLSearchParams({ query: trimmed, showHidden: "false", limit: String(MENTION_SEARCH_RESULT) })) : Promise.resolve({ items: [] });
+    const skills = remoteEnabled && skillEnabled ? mentionRequest!<{ items: { name: string; description: string }[] }>(base + "/skills/search?" + new URLSearchParams({ query: trimmed })) : Promise.resolve({ items: [] });
     void Promise.allSettled([files, skills]).then(results => {
       if (epoch !== mentionEpoch.current) return;
       const fileItems = results[0].status === "fulfilled" ? (results[0].value.items ?? []).filter(item => item.kind === "file" || item.kind === "directory") : [];
       const skillItems: SkillCandidate[] = results[1].status === "fulfilled" ? (results[1].value.items ?? []).map(item => ({ ...item, kind: "skill" })) : [];
-      setMention(current => current && current.start === start ? { ...current, items: [...fileItems, ...skillItems], active: 0, loading: false } : current);
+      const items = [...referencesFound, ...fileItems, ...skillItems];
+      setMention(current => current && current.start === start ? { ...current, items, active: Math.max(0, Math.min(current.active, items.length - 1)), loading: false } : current);
     });
   };
   const updateMention = (text: string, cursor: number) => {
     clearTimeout(mentionTimer.current);
     mentionEpoch.current++;
     const found = findMentionQuery(text, cursor);
-    if (!found || !mentionEnabled || !mentionProjectId || !mentionRequest) {
+    if (disabled || !found || (!references.length && !(mentionEnabled && mentionProjectId && mentionRequest))) {
       setMention(null);
       return;
     }
-    setMention(current => ({ start: found.start, query: found.query, items: current && current.start === found.start ? current.items : [], active: 0, loading: true }));
+    setMention({ start: found.start, query: found.query, items: referenceCandidates(found.query), active: 0, loading: true });
     mentionTimer.current = setTimeout(() => runMentionSearch(found.start, found.query), MENTION_DEBOUNCE_MS);
   };
   const insertMention = (item: MentionCandidate) => {
@@ -191,7 +199,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     if (!input || !mention) return;
     const text = input.value;
     const cursor = input.selectionStart ?? text.length;
-    const next = item.kind === "skill" ? insertSkillMention(text, mention.start, cursor, item.name) : insertProjectFileMarkdownLink(text, mention.start, cursor, item);
+    const next = item.kind === "reference" ? insertReferenceMention(text, mention.start, cursor, item) : item.kind === "skill" ? insertSkillMention(text, mention.start, cursor, item.name) : insertProjectFileMarkdownLink(text, mention.start, cursor, item);
     pendingCaret.current = next.caret;
     dismissMention();
     onChange(next.value);
@@ -210,7 +218,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
       <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
     </div>
     <div className="prompt-input">
-      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} onOpenFile={onOpenProjectFile}
+      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
         onScroll={() => { if (mention) updateMentionPosition(); }}
         onDragOver={event => {
           if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
@@ -269,17 +277,17 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
             e.preventDefault(); if (!disabled && !runDisabled) onRun();
           }
         }}/>
-      {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled ? "Prompt suggestions" : "Project file suggestions")}>
+      {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
         {mention.loading && <div className="prompt-mention-empty">{t("Searching…")}</div>}
-        {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{skillEnabled ? t("No matching suggestions") : mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
-        {mention.items.map((item, index) => <div key={item.kind + ":" + (item.kind === "skill" ? item.name : item.relativePath)}>
-          {(index === 0 || mention.items[index - 1]?.kind === "skill" && item.kind !== "skill" || mention.items[index - 1]?.kind !== "skill" && item.kind === "skill") && <div className="prompt-mention-heading">{item.kind === "skill" ? t("Skills") : t("Project files")}</div>}
+        {!mention.loading && !mention.items.length && <div className="prompt-mention-empty">{skillEnabled || references.length ? t("No matching suggestions") : mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
+        {mention.items.map((item, index) => <div key={item.kind + ":" + (item.kind === "reference" ? item.id : item.kind === "skill" ? item.name : item.relativePath)}>
+          {(index === 0 || mentionGroup(mention.items[index - 1]) !== mentionGroup(item)) && <div className="prompt-mention-heading">{item.kind === "reference" ? t("Reference content") : item.kind === "skill" ? t("Skills") : t("Project files")}</div>}
           <button type="button" role="option" aria-selected={index === mention.active}
           className={"prompt-mention-item" + (index === mention.active ? " is-active" : "")}
           onMouseDown={e => e.preventDefault()} onClick={() => insertMention(item)} onMouseEnter={() => setMention(current => current ? { ...current, active: index } : current)}>
           {item.kind === "skill" ? <Sparkles size={14}/> : item.kind === "directory" ? <Folder size={14}/> : <FileText size={14}/>}
           <span className="prompt-mention-name">{item.name}</span>
-          <span className="prompt-mention-path">{item.kind === "skill" ? item.description : item.relativePath}</span>
+          <span className="prompt-mention-path">{item.kind === "reference" ? "" : item.kind === "skill" ? item.description : item.relativePath}</span>
         </button></div>)}
       </div>}
     </div>
@@ -306,10 +314,10 @@ export function QueuePopover({
   const queue = adapter.getQueue(serviceId);
   const runs = [...queue.runs].sort((a, b) => a.sequence - b.sequence);
   return (
-    <section className="queue-popover panel" aria-label={t("Runtime task queue")}>
+    <section className="queue-popover panel" aria-label={t("Workspace task queue")}>
       <div className="panel-heading">
         <ListTodo size={16} />
-        <strong>{t("Runtime task queue")}</strong>
+        <strong>{t("Workspace task queue")}</strong>
         <button className="icon-button" aria-label={t("Close queue")} onClick={onClose}>
           <X size={15} />
         </button>

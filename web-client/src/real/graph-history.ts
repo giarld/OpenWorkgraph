@@ -80,7 +80,7 @@ export class GraphHistory {
       else {
         if (c.busy || c.drafts) throw Error(translate('Wait for the current operation and content save to finish before changing history or the Work Graph.'));
         const g = c.graph;
-        if (!g.history) throw Error(translate('This Runtime does not support document history. Update the Runtime.'));
+        if (!g.history) throw Error(translate('This Workspace does not support document history. Update the Workspace.'));
         if (!(direction === 'undo' ? g.history.canUndo : g.history.canRedo) || !g.history.cursor)
           throw Error(direction === 'undo' ? translate('There is nothing to undo.') : translate('There is nothing to redo.'));
         result = await this.request<GraphSnapshot>(graphPath(g.projectId,g.graphId) + '/history', { direction, expectedCursor:g.history.cursor, idempotencyKey:this.newId(), expectedExecutionRevision:g.executionRevision, expectedLayoutRevision:g.layoutRevision });

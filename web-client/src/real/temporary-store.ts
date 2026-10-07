@@ -308,7 +308,7 @@ export class TemporaryCanvasStore {
       if (record.graph.archived || record.graph.trashed) throw Error(translate("Resources in archived or trashed Work Graphs cannot be modified."));
       record.serviceOperations ??= {};
       const prior = Object.hasOwn(record.serviceOperations, key) ? record.serviceOperations[key] : undefined;
-      if (prior && prior.signature !== signature) throw Object.assign(Error(translate("The Runtime, session, or parameters of the original operation changed. Verify the original submission result first.")), { code: 'IDEMPOTENCY_CONFLICT' });
+      if (prior && prior.signature !== signature) throw Object.assign(Error(translate("The Workspace, session, or parameters of the original operation changed. Verify the original submission result first.")), { code: 'IDEMPOTENCY_CONFLICT' });
       if (!prior) Object.defineProperty(record.serviceOperations, key, { value: { signature }, enumerable: true, writable: true, configurable: true });
       return prior?.result;
     });
@@ -344,7 +344,7 @@ export class TemporaryCanvasStore {
       const source = node.content.source;
       if (!source || typeof source !== 'object' || Array.isArray(source) || source.kind !== 'project-file') continue;
       if (typeof source.serviceId !== 'string' || typeof source.projectId !== 'string' || typeof source.relativePath !== 'string' || !source.relativePath) throw Error(translate("The project file source of a reference node is invalid. Work Graph export failed."));
-      if (!readProjectFile) throw Error(translate("Exporting a reference node requires a connection to its source Runtime and project."));
+      if (!readProjectFile) throw Error(translate("Exporting a reference node requires a connection to its source Workspace and project."));
       const file = await readProjectFile({ serviceId:source.serviceId, projectId:source.projectId, relativePath:source.relativePath });
       if (!file || typeof file.name !== 'string' || typeof file.mime !== 'string' || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.read !== 'function') throw Error(translate("The referenced file size could not be verified. Work Graph export failed."));
       if (file.size > FILE_NODE_MAX_BYTES) throw Error(translate("The referenced file exceeds 300 MB. Work Graph export failed."));
@@ -428,9 +428,9 @@ export class TemporaryCanvasStore {
     } catch (error) { throw failure ?? error; }
   }
   request: Request = async <T>(path: string, body?: unknown, method?: string): Promise<T> => {
-    if (path === '/v1/models') throw Object.assign(Error(translate("No model Runtime is connected.")), { code: 'SERVICE_UNAVAILABLE' });
+    if (path === '/v1/models') throw Object.assign(Error(translate("No model Workspace is connected.")), { code: 'SERVICE_UNAVAILABLE' });
     const match = /^[/]v1[/]projects[/]temporary[/]graphs[/]([^/]+)(.*)$/.exec(path);
-    if (!match) throw Object.assign(Error(translate("This operation requires a Runtime connection.")), { code: 'SERVICE_UNAVAILABLE' });
+    if (!match) throw Object.assign(Error(translate("This operation requires a Workspace connection.")), { code: 'SERVICE_UNAVAILABLE' });
     const [, id, suffix] = match;
     if (!suffix && body === undefined) return this.access(id, false, r => documentSnapshot(r)) as Promise<T>;
     if (suffix === '/export' && body === undefined) return this.exportGraph(id) as Promise<T>;
@@ -493,7 +493,7 @@ export class TemporaryCanvasStore {
       }
       return { mime: resource.blob.type, bytes: resource.blob.size } as T;
     }
-    throw Object.assign(Error(translate("This operation requires a Runtime bridge. The current Runtime does not provide a browser Work Graph execution contract yet.")), { code: 'TEMPORARY_SERVICE_REQUIRED' });
+    throw Object.assign(Error(translate("This operation requires a Workspace bridge. The current Workspace does not provide a browser Work Graph execution contract yet.")), { code: 'TEMPORARY_SERVICE_REQUIRED' });
   };
   rename(graph: GraphSnapshot, title: string) {
     return this.request<GraphSnapshot>(graphPath(graph.projectId, graph.graphId) + '/commands', { idempotencyKey: randomId(), expectedExecutionRevision: graph.executionRevision, expectedLayoutRevision: graph.layoutRevision, operations: [{ type: 'graph.rename', title }] });

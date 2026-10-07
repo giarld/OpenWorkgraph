@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useImperativeHandle, type Ref, type KeyboardEvent, type DragEvent } from 'react';
+import { extractReferenceMention } from '../real/reference-mentions';
 import { extractProjectFileMarkdownLinks, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
 
 export interface PromptTextInputHandle {
@@ -11,17 +12,19 @@ export interface PromptTextInputHandle {
   caretTop(): number;
 }
 
-type Token = { start: number; end: number; raw: string; name: string; kind: string; path?: string };
+type Token = { start: number; end: number; raw: string; name: string; kind: string; path?: string; id?: string };
 function tokens(value: string, skills: boolean): Token[] {
   const result: Token[] = [];
   const pattern = /\[((?:\\.|[^\]])*)\]\((?:<((?:\\.|[^>\r\n])*)>|([^)\s]+))\)/g;
   for (const match of value.matchAll(pattern)) {
+    const reference = extractReferenceMention(match[0]);
+    if (reference) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...reference });
     const item = extractProjectFileMarkdownLinks(match[0])[0];
     if (item) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...item, path: item.relativePath });
   }
   if (skills) for (const match of value.matchAll(/(?:^|\s)(\$[a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)*)(?=$|\s|[.,!?;，。！？；])/g)) {
     const start = match.index! + match[0].length - match[1].length;
-    if (!result.some(token => start >= token.start && start < token.end)) result.push({ start, end: start + match[1].length, raw: match[1], name: match[1], kind: 'skill' });
+    if (!result.some(token => start >= token.start && start < token.end)) result.push({ start, end: start + match[1].length, raw: match[1], name: match[1].slice(1), kind: 'skill' });
   }
   return result.sort((a, b) => a.start - b.start);
 }
@@ -65,15 +68,15 @@ function select(root: HTMLElement, start: number, end: number) {
   if (rect && rect.bottom > bounds.bottom) root.scrollTop += rect.bottom - bounds.bottom;
   else if (rect && rect.top < bounds.top) root.scrollTop -= bounds.top - rect.top;
 }
-function render(root: HTMLElement, value: string, skills: boolean, onOpenFile?: (item: ProjectFileMentionCandidate) => void) {
+function render(root: HTMLElement, value: string, skills: boolean, onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void) {
   const fragment = document.createDocumentFragment(); let cursor = 0;
   for (const token of tokens(value, skills)) {
     fragment.append(document.createTextNode(value.slice(cursor, token.start)));
     const chip = document.createElement('span'); chip.contentEditable = 'false'; chip.className = 'prompt-mention-token';
     chip.dataset.mention = token.raw; chip.dataset.kind = token.kind; chip.title = token.path ?? token.name; chip.setAttribute('aria-label', token.name);
-    if (token.path && onOpenFile) {
+    if ((token.path && onOpenFile) || (token.id && onOpenReference)) {
       chip.setAttribute('role', 'button'); chip.tabIndex = 0;
-      const open = () => onOpenFile({ name: token.name, relativePath: token.path!, kind: token.kind as 'file' | 'directory' });
+      const open = () => token.id ? onOpenReference?.(token.id) : onOpenFile?.({ name: token.name, relativePath: token.path!, kind: token.kind as 'file' | 'directory' });
       chip.addEventListener('click', open);
       chip.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); open(); }
@@ -92,7 +95,8 @@ function render(root: HTMLElement, value: string, skills: boolean, onOpenFile?: 
 }
 
 /** DOM mentions are atomic; persisted prompts remain Markdown and Codex skill text. */
-export function PromptTextInput({ ref, value, disabled, skillEnabled, label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile }: {
+export function PromptTextInput({ ref, value, disabled, skillEnabled, label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile, onOpenReference }: {
+  onOpenReference?: (id: string) => void;
   onOpenFile?: (item: ProjectFileMentionCandidate) => void;
   ref: Ref<PromptTextInputHandle>; value: string; disabled: boolean; skillEnabled: boolean; label: string; placeholder?: string;
   onChange(value: string, cursor: number): void; onSelect(): void; onScroll(): void; onBlur(): void;
@@ -106,8 +110,11 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
   const openFileRef = useRef(onOpenFile);
   openFileRef.current = onOpenFile;
   const openFile = onOpenFile ? (item: ProjectFileMentionCandidate) => openFileRef.current?.(item) : undefined;
+  const openReferenceRef = useRef(onOpenReference);
+  openReferenceRef.current = onOpenReference;
+  const openReference = onOpenReference ? (id: string) => openReferenceRef.current?.(id) : undefined;
   const renderedConfig = useRef('');
-  const config = String(skillEnabled) + ':' + String(!!onOpenFile);
+  const config = String(skillEnabled) + ':' + String(!!onOpenFile) + ':' + String(!!onOpenReference);
   const api: PromptTextInputHandle = {
     get element() { return root.current; }, get value() { return root.current ? textOf(root.current) : value; },
     get selectionStart() { return root.current ? selection(root.current)[0] : 0; }, get selectionEnd() { return root.current ? selection(root.current)[1] : 0; },
@@ -124,14 +131,14 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
     const element = root.current!; if (composing.current) return;
     if (current.current !== value) { history.current.push({ value: current.current, caret: api.selectionStart }); history.current = history.current.slice(-100); future.current = []; }
     const caret = selection(element);
-    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, openFile); if (document.activeElement === element) select(element, ...caret); }
+    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, openFile, openReference); if (document.activeElement === element) select(element, ...caret); }
     current.current = value;
     renderedConfig.current = config;
   }, [value, config]);
   const commit = (next: string, start: number, previousCaret = api.selectionStart) => {
     if (!composing.current && next !== current.current) { history.current.push({ value: current.current, caret: previousCaret }); history.current = history.current.slice(-100); future.current = []; }
     if (!composing.current) current.current = next;
-    if (!composing.current) { render(root.current!, next, skillEnabled, openFile); select(root.current!, start, start); }
+    if (!composing.current) { render(root.current!, next, skillEnabled, openFile, openReference); select(root.current!, start, start); }
     onChange(next, start);
   };
   const replace = (text: string, backward = false, forward = false) => {
@@ -146,7 +153,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, label, pla
   const undo = (redo: boolean) => {
     const from = redo ? future.current : history.current; const to = redo ? history.current : future.current; const state = from.pop(); if (!state) return;
     to.push({ value: api.value, caret: api.selectionStart }); current.current = state.value;
-    render(root.current!, state.value, skillEnabled, openFile); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret);
+    render(root.current!, state.value, skillEnabled, openFile, openReference); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret);
   };
   return <div ref={root} className="prompt-text-input" role="textbox" aria-label={label} aria-placeholder={placeholder} aria-multiline="true" aria-disabled={disabled} data-placeholder={placeholder}
     contentEditable={!disabled} suppressContentEditableWarning tabIndex={disabled ? -1 : 0}

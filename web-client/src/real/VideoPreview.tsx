@@ -59,7 +59,7 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
 
   useEffect(() => {
     if (src || !blob) { setUrl(''); setTime(0); setDuration(0); setPlaying(false); setFailed(false); setLoading(true); return; }
-    const next = URL.createObjectURL(new Blob([blob], { type: 'video/mp4' }));
+    const next = URL.createObjectURL(new Blob([blob], { type: blob.type || 'video/mp4' }));
     setUrl(next); setTime(0); setDuration(0); setPlaying(false);
     setFailed(false); setLoading(true); setFullscreenError(false);
     return () => URL.revokeObjectURL(next);

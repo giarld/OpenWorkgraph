@@ -22,8 +22,8 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
   const { t } = useI18n();
   const [open, setOpen] = useState(true);
   const [page, setPage] = useState<0 | 1 | 2 | 3 | 4 | 5>(0);
-  const steps = ['Welcome to Workgraph', 'Connect Runtime', 'Set up Agent', 'Set up workspace', 'Set up image models', 'Create your first Work Graph'] as const;
-  const stepLabels = [t('Welcome'), t('Runtime'), t('Agent'), t('Workspace'), t('Image models'), t('Work Graph')];
+  const steps = ['Welcome to Workgraph', 'Connect Workspace', 'Set up Agent', 'Set up project workspace', 'Set up image models', 'Create your first Work Graph'] as const;
+  const stepLabels = [t('Welcome'), t('Workspace'), t('Agent'), t('Project workspace'), t('Image models'), t('Work Graph')];
   const [setupProjectId, setSetupProjectId] = useState('');
   const [setupServiceId, setSetupServiceId] = useState('');
   const [busy, setBusy] = useState(false);
@@ -69,7 +69,7 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
       onKeyDown={event => {
         event.stopPropagation();
         if (event.key !== 'Tab') return;
-        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button, input, select, a[href], [tabindex="0"]')).filter(button => !button.closest('[inert]') && !button.matches(':disabled'));
+        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button, input, select, a[href], summary, [tabindex="0"]')).filter(button => !button.closest('[inert]') && !button.matches(':disabled') && button.checkVisibility());
         const first = buttons[0], last = buttons.at(-1);
         if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) {
           event.preventDefault();
@@ -117,24 +117,34 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
             {t('Quick start')}<ArrowDown size={18} />
           </button>
         </section>
-        <section className="welcome-page welcome-tutorial" aria-label={t('Connect Runtime')} inert={page !== 1}>
+        <section className="welcome-page welcome-tutorial" aria-label={t('Connect Workspace')} inert={page !== 1}>
           <header className="welcome-section-heading">
             <span className="welcome-agent-icon"><Server size={22} aria-hidden="true" /></span>
-            <h2>{t('Connect Runtime')}</h2>
+            <h2>{t('Connect Workspace')}</h2>
           </header>
           <ol className="welcome-setup-steps">
             <li>
               <h3>{t('Install Codex CLI')}</h3>
-              <p>{t('Follow the official guide to install Codex CLI and sign in.')}</p>
+              <p>{t('Follow the official guide to install and configure Codex CLI.')}</p>
+              <WelcomeCommand command="npm install -g @openai/codex" copyLabel={t('Copy Codex installation command')} />
               <a href="https://developers.openai.com/codex/cli/" target="_blank" rel="noopener noreferrer">{t('Open Codex CLI installation guide')}</a>
             </li>
             <li>
-              <h3>{t('Install OpenWorkgraph CLI')}</h3>
-              <p>{t('Run this command in a terminal on the device that will run your Runtime:')}</p>
-              <WelcomeCommand command="npm install -g @openworkgraph/agent-service" copyLabel={t('Copy installation command')} />
+              <h3>{t('Start Workspace')}</h3>
+              <p>{t('Run this command in a terminal on the device that will run your Workspace:')}</p>
+              <WelcomeCommand command="npx openworkgraph start" copyLabel={t('Copy start command')} />
+              <p className="welcome-start-note">{t('Requires Node.js 24+. No global installation needed; the first run downloads the required package.')}</p>
+              <details className="welcome-start-options">
+                <summary>{t('Other startup options')}</summary>
+                <div className="welcome-start-options-content">
+                  <p>{t('For frequent use, install the CLI globally, then start your Workspace:')}</p>
+                  <WelcomeCommand command="npm install -g openworkgraph" copyLabel={t('Copy installation command')} />
+                  <WelcomeCommand command="openworkgraph start" copyLabel={t('Copy global start command')} />
+                </div>
+              </details>
             </li>
             <li>
-              <h3>{t('Pair Runtime')}</h3>
+              <h3>{t('Pair Workspace')}</h3>
               <WelcomeRuntimePairing registry={registry} onStart={onPairingStart} onBusy={setBusy} onComplete={id => { setSetupServiceId(id); setPage(2); }} />
             </li>
           </ol>
@@ -142,7 +152,7 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
         <section className="welcome-page welcome-agent-page" aria-label={t('Set up Agent')} inert={page !== 2}>
           {page === 2 && setupServiceId && <WelcomeAgentSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onModelsChanged={onModelsChanged} onComplete={() => setPage(3)} />}
         </section>
-        <section className="welcome-page welcome-agent-page welcome-workspace-page" aria-label={t('Set up workspace')} inert={page !== 3}>
+        <section className="welcome-page welcome-agent-page welcome-workspace-page" aria-label={t('Set up project workspace')} inert={page !== 3}>
           {page === 3 && <WelcomeWorkspaceSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={id => { setSetupProjectId(id); setPage(4); }} onSkip={() => { setSetupProjectId(''); setPage(4); }} />}
         </section>
         <section className="welcome-page welcome-agent-page welcome-image-page" aria-label={t('Set up image models')} inert={page !== 4}>

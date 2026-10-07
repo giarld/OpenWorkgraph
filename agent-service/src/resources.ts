@@ -8,6 +8,7 @@ import type { PreparedBlob } from './blob-store.js';
 import { ServiceError } from './errors.js';
 import { transaction } from './persistence/database.js';
 import sharp from 'sharp';
+import { videoThumbnail } from './video-thumbnail.js';
 
 export interface ResourceScope { projectId: string; serviceId?: string }
 export interface CanvasScope extends ResourceScope { graphId: string }
@@ -34,6 +35,7 @@ function integer(value: number): void {if (!Number.isSafeInteger(value) || value
 export class Resources {
  readonly db: DatabaseSync; readonly blobs: BlobStore; readonly now: () => number;
  private readonly appends=new WeakSet<object>(); private readonly finishes=new WeakSet<object>();
+ private readonly videoFrames=new Map<string, Buffer>();
  constructor(db: DatabaseSync, blobs: BlobStore, options: {now?: () => number} = {}) {this.db=db;this.blobs=blobs;this.now=options.now ?? Date.now;}
  private tx(): void {if (!this.db.isTransaction) throw new Error('Resource commit requires caller transaction');}
  private outside(): void {if (this.db.isTransaction) throw new Error('Filesystem preparation must run outside a transaction');}
@@ -291,8 +293,44 @@ export class Resources {
    return {bytes:bytes.subarray(start,end+1),mime:metadata.mime,total:bytes.length,start,end};
   } finally {transaction(this.db,()=>this.db.prepare('DELETE FROM resource_read_leases WHERE id=?').run(lease));}
  }
- async thumbnail(scope: ResourceScope | CanvasScope, kind: 'asset'|'canvas', id: string, version: number, size: number = IMAGE_THUMBNAIL_LEVELS[0]): Promise<{bytes: Buffer; mime: string; total: number; start: number; end: number}> {
+ async thumbnail(scope: ResourceScope | CanvasScope, kind: 'asset'|'canvas', id: string, version: number, size: number = IMAGE_THUMBNAIL_LEVELS[0]): Promise<{bytes: Buffer; mime: string; total: number; start: number; end: number; cacheable?: boolean}> {
+  this.outside();
   const metadata=kind==='asset'?this.readAssetVersion(scope,id,version):this.readCanvasVersion(scope as CanvasScope,id,version);
+  if (metadata.mime.startsWith('video/')) {
+   const target=[80,160,320].includes(size)?size:320;
+   const result=(bytes: Buffer)=>({bytes,mime:'image/webp',total:bytes.length,start:0,end:bytes.length-1,cacheable:false});
+   const source=this.db.prepare(kind==='asset'?'SELECT project_id,name FROM assets WHERE id=?':'SELECT project_id,name FROM canvas_resources WHERE id=?').get(id)!;
+   const title=String(source['name']);const dot=title.lastIndexOf('.');const stem=dot<0?title:title.slice(0,dot);
+   // As in project files, check same-name covers on every request before frames.
+   for (const extension of ['jpg','jpeg','png','webp']) {
+    const candidates=this.db.prepare('SELECT id,current_version FROM assets WHERE project_id=? AND name=? AND deleted_at IS NULL ORDER BY id').all(String(source['project_id']),stem+'.'+extension);
+    for (const cover of candidates) {
+     try {
+      const coverMetadata=this.readAssetVersion(scope,String(cover['id']),Number(cover['current_version']));
+      if (!coverMetadata.mime.startsWith('image/') || coverMetadata.bytes>8*1024*1024) continue;
+      const original=await this.readContent(scope,'asset',String(cover['id']),Number(cover['current_version']));
+      return result(await sharp(original.bytes).rotate().resize({width:target,height:target,fit:'inside',withoutEnlargement:true}).webp({quality:75}).toBuffer());
+     } catch { /* Inaccessible, missing or invalid covers fall back to frames. */ }
+    }
+   }
+   const lease=randomUUID();let path='';
+   transaction(this.db,()=>{
+    const file=this.db.prepare('SELECT path FROM resource_blob_files WHERE sha256=?').get(metadata.sha256);
+    if (!file) throw new ServiceError('NOT_IMPLEMENTED','Legacy blob storage has not been registered');
+    path=String(file['path']);this.db.prepare('INSERT INTO resource_read_leases VALUES(?,?)').run(lease,metadata.sha256);
+   });
+   try {
+    const cacheKey=path+':'+metadata.sha256+':'+target;
+    const bytes=await this.blobs.withVerifiedFile(path,metadata,async file=>{
+     const cached=this.videoFrames.get(cacheKey);
+     if (cached) return cached;
+     return videoThumbnail(file,target);
+    });
+    if (this.videoFrames.size>=32) this.videoFrames.delete(this.videoFrames.keys().next().value!);
+    this.videoFrames.set(cacheKey,bytes);
+    return result(bytes);
+   } finally {transaction(this.db,()=>this.db.prepare('DELETE FROM resource_read_leases WHERE id=?').run(lease));}
+  }
   if(!['image/png','image/jpeg','image/gif','image/webp','image/svg+xml'].includes(metadata.mime)) throw new ServiceError('INVALID_REQUEST','仅支持图片资源缩略图。');
   const original=await this.readContent(scope,kind,id,version);
   const image=sharp(original.bytes,{animated:false});
@@ -324,7 +362,7 @@ export class Resources {
  }
  async preview(scope: ResourceScope | CanvasScope, kind: 'asset'|'canvas', id: string, version: number) {
   const metadata=kind==='asset'?this.readAssetVersion(scope,id,version):this.readCanvasVersion(scope as CanvasScope,id,version);
-  if(['image/png','image/jpeg','image/gif','image/webp','image/svg+xml','video/mp4','video/webm'].includes(metadata.mime)) return {state:'ready' as const,processor:'original-media',version:1,content:await this.readContent(scope,kind,id,version)};
+  if(['image/png','image/jpeg','image/gif','image/webp','image/svg+xml'].includes(metadata.mime) || metadata.mime.startsWith('video/')) return {state:'ready' as const,processor:'original-media',version:1,content:await this.readContent(scope,kind,id,version)};
   return this.representation(scope,kind,id,version);
  }
  /** Preserve exact ID/hash leaves in legacy snapshot JSON without rewriting it. */

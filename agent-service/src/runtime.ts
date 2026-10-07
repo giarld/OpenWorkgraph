@@ -11,7 +11,8 @@ import { PluginRegistry } from './plugins.js';
 import { InputPreparation, type PreparedRepresentation } from './inputs.js';
 import { ModelDefaultsStore, freezeModelSelection, type BackendModel } from './backend/models.js';
 import { CodexBackendAdapter, type AdapterOptions } from './backend/adapter.js';
-import { probeCapabilities } from './backend/capabilities.js';
+import { connect, listModels } from './backend/capabilities.js';
+import { describeCodexFailure, type CodexStage } from './backend/diagnostics.js';
 import { StdioRpc } from './backend/stdio.js';
 import { Runs, type RunsDependencies } from './runs.js';
 import { ExecutionChains } from './execution-chains.js';
@@ -86,7 +87,7 @@ export class WorkflowRuntime {
     this.scheduler = new Scheduler(this.runs, backend, { publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
   get catalog(): BackendModel[] { return structuredClone(this.availableModels); }
-  /** Read-only discovery is independent of execution authorization. Coalesce concurrent reads. */
+  /** Catalog reads require only the wire handshake, never login or execution self-checks. */
   async refreshModels(): Promise<void> {
     if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '运行时正在关闭。');
     if (this.options.backend || this.options.enableBackend === false) return;
@@ -94,16 +95,19 @@ export class WorkflowRuntime {
     this.catalogRefresh = (async () => {
       const options = this.options.backendOptions ?? {};
       let rpc: StdioRpc | undefined;
+      let stage: CodexStage = 'initialize';
       try {
-        rpc = this.catalogRpc = new StdioRpc({ cwd: this.directories.root, ...(options.executable ? { executable: options.executable } : {}), ...(options.args ? { args: options.args } : {}), timeoutMs: options.timeoutMs ?? 5000 });
-        const evidence = await probeCapabilities(rpc);
+        rpc = this.catalogRpc = new StdioRpc({ cwd: this.directories.root, ...(options.executable ? { executable: options.executable } : {}), ...(options.args ? { args: options.args } : {}), ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}), ...(options.initializeTimeoutMs !== undefined ? { initializeTimeoutMs: options.initializeTimeoutMs } : {}) });
+        await connect(rpc);
+        stage = 'model/list';
+        const models = await listModels(rpc);
         if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '运行时正在关闭。');
-        this.availableModels = evidence.models;
-        if (!evidence.authenticated) throw new ServiceError('MODEL_UNAVAILABLE', '模型列表拉取失败：请在运行时所在电脑检查 Codex 登录状态，然后刷新模型能力。');
+        this.availableModels = models;
       } catch (error) {
         this.availableModels = [];
         if (error instanceof ServiceError) throw error;
-        throw new ServiceError('MODEL_UNAVAILABLE', '模型列表拉取失败：请检查运行时所在电脑的 Codex 安装、版本兼容性及连接，然后刷新模型能力。');
+        const failure = describeCodexFailure(error, rpc, stage);
+        throw new ServiceError('MODEL_UNAVAILABLE', failure.message, { details: failure.details, retryable: failure.retryable });
       } finally { rpc?.close(); this.catalogRpc = undefined; }
     })();
     try { await this.catalogRefresh; } finally { this.catalogRefresh = undefined; }
@@ -112,7 +116,7 @@ export class WorkflowRuntime {
     if (this.closed || this.closing) return capability('unavailable', 'Runtime is closing; accepted tasks are retained');
     if (this.options.backend) return capability('available', 'Host-injected controlled backend; not evidence of real Codex execution');
     if (this.options.enableBackend === false) return capability('unavailable', 'Backend discovery explicitly disabled by host');
-    return capability('available', '执行由 Codex app-server 提供，沙盒权限使用运行时设置；提交时检查模型与登录状态');
+    return capability('available', '执行由 Codex app-server 提供，沙盒权限使用工作空间设置；提交时检查模型，认证由 Codex 自身处理');
   }
   get imageGenerationCapability(): Capability {
     const execution = this.executionCapability;

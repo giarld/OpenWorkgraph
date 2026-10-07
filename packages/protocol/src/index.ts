@@ -5,7 +5,7 @@ export * from './execution-chain.js';
 export * from './graph-title.js';
 export * from './graph-binary.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.2.11' as const;
+export const SERVICE_VERSION = '0.2.13' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;

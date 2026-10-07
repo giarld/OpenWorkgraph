@@ -8,3 +8,6 @@
 .ow-preview-action[aria-busy="true"]:has(.ow-preview-action-progress) svg { transform: translateY(-4px); }
 @keyframes preview-action-spin { to { rotate: 360deg; } }
 @media (prefers-reduced-motion: reduce) { .ow-preview-download button.ow-preview-action { transition: none; } .ow-preview-action-spinner { animation: none; } }
+
+.ow-image-metadata { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 6px 18px; min-width: 0; margin-right: auto; color: var(--muted); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.ow-image-metadata span { overflow-wrap: anywhere; }

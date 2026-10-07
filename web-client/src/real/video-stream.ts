@@ -55,7 +55,7 @@ function listen() {
     void entry.request<RangeBlob>(entry.path,undefined,'RANGE',{range}).then(async result => {
       if (result.start !== range.start || result.total !== entry.total) throw Error('Video changed while streaming');
       const bytes = await result.blob.arrayBuffer();
-      port.postMessage({bytes,start:result.start,end:result.end,total:result.total,mime:'video/mp4'},[bytes]);
+      port.postMessage({bytes,start:result.start,end:result.end,total:result.total,mime:result.mime || result.blob.type || 'video/mp4'},[bytes]);
     }).catch(() => port.postMessage({error:'Video range request failed'}));
   });
 }

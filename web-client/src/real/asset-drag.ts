@@ -22,3 +22,4 @@ export function dropAsset(data: DataTransfer, context: Context, position: Point)
   active = undefined;
   drag.place(position);
 }
+

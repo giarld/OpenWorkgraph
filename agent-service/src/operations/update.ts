@@ -5,7 +5,7 @@ import { SERVICE_VERSION } from '@openworkgraph/protocol';
 import type { InstanceRecord } from './lifecycle.js';
 import { readInstance, requestInstance, startBackground, waitUntilStopped } from './lifecycle.js';
 
-const PACKAGE_NAME = '@openworkgraph/agent-service';
+const PACKAGE_NAME = 'openworkgraph';
 
 /** Compare the running package against npm's actual global package location. */
 export async function isGlobalNpmInstallation(cliPath: string, spawnProcess: SpawnProcess = spawn): Promise<boolean> {
@@ -196,7 +196,7 @@ export async function updateAgentService(
 
   let restartArgs: string[] | undefined;
   if (record && status) {
-    if (!status.listenHost) throw new Error('The older runtime did not report its listen address. Update it manually with npm install -g @openworkgraph/agent-service, then restart it with an explicit --host value. The runtime has not been stopped.');
+    if (!status.listenHost) throw new Error('The older runtime did not report its listen address. Update it manually with npm install -g openworkgraph, then restart it with an explicit --host value. The runtime has not been stopped.');
     const port = new URL(status.localEndpoint).port || '80';
     if (!/^\d+$/.test(port) || Number(port) > 65535) throw new Error('The running runtime reported an invalid listen port. The runtime has not been stopped.');
     restartArgs = ['--data-dir', dataDir!, '--host', status.listenHost, '--port', port];

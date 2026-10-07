@@ -132,9 +132,9 @@ export class ResourceApi {
    if(request.headers.range) invalid('缩略图不接受 Range。');
    const requestedSize = request.url ? new URL(request.url, 'http://localhost').searchParams.get('size') : null;
    const size = requestedSize === null ? 320 : integer(Number(requestedSize));
-   if (![320,640,1280,2560,4096].includes(size)) invalid('无效的缩略图尺寸。');
+   if (![80,160,320,640,1280,2560,4096].includes(size)) invalid('无效的缩略图尺寸。');
    const result=await this.resources.thumbnail(scope,kind,id,version,size);
-   return read(()=>this.binary(result,false,true));
+   return read(()=>{const response=this.binary(result,false,result.cacheable!==false);if (result.cacheable===false) response.headers={...response.headers,'Cache-Control':'no-cache'};return response;});
   }
   if(action==='preview') {
    if(request.headers.range) invalid('预览表示不接受 Range；媒体范围读取请使用 content。');
