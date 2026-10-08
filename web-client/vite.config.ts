@@ -26,6 +26,7 @@ export default defineConfig({
     },
   ],
   build: {
+    rollupOptions: { input: { home: 'index.html', workgraphs: 'workgraphs.html' } },
     // Vite's built-in reporter only supports a global limit. The plugin above
     // keeps the 800 kB warning for other chunks while allowing lazy-loaded RealApp.
     chunkSizeWarningLimit: Infinity,

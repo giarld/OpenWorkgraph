@@ -64,8 +64,7 @@ export class SkillSessions {
   async environment(skills: readonly FrozenSkill[], explicitOnly = false): Promise<Record<string,string>> {
     return (await this.withSelectedEnvironment(skills, skill => !explicitOnly || skill.explicit, environment => environment)).value;
   }
-  /** Launch validates every frozen revision; activation resolves only its target.
-   * Automatic skills with missing required values remain available until used. */
+  /** Resolve only skills used at launch or by this activation. */
   async withEnvironment<T>(skills: readonly FrozenSkill[], skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T): Promise<{ value: T }> {
     if (skillId !== null) {
       const skill = skills.find(item => item.skillId === skillId && item.source === 'openworkgraph');
@@ -79,13 +78,14 @@ export class SkillSessions {
     const frozen = structuredClone(skills);
     const requests: SkillConfigRevisionRequest[] = [];
     for (const skill of frozen) {
+      if (!selected(skill)) continue;
       if (skill.source === 'codex') {
-        if (selected(skill) && (!isAbsolute(skill.path) || basename(skill.path) !== 'SKILL.md' || (await fs.stat(skill.path)).size > 128 * 1024)) throw new ServiceError('INPUT_BLOCKED', '冻结 Codex 技能路径不可用：' + skill.name);
+        if (!isAbsolute(skill.path) || basename(skill.path) !== 'SKILL.md' || (await fs.stat(skill.path)).size > 128 * 1024) throw new ServiceError('INPUT_BLOCKED', '冻结 Codex 技能路径不可用：' + skill.name);
         continue;
       }
       const entry = await this.packages.packageEntry(skill.skillId, skill.packageVersion);
       if (entry.path !== skill.path || skill.configRevision === undefined) throw new ServiceError('INPUT_BLOCKED', '冻结技能版本不可用：' + skill.name);
-      requests.push({ skillId: skill.skillId, revision: skill.configRevision, ...(selected(skill) ? { schema: entry.config } : {}) });
+      requests.push({ skillId: skill.skillId, revision: skill.configRevision, schema: entry.config });
     }
     return this.configs.withRevisions(requests, environments => {
       const environment: Record<string,string> = {};

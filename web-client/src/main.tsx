@@ -6,6 +6,7 @@ const RealApp = lazy(() =>
   import("./real/RealApp").then((module) => ({ default: module.RealApp })),
 );
 import "./styles.css";
+if (!location.hash) history.replaceState(null, '', location.pathname + location.search + '#workgraphs');
 function LoadingWorkspace() {
   const { t } = useI18n();
   return <p role="status">{t('Loading workspace…')}</p>;

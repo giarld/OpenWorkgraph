@@ -37,7 +37,7 @@ export function WelcomeRuntimePairing({ registry, onStart, onBusy, onComplete }:
       behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
     });
   }, [clientCode, connection]);
-  const command = 'npx openworkgraph pair --client-code ' + clientCode;
+  const command = 'npx openworkgraph@latest pair --client-code ' + clientCode;
   async function run(operation: (value: { identity?: PairingIdentity; controller?: AbortController }) => Promise<void>) {
     const value = pairing.current;
     if (!value || busy) return;

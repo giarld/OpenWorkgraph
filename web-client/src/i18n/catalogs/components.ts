@@ -24,6 +24,7 @@ export const componentsZhCN: Record<string, string> = {
   "Pan tool": "平移工具",
   "Zoom out": "缩小",
   "Zoom percentage": "缩放百分比",
+  "Image zoom": "图片缩放",
   "Reset to 100%": "恢复 100%",
   "Zoom in": "放大",
   "Fit all nodes": "适应全部节点",

@@ -1,3 +1,4 @@
+import { MarkdownPreviewProvider } from './MarkdownPreview';
 import { FilePreviewMetadata } from './FilePreviewMetadata';
 import { PreviewActionButton } from './PreviewActionButton';
 import { Component, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
@@ -62,7 +63,7 @@ function InlineFilePreview({name,text,mime,preferredMode,onModeChange}: {name:st
 
 export function ProjectFilePreview({request,projectId,relativePath,name,mime,download=false,preferredMode,onModeChange,onError,missingMessage,showName=true}: {request:Request;projectId:string;relativePath:string;name:string;mime:string;download?:boolean;preferredMode?:PreviewMode;onModeChange?:(mode:PreviewMode)=>void;onError?: (e: unknown) => void;missingMessage?:string;showName?:boolean}) {
   if (mime.startsWith('image/')) return <CanvasProjectFilePreview request={request} projectId={projectId} relativePath={relativePath} mime={mime} name={name} imageNode onError={onError ?? (() => undefined)} missingMessage={missingMessage}/>;
-  return <ProjectFileTextPreview request={request} projectId={projectId} relativePath={relativePath} name={name} mime={mime} download={download} preferredMode={preferredMode} onModeChange={onModeChange} missingMessage={missingMessage} showName={showName}/>;
+  return <MarkdownPreviewProvider sourcePath={relativePath}><ProjectFileTextPreview request={request} projectId={projectId} relativePath={relativePath} name={name} mime={mime} download={download} preferredMode={preferredMode} onModeChange={onModeChange} missingMessage={missingMessage} showName={showName}/></MarkdownPreviewProvider>;
 }
 
 export function LinkedVideoPreview({request,path,bytes,name,copying=false,onCopyToGraph}: {request:Request;path:string;bytes:number;name:string;copying?:boolean;onCopyToGraph?:()=>void}) {
@@ -231,7 +232,7 @@ function RenderedFile({blob,name,mime,renderer,textLabel,preferredMode,onModeCha
   const [page,setPage] = useState(0);
   const [decoded,setDecoded] = useState<{blob:Blob;key:string;text:string;bytes:Uint8Array}>();
   const [error,setError] = useState('');
-  const pageSize = mode === 'hex' ? 256 : 64 * 1024;
+  const pageSize = mode === 'hex' ? 4 * 1024 : 64 * 1024;
   const offset = mode === 'rendered' ? 0 : page * pageSize;
   const key = mode + ':' + offset;
   const paginated = mode !== 'rendered';

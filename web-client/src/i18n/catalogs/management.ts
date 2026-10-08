@@ -25,7 +25,7 @@ export const managementZhCN: Record<string, string> = {
   "Existing Codex projects": "Codex 已有项目列表",
   "{count} projects": "{count} 个项目",
   "Refresh Codex projects": "刷新 Codex 项目",
-  "Project source": "项目来源",
+  "Unable to load Codex projects: {reason}": "无法加载 Codex 项目：{reason}",
   "No projects available to add": "暂无可添加的项目",
   "Use the option above to add a project directory manually.": "可通过上方入口手动添加项目目录。",
   "Added to Workspace": "已添加到工作空间",

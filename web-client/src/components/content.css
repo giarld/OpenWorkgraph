@@ -176,24 +176,24 @@
   width: 100%;
   max-width: 100%;
 }
-.document-dialog > .media-content {
+.document-dialog-content > .media-content {
   height: auto;
   min-height: 0;
   overflow: auto;
   padding: 16px;
 }
-.document-dialog > .media-content img,
-.document-dialog > .media-content video {
+.document-dialog-content > .media-content img,
+.document-dialog-content > .media-content video {
   height: auto;
   max-height: 65vh;
 }
-.document-dialog > .document-body {
+.document-dialog-content > .document-body {
   min-height: 0;
   flex: 1 1 auto;
   overflow: auto;
   overflow-wrap: anywhere;
 }
-.document-dialog > .document-editor {
+.document-dialog-content > .document-editor {
   min-height: 160px;
   height: 45vh;
   max-height: 55vh;
@@ -201,17 +201,17 @@
 .document-dialog.document-dialog-editing {
   height: min(780px, calc(100dvh - 60px));
 }
-.document-dialog.document-dialog-editing > .document-editor {
+.document-dialog.document-dialog-editing .document-dialog-content > .document-editor {
   flex: 1 1 0;
   min-height: min(320px, 45dvh);
   height: auto;
   max-height: none;
 }
-.document-dialog > .document-actions {
+.document-dialog-content > .document-actions {
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-.document-dialog > .unknown-node {
+.document-dialog-content > .unknown-node {
   height: auto;
 }
 .unknown-node.image-placeholder > svg {

@@ -1,3 +1,4 @@
+import { MarkdownPreview } from "../real/MarkdownPreview";
 import {
   useEffect,
   useId,
@@ -6,8 +7,6 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from 'remark-gfm';
 import { ArrowDown, ChevronRight, File } from "lucide-react";
 import { forwardRef, type ReactNode, type UIEventHandler } from "react";
 import type {
@@ -22,12 +21,8 @@ import {
   type NodeContentProps,
 } from "./node-registry";
 import "./content.css";
-import { markdownCodeComponents, markdownRemarkPlugins } from './MarkdownCodeBlock';
 import { useI18n } from "../i18n/I18nProvider";
-import { createPortal } from "react-dom";
-import { markdownLinkTarget } from "../real/markdown-link-target";
 import type { Request } from "../real/contracts";
-import { markdownImageCache } from "../real/markdown-image-cache";
 export type { NodeContentProps } from "./node-registry";
 
 export function AssetPreviewContent({
@@ -336,77 +331,8 @@ export function ContentPlaceholder({ node }: Pick<NodeContentProps, "node">) {
   );
 }
 
-function MarkdownFileImage({ src, alt, request, projectId, revision, onOpenLink, expandable }: { src: string; alt?: string; request: Request; projectId: string; revision: number; onOpenLink?: (href: string) => void; expandable: boolean }) {
-  const { t } = useI18n();
-  const target = markdownLinkTarget(src);
-  const thumbnailSize = expandable ? 1280 : 640;
-  const key = JSON.stringify([projectId, revision, src, thumbnailSize]);
-  const titleId = useId();
-  const trigger = useRef<HTMLButtonElement>(null);
-  const dialog = useRef<HTMLElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [image, setImage] = useState<{ key: string; url?: string; failed?: boolean }>(() => target.kind === 'file' ? { key, url: markdownImageCache.peek(request, projectId, target.path, thumbnailSize) } : { key });
-  const [original, setOriginal] = useState<{ key: string; url?: string; failed?: boolean }>();
-  useEffect(() => {
-    if (!expanded) return;
-    dialog.current?.focus();
-    return () => { if (trigger.current?.isConnected) trigger.current.focus(); };
-  }, [expanded]);
-  useEffect(() => {
-    if (!expanded || target.kind !== 'file') return;
-    let active = true;
-    setOriginal({ key, url: markdownImageCache.peek(request, projectId, target.path, 'original') });
-    void markdownImageCache.load(request, projectId, target.path, 'original').then(url => {
-      if (active) setOriginal({ key, url });
-    }).catch(() => { if (active) setOriginal({ key, failed: true }); });
-    return () => { active = false; };
-  }, [expanded, key, request, projectId, src]);
-  useEffect(() => {
-    if (target.kind !== 'file') return;
-    let active = true;
-    setImage({ key, url: markdownImageCache.peek(request, projectId, target.path, thumbnailSize) });
-    void markdownImageCache.load(request, projectId, target.path, thumbnailSize).then(url => {
-      if (active) setImage({ key, url });
-    }).catch(() => { if (active) setImage({ key, failed: true }); });
-    return () => { active = false; };
-  }, [key, src, projectId, request, thumbnailSize]);
-  if (target.kind === 'file' && image?.key === key && image.url && !image.failed) {
-    const imageElement = <img src={image.url} alt={alt ?? ''} draggable={false} onError={() => { markdownImageCache.remove(request, projectId, target.path, thumbnailSize); setImage({ key, failed: true }); }}/>;
-    if (!expandable) return imageElement;
-    return <>
-      <button ref={trigger} type="button" className="markdown-image-expand" aria-label={t('Enlarge {name}', { name: alt || src })} aria-haspopup="dialog" aria-expanded={expanded} title={t('Double-click to enlarge image')} onClick={event => { if (event.detail === 0) setExpanded(true); }} onDoubleClick={() => setExpanded(true)}>{imageElement}</button>
-      {expanded && createPortal(<div className="modal-backdrop markdown-image-backdrop" onPointerDown={event => event.stopPropagation()} onWheel={event => event.stopPropagation()} onClick={() => setExpanded(false)}><section ref={dialog} className="markdown-image-dialog panel" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onClick={event => event.stopPropagation()} onKeyDown={event => {
-        event.stopPropagation();
-        if (event.key === 'Escape') { event.preventDefault(); setExpanded(false); }
-        if (event.key === 'Tab') { event.preventDefault(); dialog.current?.querySelector('button')?.focus(); }
-      }}><header><h2 id={titleId}>{alt || src}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{original?.key === key && original.url && !original.failed ? <img src={original.url} alt={alt ?? ''} draggable={false} onContextMenu={event => event.stopPropagation()} onError={() => { markdownImageCache.remove(request, projectId, target.path, 'original'); setOriginal({ key, failed:true }); }}/> : <p role="status">{original?.key === key && original.failed ? t('Unable to view this file.') : t('Reading original image…')}</p>}</section></div>, document.body)}
-    </>;
-  }
-  const label = alt || src;
-  if (target.kind === 'file' && (image?.key !== key || !image.failed))
-    return <span className="markdown-file-image-fallback" role="status">{t('Loading preview…')}</span>;
-  return <span className="markdown-file-image-fallback" role={target.kind === 'file' ? 'status' : undefined}>{target.kind === 'file' ? t('Unable to view this file.') + ' ' : ''}{onOpenLink && target.kind !== 'invalid' ? <a href={src} data-canvas-interactive data-canvas-link onPointerDown={event => event.stopPropagation()} onClick={event => { event.preventDefault(); event.stopPropagation(); onOpenLink(src); }}>{label}</a> : label}</span>;
-}
-
-export function MarkdownDocument({ content, className = "", onOpenLink, imageRequest, projectId, imageRevision = 0, expandableImages = false }: { content: string; className?: string; onOpenLink?: (href: string) => void; imageRequest?: Request; projectId?: string; imageRevision?: number; expandableImages?: boolean }) {
-  return <article className={("markdown-body " + className).trim()}>
-    <ReactMarkdown
-      skipHtml
-      remarkPlugins={[remarkGfm, ...markdownRemarkPlugins]}
-      urlTransform={url => /^file:/i.test(url) || (/^[a-z]:/i.test(url) && (url[2] === '/' || url.charCodeAt(2) === 92)) ? url : defaultUrlTransform(url)}
-      components={{
-        ...markdownCodeComponents,
-        a: ({ children, href, ...rest }) => <a {...rest} href={href} data-canvas-interactive data-canvas-link onPointerDown={event => event.stopPropagation()} {...(href?.startsWith('#') ? {} : onOpenLink ? { onClick: event => { event.preventDefault(); event.stopPropagation(); onOpenLink(href ?? ''); } } : { target: '_blank', rel: 'noopener noreferrer' })}>{children}</a>,
-        ...(imageRequest && projectId ? { img: ({ src, alt }) => <MarkdownFileImage src={src ?? ''} alt={alt} request={imageRequest} projectId={projectId} revision={imageRevision} onOpenLink={onOpenLink} expandable={expandableImages}/> } : {}),
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  </article>;
-}
-
-export function DocumentCard({ node, onOpenLink, imageRequest, imageRevision }: Pick<NodeContentProps, "node"> & { onOpenLink?: (href: string) => void; imageRequest?: Request; imageRevision?: number }) {
-  return <MarkdownDocument className="document-card" content={node.content || node.summary || node.title} onOpenLink={onOpenLink} imageRequest={imageRequest} projectId={node.projectId} imageRevision={imageRevision} />;
+export function DocumentCard({ node, onOpenLink, imageRequest, imageRevision }: Pick<NodeContentProps, "node"> & { onOpenLink?: (href: string, sourcePath?: string) => void; imageRequest?: Request; imageRevision?: number }) {
+  return <MarkdownPreview className="document-card" text={node.content || node.summary || node.title} onOpenLink={onOpenLink} imageRequest={imageRequest} projectId={node.projectId} imageRevision={imageRevision} />;
 }
 
 export function NodeContent(props: NodeContentProps) {

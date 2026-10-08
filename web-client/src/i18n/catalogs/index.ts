@@ -8,5 +8,6 @@ import managementZhCN from './management';
 import './real-core';
 import './runs';
 import { workspaceZhCN } from './workspace';
+import '../../home/catalog';
 
 Object.assign(zhCN, adaptersZhCN, componentsZhCN, managementZhCN, workspaceZhCN);

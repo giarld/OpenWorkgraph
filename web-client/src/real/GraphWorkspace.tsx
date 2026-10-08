@@ -1,3 +1,5 @@
+import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
+import { MarkdownPreview, MarkdownPreviewProvider } from './MarkdownPreview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import { useRunProgress, useRunPrompts, useInputChanges } from "./use-run-progress";
 import { NodeRunInteractions } from './NodeRunInteractions';
@@ -10,6 +12,8 @@ import { previewFormat, previewMode, type PreviewMode } from './preview-formats'
 import { VideoNodeSummary } from './VideoNodeSummary';
 import { ExecutionOutputList } from "./ExecutionOutputList";
 import { Toast } from './Toast';
+import { WorkspaceRestartHint } from './WorkspaceRestartHint';
+import { WifiOff } from 'lucide-react';
 import { createPortal } from "react-dom";
 import { getNodeDefinition } from "../components/node-registry";
 import { NodeOutline } from '../components/NodeOutline';
@@ -23,8 +27,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { Eye, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
 import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, formatFileSize, importedNodeType } from '../domain/file-types';
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
-import { markdownCodeComponents, markdownRemarkPlugins } from '../components/MarkdownCodeBlock';
-import ReactMarkdown from "react-markdown";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
 import { readViewport, saveViewport, viewportStorageKey } from "./viewport-storage";
 import { primaryModifier } from "../canvas/primary-modifier";
@@ -91,17 +93,18 @@ import {
   REAL_NODE_CLIPBOARD,
   LEGACY_NODE_CLIPBOARD,
 } from "./graph-clipboard";
+type MarkdownLinkedFile = { id: number; sourcePath: string; name: string; mime: string; bytes: number; base64?: string; contentPath?: string; scope: 'project' | 'run'; relativePath?: string };
 const object = (value: Json): Record<string, Json> =>
   value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const hasProjectFileSource = isBoundProjectFileReference;
 const independentContent = (value: Json): Record<string, Json> => { const content = { ...object(value) }; delete content.source; delete content.observation; return content; };
-function DocumentNodeContent({ node, wire, request, imageRequest, imageRevision, onOpenLink }: { node: WorkNode; wire: GraphSnapshot["nodes"][number]; request: Request; imageRequest: Request; imageRevision: number; onOpenLink: (href: string) => void }) {
+function DocumentNodeContent({ node, wire, request, imageRequest, imageRevision, onOpenLink }: { node: WorkNode; wire: GraphSnapshot["nodes"][number]; request: Request; imageRequest: Request; imageRevision: number; onOpenLink: (href: string, sourcePath?: string) => void }) {
   const content = object(wire.content);
   const resourceId = typeof content.resourceId === 'string' ? content.resourceId : '';
   if (!resourceId) return <div className="node-content"><DocumentCard node={node} onOpenLink={onOpenLink} imageRequest={imageRequest} imageRevision={imageRevision}/></div>;
   return <ResourceDocumentNodeContent node={node} wire={wire} request={request} imageRequest={imageRequest} imageRevision={imageRevision} resourceId={resourceId} onOpenLink={onOpenLink}/>;
 }
-function ResourceDocumentNodeContent({ node, wire, request, imageRequest, imageRevision, resourceId, onOpenLink }: { node: WorkNode; wire: GraphSnapshot["nodes"][number]; request: Request; imageRequest: Request; imageRevision: number; resourceId: string; onOpenLink: (href: string) => void }) {
+function ResourceDocumentNodeContent({ node, wire, request, imageRequest, imageRevision, resourceId, onOpenLink }: { node: WorkNode; wire: GraphSnapshot["nodes"][number]; request: Request; imageRequest: Request; imageRevision: number; resourceId: string; onOpenLink: (href: string, sourcePath?: string) => void }) {
   const {t} = useI18n();
   const content = object(wire.content);
   const resourceVersion = Number(content.resourceVersion);
@@ -122,7 +125,7 @@ function ResourceDocumentNodeContent({ node, wire, request, imageRequest, imageR
   if (representation.state === 'failed') return <div className="node-content ow-document-state" role="status"><span>{representation.reason || t('The document is still being processed. Try again later.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry preview')}</button></div>;
   return <div className="node-content"><DocumentCard node={{...node,content:representation.text ?? ''}} onOpenLink={onOpenLink} imageRequest={imageRequest} imageRevision={imageRevision}/></div>;
 }
-function ProjectFileContent({ request, projectId, source, mime, name, compact = false, node, onError, onDetach, refreshKey = 0 }: { request: Request; projectId: string; source: Record<string, Json>; mime: string; name: string; compact?: boolean; node?: WorkNode; onError?: (error: unknown) => void; onDetach?: (text: string) => Promise<void>; refreshKey?: number }) {
+function ProjectFileContent({ request, projectId, source, mime, name, compact = false, node, onError, onDetach, refreshKey = 0, onOpenLink }: { request: Request; projectId: string; source: Record<string, Json>; mime: string; name: string; compact?: boolean; node?: WorkNode; onError?: (error: unknown) => void; onDetach?: (text: string) => Promise<void>; refreshKey?: number; onOpenLink?: (href: string, sourcePath?: string) => void }) {
   const {t} = useI18n();
   const [value, setValue] = useState<{ state: 'loading' | 'ready' | 'missing' | 'unavailable' | 'too-large'; data?: string; error?: string }>({ state:'loading' });
   const [draft, setDraft] = useState<string>();
@@ -158,7 +161,7 @@ function ProjectFileContent({ request, projectId, source, mime, name, compact = 
         detachTimer.current = setTimeout(() => { void onDetach?.(next).catch(error => { const message=messageOf(error); setDetachError(message); onError?.(error); }); }, 250);
       }} allowNodeOpenOnDoubleClick onError={onError ?? (() => undefined)}/>{detachError && <span className="ow-project-reference-edit-error" role="alert">{detachError}</span>}</div>;
     }
-    return <div className="markdown-body"><ReactMarkdown remarkPlugins={markdownRemarkPlugins} components={markdownCodeComponents}>{draft ?? text}</ReactMarkdown><hr/><small>{path}</small></div>;
+    return <div><MarkdownPreview sourcePath={path} text={draft ?? text} onOpenLink={onOpenLink}/><hr/><small>{path}</small></div>;
   }
   return <div className="ow-project-reference-empty"><FileIcon size={32}/><strong>{name}</strong><span>{path}</span></div>;
 }
@@ -181,6 +184,7 @@ export interface GraphWorkspaceProps {
   recentGraphs?: RecentGraph[];
   onOpenRecent?: (graph: RecentGraph) => void;
   onLibrary?: () => void;
+  onHome?: () => void;
   onNew?: () => void;
   onDelete?: () => void;
   onExport?: () => void;
@@ -218,6 +222,14 @@ export interface GraphWorkspaceProps {
 }
 export function GraphWorkspace(props: GraphWorkspaceProps) {
   const {t} = useI18n();
+  useEffect(() => {
+    const preventBrowserZoom = (event: WheelEvent) => {
+      if (event.ctrlKey || event.metaKey) event.preventDefault();
+    };
+    // Cover toolbars and portal dialogs while preserving their own zoom handlers.
+    window.addEventListener('wheel', preventBrowserZoom, {passive:false,capture:true});
+    return () => window.removeEventListener('wheel', preventBrowserZoom, true);
+  }, []);
   const viewportKey = viewportStorageKey(!!props.temporary, props.graph.serviceId, props.graph.projectId, props.graph.graphId);
   const [mainMenu, setMainMenu] = useState(false);
   const [recentMenu, setRecentMenu] = useState<{ left: number; top: number }>();
@@ -261,7 +273,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [referenceId, setReferenceId] = useState<string>();
-  const [markdownLinkedFile, setMarkdownLinkedFile] = useState<{ name:string; mime:string; bytes:number; base64?:string; contentPath?:string; scope:'project'|'run'; relativePath?:string }>();
+  const [markdownLinkedFiles, setMarkdownLinkedFiles] = useState<MarkdownLinkedFile[]>([]);
+  const markdownLinkedFile = markdownLinkedFiles.at(-1);
+  const [markdownLinkPending, setMarkdownLinkPending] = useState(false);
   const [copyingMarkdownLinkedFile,setCopyingMarkdownLinkedFile] = useState(false);
   const markdownLinkRequest = useRef(0);
   const [externalLink, setExternalLink] = useState<string>();
@@ -582,28 +596,50 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     Boolean((g as GraphSnapshot & { trashed?: boolean }).trashed);
   const uploading = uploads.some(job => job.state === 'uploading');
   const readOnly = documentReadOnly || historyState.busy || stoppingUndoRuns || uploading;
-  const openMarkdownLink = (href: string) => {
-    const target = markdownLinkTarget(href);
+  const closePreviewDialogs = () => {
+    markdownLinkRequest.current++;
+    setMarkdownLinkedFiles([]);
+    setMarkdownLinkPending(false);
+    setCopyingMarkdownLinkedFile(false);
+    setReferenceId(undefined);
+    setDocumentId(undefined);
+    setDocumentPreviewId(undefined);
+    setPromptProjectFile(undefined);
+    setGeneratedOutputNodeId(undefined);
+  };
+  const backMarkdownPreview = () => {
+    markdownLinkRequest.current++;
+    setMarkdownLinkPending(false);
+    setCopyingMarkdownLinkedFile(false);
+    setMarkdownLinkedFiles(files => files.slice(0, -1));
+  };
+  const openMarkdownLink = useCallback((href: string, sourcePath?: string) => {
+    const target = markdownLinkTarget(href, sourcePath);
     if (target.kind === 'external') setExternalLink(target.url);
     else if (target.kind === 'file') {
       const requestId = ++markdownLinkRequest.current;
-      setMarkdownLinkedFile(undefined);
+      setMarkdownLinkPending(true);
       setCopyingMarkdownLinkedFile(false);
       void (props.serviceRequest ?? props.request)<{name:string;mime:string;bytes:number;base64?:string;contentPath?:string;scope:'project'|'run';relativePath?:string}>(
         '/v1/projects/' + encodeURIComponent(g.projectId) + '/files/link-preview',
         {path:target.path,streamVideo:true},
         'POST',
-      ).then(file => { if (requestId === markdownLinkRequest.current) setMarkdownLinkedFile(file); })
-        .catch(() => { if (requestId === markdownLinkRequest.current) props.onError(new Error(t('Unable to view this file.'))); });
+      ).then(file => { if (requestId === markdownLinkRequest.current) setMarkdownLinkedFiles(files => [...files, { ...file, id: requestId, sourcePath: file.scope === 'project' && file.relativePath ? file.relativePath : target.path }]); })
+        .catch(() => { if (requestId === markdownLinkRequest.current) props.onError(new Error(t('Unable to view this file.'))); })
+        .finally(() => { if (requestId === markdownLinkRequest.current) setMarkdownLinkPending(false); });
     }
-  };
+  }, [props.serviceRequest, props.request, props.onError, g.projectId, t]);
   useEffect(() => {
     markdownLinkRequest.current++;
-    setMarkdownLinkedFile(undefined);
+    setMarkdownLinkedFiles([]);
+    setMarkdownLinkPending(false);
     setCopyingMarkdownLinkedFile(false);
+  }, [g.serviceId, g.projectId, g.graphId]);
+  useEffect(() => {
     titleEditActive.current = false;
     setTitleDraft(undefined);
   }, [readOnly, g.serviceId, g.projectId, g.graphId]);
+  useEffect(() => () => { markdownLinkRequest.current++; }, []);
   const beginTitleEdit = () => {
     if (readOnly || titleSavePending.current) return;
     titleEditActive.current = true;
@@ -1194,6 +1230,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (readOnly) throw Error(t('The current Work Graph is read-only.'));
     if (!Number.isSafeInteger(linked.bytes) || linked.bytes < 0) throw Error(t('Unable to determine the file size, so it cannot be copied to the Work Graph.'));
     if (linked.bytes > FILE_NODE_MAX_BYTES) throw Error(t('Files larger than 300 MB cannot be copied as resource nodes.'));
+    const requestId = markdownLinkRequest.current;
     setCopyingMarkdownLinkedFile(true);
     try {
       const parts: BlobPart[] = [];
@@ -1213,8 +1250,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const nodeType = importedNodeType(file.name,fileMime(file));
       const position = canvas.current?.getPlacementPosition(defaultNodeSize(nodeType)) ?? {x:100,y:100};
       await upload([file],position);
-      setMarkdownLinkedFile(undefined);
-    } finally { setCopyingMarkdownLinkedFile(false); }
+      if (requestId === markdownLinkRequest.current) backMarkdownPreview();
+    } finally { if (requestId === markdownLinkRequest.current) setCopyingMarkdownLinkedFile(false); }
   };
   const edit = (key: string, value: string) => {
     if (node)
@@ -1452,6 +1489,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             : t('Unsaved')
     : t('Saved');
   // Canvas cards and output previews deliberately share this rendering path.
+  const linkedPreviewLayers = markdownLinkedFiles.map(file => ({
+    id: String(file.id), title: file.name,
+    content: <MarkdownPreviewProvider sourcePath={file.sourcePath}>{file.contentPath
+      ? <LinkedVideoPreview request={props.serviceRequest ?? props.request} path={file.contentPath} bytes={file.bytes} name={file.name} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/>
+      : <LinkedFilePreview base64={file.base64 ?? ''} name={file.name} mime={file.mime} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/>}</MarkdownPreviewProvider>,
+  }));
+  const previewNavigation: PreviewDialogNavigation = { layers: linkedPreviewLayers, pending: markdownLinkPending, onBack: backMarkdownPreview };
+  const hasPreviewRoot = !!(reference || documentNode || promptProjectFile || generatedOutputNode);
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);
@@ -1506,9 +1551,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           <RealPluginView node={wire} readonly={n.readonly} />
         ) : ["text", "document", "execution"].includes(n.type) &&
           !c.resourceId ? (
-          <ReactMarkdown remarkPlugins={markdownRemarkPlugins} components={markdownCodeComponents}>
-            {n.type === "execution" ? n.prompt : n.content}
-          </ReactMarkdown>
+          <MarkdownPreview text={n.type === "execution" ? n.prompt : n.content}/>
         ) : c.resourceId ? (
           <CanvasResourcePreview
             request={props.request}
@@ -1565,12 +1608,15 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         {job.state === "uploading" && <span className="real-upload-percent" aria-label={t('Upload progress')}>{Math.max(0, Math.min(100, Math.round(job.progress)))}%</span>}
       </Toast>
     ))}
-    <Toast open={!state.online && props.runtimeUnavailable !== false && !pasteState.count} duration={null}>
-      {t('The Workspace is unavailable. The Work Graph remains read-only with pan and zoom enabled. Accepted tasks continue running in the Workspace, and drafts are not overwritten automatically.')}
-    </Toast>
   </>;
   return (
+    <MarkdownPreviewProvider onOpenLink={openMarkdownLink} imageRequest={props.serviceRequest ?? props.request} projectId={g.projectId} imageRevision={projectFilesRevision}>
     <section ref={workspaceElement} className="real-workspace" aria-label={t('Work Graph editor')}>
+      {props.runtimeUnavailable === true && !props.online && <section className="workspace-disconnected panel" role="status">
+        <WifiOff size={40} aria-hidden="true" />
+        <h2>{t('Workspace connection disconnected')}</h2>
+        <WorkspaceRestartHint />
+      </section>}
       <div className="real-toolbar topbar-left panel">
         <button className="icon-button" ref={mainMenuTrigger} aria-label={t('Work Graph main menu')} aria-expanded={mainMenu} onClick={() => setMainMenu(v => !v)}><Menu size={18}/></button>
         {props.projectName && <span className="workgraph-project-prefix" title={props.projectName}>
@@ -1592,7 +1638,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       {mainMenu && <>
         <button className="graph-menu-dismiss" aria-label={t('Close Work Graph main menu')} onClick={() => { setRecentMenu(undefined); setMainMenu(false); }}/>
         <nav ref={mainMenuPanel} className="graph-main-menu panel" aria-label={t('Work Graph main menu')}>
-          <button onClick={() => { setMainMenu(false); props.onLibrary?.(); }}><Home size={16}/>{t('Home')}</button>
+          <button onClick={() => { setMainMenu(false); props.onHome?.(); }}><Home size={16}/>{t('Home')}</button>
           <button onClick={() => { setMainMenu(false); props.onLibrary?.(); }}><Grid2X2 size={16}/>{t('My Work Graphs')}</button>
           <button className="graph-recent-trigger" aria-expanded={!!recentMenu} aria-haspopup="true" onClick={event => {
             if (recentMenu) { setRecentMenu(undefined); return; }
@@ -1613,7 +1659,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           <button disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo} onClick={() => { setMainMenu(false); act(() => travelHistory(true)); }}><Redo2 size={16}/>{t('Redo')}</button>
         </nav>
         {recentMenu && <nav ref={recentMenuPanel} className="graph-recent-menu panel" aria-label={t('Recently opened Work Graphs')} style={{ left: recentMenu.left, top: recentMenu.top }}>
-          {props.recentGraphs?.length ? props.recentGraphs.map(item => { const label = item.runtimeName + '/' + item.projectName + '/' + item.title; return <button key={JSON.stringify([item.temporary, item.serviceId, item.projectId, item.graphId])} title={label} onClick={() => { setRecentMenu(undefined); setMainMenu(false); props.onOpenRecent?.(item); }}>{label}</button>; }) : <p className="muted">{t('No recently opened Work Graphs')}</p>}
+          {props.recentGraphs?.length ? props.recentGraphs.map(item => {
+            const label = item.runtimeName + '/' + item.projectName + '/' + item.title;
+            const current = item.temporary === Boolean(props.temporary) && item.serviceId === (props.temporary ? 'browser' : props.graph.serviceId) &&
+              item.projectId === props.graph.projectId && item.graphId === props.graph.graphId;
+            return <button key={JSON.stringify([item.temporary, item.serviceId, item.projectId, item.graphId])} title={label} aria-current={current ? 'page' : undefined} onClick={() => { setRecentMenu(undefined); setMainMenu(false); props.onOpenRecent?.(item); }}><span className="graph-recent-marker" aria-hidden="true">{current ? '• ' : ''}</span><span className="graph-recent-label">{label}</span></button>;
+          }) : <p className="muted">{t('No recently opened Work Graphs')}</p>}
         </nav>}
       </>}
       {confirmRunNodeId && node?.id === confirmRunNodeId && <RunResubmitDialog
@@ -1806,6 +1857,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setDetailsOpen(true); }}
           onActivateNode={n => {
             if (n.type === 'execution') return;
+            if (n.type === 'preview' && openImageNodePreview(n.id)) return;
             if (n.type === 'image') { if (!openImageNodePreview(n.id)) setReferenceId(n.id); return; }
             if (n.type === 'document') { openDocument(n.id, true); return; }
             if (n.type === 'text' || n.type === 'file' || n.type === 'video' || n.type === 'preview') setReferenceId(n.id);
@@ -1837,7 +1889,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <button className="icon-button" aria-label="Save to asset library (independent copy)" title="Save to asset library" disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
               const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
             })}><FolderPlus size={16}/></button>}
-            {n.type !== 'group' && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label="View node content" title="View node content" onClick={() => { if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else if (n.type === "execution" && selectedRun) props.onOpenRun?.(selectedRun); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
+            {n.type !== 'group' && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label="View node content" title="View node content" onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else if (n.type === "execution" && selectedRun) props.onOpenRun?.(selectedRun); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
             {n.type === 'group' && <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16}/></button>}
             <button className="icon-button" aria-label="Delete selected node" title="Delete selected node" disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
           </div>}
@@ -1953,6 +2005,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               onOpenProjectFile={item => item.kind === 'directory' ? props.onOpenProjectDirectory?.(item.relativePath) : setPromptProjectFile({ path:item.relativePath, name:item.name })}
               placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : node.type === "image" ? t("Describe the image you want to generate…") : t("Describe how you want to revise this text")}
               status={running ? t("Saving and submitting…") : locked(node.id) ? t("Locked while running") : unavailableReason}
+              submitting={running}
               runHint={unavailableReason}
               additionalWarnings={draft && ["conflict", "failed", "recovery"].includes(draft.state) ? [t(draftNoticeTitle(draft)), t(DRAFT_RECOVERY_NOTICE)] : []}
               runLabel={node.type === "execution" ? t("Run") : t("Generate")}
@@ -2002,24 +2055,25 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }}
         />
       </div>
-      {reference && <ReferenceDialog key={reference.id} title={reference.title} fitted={reference.type === 'file' || reference.type === 'preview'} onClose={() => setReferenceId(undefined)}>
-        {object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <div className="markdown-body"><ReactMarkdown remarkPlugins={markdownRemarkPlugins} components={markdownCodeComponents}>{reference.type === "execution" ? reference.prompt : reference.content}</ReactMarkdown></div>}
+      {reference && <ReferenceDialog key={reference.id} title={reference.title} fitted={reference.type === 'file' || reference.type === 'preview'} navigation={previewNavigation} onClose={closePreviewDialogs}>
+        {object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onOpenLink={openMarkdownLink}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <MarkdownPreview text={reference.type === "execution" ? reference.prompt : reference.content} onOpenLink={openMarkdownLink}/>}
       </ReferenceDialog>}
-      {generatedOutputNode && typeof generatedOutput.resourceId === "string" && <ReferenceDialog key={generatedOutputNode.id} title={String(generatedOutput.name ?? "Generated file")} onClose={() => setGeneratedOutputNodeId(undefined)}>
+      {generatedOutputNode && typeof generatedOutput.resourceId === "string" && <ReferenceDialog key={generatedOutputNode.id} title={String(generatedOutput.name ?? "Generated file")} navigation={previewNavigation} onClose={closePreviewDialogs}>
         <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={generatedOutput.resourceId} version={Number(generatedOutput.resourceVersion)} mime={typeof generatedOutput.mime === "string" ? generatedOutput.mime : undefined} name={String(generatedOutput.name ?? "Generated file")} onError={props.onError}/>
       </ReferenceDialog>}
-      {promptProjectFile && <ReferenceDialog key={promptProjectFile.path + ':' + projectFilesRevision} title={promptProjectFile.name} fitted onClose={() => setPromptProjectFile(undefined)}>
+      {promptProjectFile && <ReferenceDialog key={promptProjectFile.path + ':' + projectFilesRevision} title={promptProjectFile.name} fitted navigation={previewNavigation} onClose={closePreviewDialogs}>
         <ProjectFilePreview request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={promptProjectFile.path} name={promptProjectFile.name} mime={fileMime({ name:promptProjectFile.name, type:'' })} download showName={false}/>
       </ReferenceDialog>}
-      {markdownLinkedFile && <ReferenceDialog key={markdownLinkedFile.name + ':' + markdownLinkedFile.bytes} title={markdownLinkedFile.name} fitted onClose={() => setMarkdownLinkedFile(undefined)}>
-        {markdownLinkedFile.contentPath ? <LinkedVideoPreview request={props.serviceRequest ?? props.request} path={markdownLinkedFile.contentPath} bytes={markdownLinkedFile.bytes} name={markdownLinkedFile.name} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/> : <LinkedFilePreview base64={markdownLinkedFile.base64 ?? ''} name={markdownLinkedFile.name} mime={markdownLinkedFile.mime} copying={copyingMarkdownLinkedFile} onCopyToGraph={readOnly ? undefined : () => act(copyMarkdownLinkedFileToGraph)}/>}
+      {!hasPreviewRoot && (linkedPreviewLayers.length > 0 || markdownLinkPending) && <ReferenceDialog title={linkedPreviewLayers[0]?.title ?? t('Loading preview…')} fitted navigation={{ ...previewNavigation, layers: linkedPreviewLayers.slice(1) }} onClose={closePreviewDialogs}>
+        {linkedPreviewLayers[0]?.content ?? <p role="status">{t('Loading preview…')}</p>}
       </ReferenceDialog>}
       {externalLink && <ExternalLinkConfirmDialog url={externalLink} onClose={() => setExternalLink(undefined)} onOpen={() => { const url=externalLink; setExternalLink(undefined); window.open(url, '_blank', 'noopener,noreferrer'); }}/>}
 
       {documentNode && <DocumentDialog
         initialPreview={documentPreviewId === documentId || (documentWire?.type !== "text" && typeof object(documentWire?.content ?? {}).resourceId === "string")}
         node={{ ...documentNode, readonly: documentNode.readonly || (documentNode.type !== "text" && locked(documentNode.id)) }}
-        onClose={() => { setDocumentId(undefined); setDocumentPreviewId(undefined); }}
+        navigation={previewNavigation}
+        onClose={closePreviewDialogs}
         onError={props.onError}
         onOpenLink={openMarkdownLink}
         imageRequest={props.serviceRequest ?? props.request}
@@ -2059,6 +2113,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         }}
       />
     </section>
+    </MarkdownPreviewProvider>
   );
 }
 function RunResubmitDialog({ title, action, disabled, onClose, onConfirm }: { title: string; action: string; disabled: boolean; onClose(): void; onConfirm(): void }) {
@@ -2084,7 +2139,7 @@ function RunResubmitDialog({ title, action, disabled, onClose, onConfirm }: { ti
     <div className="button-row"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="button" className="primary-button" disabled={disabled} onClick={onConfirm}>{t('Confirm {action}', { action })}</button></div>
   </section></div>;
 }
-function ReferenceDialog({ title, onClose, children, fitted=false }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean }) {
+function ReferenceDialog({ title, onClose, children, fitted=false, navigation }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean; navigation?: PreviewDialogNavigation }) {
   const dialog = useRef<HTMLElement>(null);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2093,14 +2148,14 @@ function ReferenceDialog({ title, onClose, children, fitted=false }: { title: st
   }, []);
   return <div className="modal-backdrop reference-preview-backdrop" onClick={onClose}><section className={'reference-preview panel' + (fitted ? ' reference-preview-fitted' : '')} role="dialog" aria-modal="true" aria-label="Reference content preview" tabIndex={-1} ref={dialog} onClick={e => e.stopPropagation()} onKeyDown={e => {
     e.stopPropagation();
-    if (e.key === "Escape" || (e.code === "Space" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !(e.target as Element).closest('input,textarea,select,[contenteditable="true"]'))) { e.preventDefault(); onClose(); }
+    if (e.key === "Escape" || (e.code === "Space" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !(e.target as Element).closest('button,a[href],video,audio,input,textarea,select,[contenteditable="true"]'))) { e.preventDefault(); onClose(); }
     if (e.key === "Tab") {
-      const controls = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]') ?? []);
+      const controls = visibleDialogControls(dialog.current);
       const first = controls[0], last = controls.at(-1);
       if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
     }
-  }}><div className="panel-heading"><strong>{title}</strong><button className="icon-button" aria-label="Close reference preview" onClick={onClose}><X size={16}/></button></div>{children}</section></div>;
+  }}><PreviewDialogHeading title={title} navigation={navigation} onClose={onClose} closeLabel="Close reference preview"/><MarkdownPreviewProvider expandableImages><PreviewDialogLayers navigation={navigation}>{fitted ? children : <div className="reference-preview-body">{children}</div>}</PreviewDialogLayers></MarkdownPreviewProvider></section></div>;
 }
 function ExternalLinkConfirmDialog({url,onClose,onOpen}: {url:string;onClose():void;onOpen():void}) {
   const {t}=useI18n();

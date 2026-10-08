@@ -1,13 +1,16 @@
+import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from './PreviewDialogStack';
+import { MarkdownPreview, MarkdownPreviewProvider } from "../real/MarkdownPreview";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Copy, Save, X } from "lucide-react";
+import { Copy, Save } from "lucide-react";
 import type { WorkNode, WorkgraphAdapter } from "../domain/types";
 import { hasTextContent } from "../domain/file-types";
-import { AssetPreviewContent, ContentPlaceholder, MarkdownDocument } from "./NodeContent";
+import { AssetPreviewContent, ContentPlaceholder } from "./NodeContent";
 import { useI18n } from "../i18n/I18nProvider";
 import type { Request } from "../real/contracts";
 
 export interface DocumentDialogProps {
   node: WorkNode;
+  navigation?: PreviewDialogNavigation;
   adapter?: WorkgraphAdapter;
   initialPreview?: boolean;
   onDraft?: (patch: { title: string; content: string }) => void;
@@ -18,7 +21,7 @@ export interface DocumentDialogProps {
   onClose: () => void;
   onSelect: (node: WorkNode) => void;
   onError: (error: unknown) => void;
-  onOpenLink?: (href: string) => void;
+  onOpenLink?: (href: string, sourcePath?: string) => void;
   imageRequest?: Request;
   imageRevision?: number;
 }
@@ -34,6 +37,7 @@ export function DocumentDialog(props: DocumentDialogProps) {
 
 function DocumentEditor({
   node,
+  navigation,
   adapter,
   onSave,
   onDraft, saveStatus, children, initialPreview,
@@ -49,7 +53,6 @@ function DocumentEditor({
   const isMedia = ["image", "video", "audio"].includes(node.type);
   const isText = ["text", "document", "demo:note"].includes(node.type);
   const [draft, setDraft] = useState(node.content);
-  const [title, setTitle] = useState(node.title);
   const [dirty, setDirty] = useState(false);
   const [preview, setPreview] = useState(initialPreview ?? false);
   const [readable, setReadable] = useState(isText && !node.assetRef);
@@ -62,7 +65,6 @@ function DocumentEditor({
   errorRef.current = onError;
   useEffect(() => {
     if (dirty && !onDraft) return;
-    setTitle(node.title);
     if (!isText) {
       setReadable(false);
       return;
@@ -101,8 +103,8 @@ function DocumentEditor({
   const save = async () => {
     setSaving(true);
     try {
-      if (onSave) await onSave({ title, content: draft });
-      else if (adapter) adapter.updateNode(node.graphId, node.id, { title, content: draft });
+      if (onSave) await onSave({ title: node.title, content: draft });
+      else if (adapter) adapter.updateNode(node.graphId, node.id, { title: node.title, content: draft });
       else throw Error(t("Document save interface is missing"));
       setDirty(false);
       setSaved(true);
@@ -115,9 +117,10 @@ function DocumentEditor({
       className="modal-backdrop"
       onPointerDown={(event) => event.stopPropagation()}
       onWheel={(event) => event.stopPropagation()}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >
       <section
-        className={`document-dialog panel${editing ? " document-dialog-editing" : ""}`}
+        className={`document-dialog panel preview-stack-dialog${editing ? " document-dialog-editing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -125,16 +128,12 @@ function DocumentEditor({
         tabIndex={-1}
         onKeyDown={(event) => {
           event.stopPropagation();
-          if (event.key === "Escape" || ((node.readonly || preview) && event.code === "Space" && !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !(event.target as Element).closest('input,textarea,select,[contenteditable="true"]'))) {
+          if (event.key === "Escape" || ((node.readonly || preview || !!navigation?.layers.length) && event.code === "Space" && !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !(event.target as Element).closest('button,a[href],video,audio,input,textarea,select,[contenteditable="true"]'))) {
             event.preventDefault();
             onClose();
           }
           if (event.key === "Tab") {
-            const elements = Array.from(
-              dialog.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], video[controls], audio[controls], [tabindex="0"]',
-              ) ?? [],
-            );
+            const elements = visibleDialogControls(dialog.current);
             const first = elements[0];
             const last = elements.at(-1);
             if (
@@ -155,16 +154,9 @@ function DocumentEditor({
           }
         }}
       >
-        <header className="panel-heading">
-          <h2 id={titleId}>{node.title}</h2>
-          <button
-            className="icon-button"
-            aria-label={t("Close document")}
-            onClick={onClose}
-          >
-            <X size={18} />
-          </button>
-        </header>
+        <PreviewDialogHeading title={node.title} titleId={titleId} navigation={navigation} onClose={onClose} closeLabel={t("Close document")}/>
+        <MarkdownPreviewProvider onOpenLink={onOpenLink} imageRequest={imageRequest} projectId={node.projectId} imageRevision={imageRevision} expandableImages>
+        <PreviewDialogLayers navigation={navigation} rootClassName="document-dialog-content">
         {isText && readable && (
           <p className="muted">
             {node.readonly
@@ -185,24 +177,8 @@ function DocumentEditor({
           <ContentPlaceholder node={node} />
         ) : (
           <>
-            {!node.readonly && (
-              <label>
-                {t("Title")}
-                <input
-                  disabled={saving}
-                  aria-label={t("Document title")}
-                  value={title}
-                  onChange={(event) => {
-                    if (onDraft) { try { onDraft({ title: event.target.value, content: draft }); } catch (e) { onError(e); return; } }
-                    setTitle(event.target.value);
-                    setDirty(true);
-                    setSaved(false);
-                  }}
-                />
-              </label>
-            )}
             {node.readonly || preview ? (
-              <MarkdownDocument className="document-body" content={draft} onOpenLink={onOpenLink} imageRequest={imageRequest} projectId={node.projectId} imageRevision={imageRevision} expandableImages />
+              <MarkdownPreview className="document-body" text={draft} />
             ) : (
               <textarea
                 className="document-editor node-text"
@@ -210,7 +186,7 @@ function DocumentEditor({
                 aria-label={t("Markdown body")}
                 value={draft}
                 onChange={(event) => {
-                  if (onDraft) { try { onDraft({ title, content: event.target.value }); } catch (e) { onError(e); return; } }
+                  if (onDraft) { try { onDraft({ title: node.title, content: event.target.value }); } catch (e) { onError(e); return; } }
                   setDraft(event.target.value);
                   setDirty(true);
                   setSaved(false);
@@ -259,6 +235,8 @@ function DocumentEditor({
           </>
         )}
         {children}
+        </PreviewDialogLayers>
+        </MarkdownPreviewProvider>
       </section>
     </div>
   );

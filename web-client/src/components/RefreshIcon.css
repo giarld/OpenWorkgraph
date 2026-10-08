@@ -1,0 +1,4 @@
+.ow-refresh-icon-spinning { animation: ow-refresh-icon-spin 2s ease-out; }
+.ow-refresh-icon-loading { animation: ow-refresh-icon-spin 2s linear infinite; }
+@keyframes ow-refresh-icon-spin { to { transform: rotate(720deg); } }
+@media (prefers-reduced-motion: reduce) { .ow-refresh-icon-spinning, .ow-refresh-icon-loading { animation: none; } }

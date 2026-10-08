@@ -17,7 +17,7 @@
   --faint: #a8a29e;
   --active: #1c1917;
   --link: #2563eb;
-  --document-dialog-width: min(820px, 94vw);
+  --document-dialog-width: min(1100px, 94vw);
   --toolbar: rgba(251, 250, 247, 0.96);
   --shadow: 0 16px 40px rgba(28, 25, 23, 0.12);
 }
@@ -1077,6 +1077,7 @@ pre {
 }
 .document-dialog {
   width: var(--document-dialog-width);
+  max-width: 100%;
   max-height: 90vh;
   background: var(--panel);
   border: 1px solid var(--stroke);
@@ -1087,6 +1088,7 @@ pre {
   box-shadow: var(--shadow);
 }
 .document-dialog > .panel-heading {
+  flex-shrink: 0;
   border-bottom: 1px solid var(--stroke);
   padding: 12px 20px;
 }
@@ -1163,7 +1165,6 @@ pre {
 .markdown-image-dialog { width: min(1100px, 94vw); max-height: 92vh; display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--panel); border: 1px solid var(--stroke); border-radius: 16px; box-shadow: var(--shadow); }
 .markdown-image-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .markdown-image-dialog h2 { margin: 0; min-width: 0; font-size: 16px; overflow-wrap: anywhere; }
-.markdown-image-dialog > img { display: block; max-width: 100%; min-height: 0; max-height: calc(92vh - 100px); object-fit: contain; align-self: center; }
 .markdown-image-dialog button { min-height: 36px; padding: 6px 10px; border: 1px solid var(--stroke); border-radius: 6px; color: var(--text); background: var(--panel); cursor: pointer; }
 .markdown-image-dialog button:focus-visible { outline: 2px solid var(--active); outline-offset: 3px; }
 .markdown-body table {
@@ -1240,6 +1241,18 @@ pre {
   border-radius: 22px;
   min-width: 64px;
 }
+.run-submit-progress {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: run-submit-spin 1s linear infinite;
+}
+@keyframes run-submit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .run-submit-progress { animation: none; } }
 .node-toolbar {
   border-radius: 18px;
   padding: 6px 8px;
@@ -1283,19 +1296,10 @@ pre {
   overflow: auto;
   padding: 8px;
 }
-.document-dialog > .muted,
-.document-dialog > p,
-.document-dialog > label {
+.document-dialog-content > .muted,
+.document-dialog-content > p {
   margin: 10px 22px;
   font-size: 12px;
-}
-.document-dialog > label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.document-dialog > label input {
-  flex: 1;
 }
 .document-dialog h2 {
   font-size: 16px;
@@ -1332,7 +1336,7 @@ pre {
 .document-body a {
   color: inherit;
 }
-.document-dialog > .media-content {
+.document-dialog-content > .media-content {
   max-height: 70vh;
   height: 520px;
 }
@@ -1496,6 +1500,10 @@ pre {
 [data-theme="dark"] .prompt-status-warning { color: #fbbf24; }
 .prompt-status[aria-hidden="true"] { visibility: hidden; }
 .reference-preview { width: min(720px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; border-radius: 16px; padding: 16px; }
+.reference-preview-backdrop > .reference-preview { width: var(--document-dialog-width); max-width: 100%; height: 88vh; max-height: 92vh; display: flex; flex-direction: column; overflow: hidden; }
+.reference-preview-backdrop > .reference-preview > .panel-heading { flex-shrink: 0; }
+.reference-preview-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.reference-preview-body .markdown-body { padding: 10px; line-height: 1.75; user-select: text; }
 .reference-preview .markdown-body { white-space: normal; overflow-wrap: anywhere; }
 .reference-preview-backdrop { z-index: 110; }
 .markdown-link-confirm-backdrop { z-index: 110; }

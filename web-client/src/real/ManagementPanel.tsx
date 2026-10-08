@@ -234,11 +234,12 @@ export function ManagementPanel(props: ManagementPanelProps) {
     {page === 'add' && <section className="management-section" aria-label={t('Add project')}>
       <button className="candidate-manual" type="button" disabled={writeDisabled} onClick={() => { setPath(''); setFailure(''); setManualOpen(true); }}><FolderPlus size={16} aria-hidden="true" />{t('Add a new project directory')}</button>
       <div className="candidate-heading">
-        <div><h3>{t('Existing Codex projects')}</h3>{candidates.data && <span>{t('{count} projects', { count: candidates.data.candidates.length })}</span>}</div>
+        <div><h3>{t('Existing Codex projects')}</h3>{candidates.data?.status === 'available' && <span>{t('{count} projects', { count: candidates.data.candidates.length })}</span>}</div>
         <button className="candidate-refresh" type="button" aria-label={t('Refresh Codex projects')} title={t('Refresh Codex projects')} disabled={candidates.loading} onClick={candidates.reload}><RefreshCw size={16} aria-hidden="true" /></button>
       </div>
       <Status value={candidates} retry={candidates.reload} />
-      {candidates.data && <><details className="candidate-source"><summary>{t('Project source')}</summary><p>{candidates.data.reason}</p></details>{candidates.data.candidates.length === 0 && <div className="management-empty"><Folder size={28} aria-hidden="true" /><strong>{t('No projects available to add')}</strong><p>{t('Use the option above to add a project directory manually.')}</p></div>}
+      {candidates.data?.status === 'unavailable' && <p role="alert">{t('Unable to load Codex projects: {reason}', { reason: candidates.data.reason })}</p>}
+      {candidates.data?.status === 'available' && <>{candidates.data.candidates.length === 0 && <div className="management-empty"><Folder size={28} aria-hidden="true" /><strong>{t('No projects available to add')}</strong><p>{t('Use the option above to add a project directory manually.')}</p></div>}
         <ul className="candidate-list">{candidates.data.candidates.map(candidate => {
           const registered = projects.data?.some(project => project.canonicalPath === candidate.path);
           const available = candidate.availability === 'available';

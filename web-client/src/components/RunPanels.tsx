@@ -114,9 +114,9 @@ const MENTION_SEARCH_RESULT = 20;
 const MENTION_DEBOUNCE_MS = 120;
 /** Shared phase-one editing surface. Storage and execution stay in the caller. */
 export function PromptEditor({ value, disabled, runDisabled, references, onOpenReference, onClose, onRun, onChange,
-  ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, additionalWarnings = [], children,
+  ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, submitting = false, additionalWarnings = [], children,
   mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, skillReferences = [], onOpenProjectFile }: {
-  value: string; disabled: boolean; runDisabled: boolean;
+  value: string; disabled: boolean; runDisabled: boolean; submitting?: boolean;
   references: { id: string; title: string }[];
   onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string, skillReferences?: SkillReference[]): void;
   skillReferences?: SkillReference[];
@@ -323,7 +323,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
             if (!duringComposition && e.key === "Escape") { e.preventDefault(); dismissMention(); return; }
           }
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !duringComposition) {
-            e.preventDefault(); if (!disabled && !runDisabled) onRun();
+            e.preventDefault(); if (!disabled && !runDisabled && !submitting) onRun();
           }
         }}/>
       {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
@@ -351,7 +351,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
         </span>) : t("Placeholder")}
       </p>
     </div>
-    <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} title={runHint || visibleStatus || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled} onClick={onRun}><ArrowUp size={16}/></button></footer>
+    <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} aria-busy={submitting} title={(submitting ? status : runHint || visibleStatus) || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled || submitting} onClick={onRun}>{submitting ? <span className="run-submit-progress" role="progressbar" aria-label={status || resolvedRunLabel} /> : <ArrowUp size={16} aria-hidden="true" />}</button></footer>
   </section>;
 }
 export function QueuePopover({

@@ -5,12 +5,15 @@ import { Auth } from "./auth.js";
 import { ServiceError } from "./errors.js";
 import { atomic } from "./persistence/database.js";
 export class Events {
-  private readonly closers = new Set<() => void>();
+  private readonly closers = new Map<() => void, string>();
   constructor(
     readonly db: DatabaseSync,
     readonly serviceId: string,
     readonly auth: Auth,
   ) {}
+  connectedClientCount(): number {
+    return new Set(this.closers.values()).size;
+  }
   watermark(): number {
     return Number(
       this.db
@@ -175,11 +178,11 @@ export class Events {
     };
     const timer = setInterval(flush, 100);
     timer.unref();
-    this.closers.add(close);
+    this.closers.set(close, session.id);
     response.on("close", close);
     flush();
   }
   close(): void {
-    for (const close of [...this.closers]) close();
+    for (const close of [...this.closers.keys()]) close();
   }
 }

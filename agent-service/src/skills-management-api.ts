@@ -1,5 +1,5 @@
 import type { IncomingMessage } from 'node:http';
-import type { SkillCatalogItem, SkillConfigurationWrite } from '@openworkgraph/protocol';
+import type { SkillCatalog, SkillCatalogItem, SkillConfigurationWrite } from '@openworkgraph/protocol';
 import type { WorkflowRuntime } from './runtime.js';
 import type { ApiResult } from './api.js';
 import { Auth } from './auth.js';
@@ -9,7 +9,7 @@ export class SkillsManagementApi {
   constructor(private readonly auth: Auth, private readonly runtime: WorkflowRuntime) {}
   private async decorate(item: SkillCatalogItem): Promise<SkillCatalogItem> {
     if (!item.installed) return item;
-    const entry = await this.runtime.skills.packageEntry(item.skillId,item.packageVersion);
+    const entry = await this.runtime.skills.packageMetadata(item.skillId,item.packageVersion);
     if (!entry.config.environment.length) return {...item,configuration:'none'};
     const config = await this.runtime.skillConfigs.read(item.skillId,entry.config);
     const ready = entry.config.environment.filter(field=>field.required).every(field=>config.values.some(value=>value.name===field.name && value.configured));
@@ -47,7 +47,11 @@ export class SkillsManagementApi {
       if (installed && (url.searchParams.has('offset') || url.searchParams.has('limit'))) throw new ServiceError('INVALID_REQUEST','已安装技能列表不接受分页参数。');
       const query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase();
       if (query.length > 1024) throw new ServiceError('INVALID_REQUEST','技能搜索内容过长。');
-      const catalog = await this.runtime.skills.catalog(url.searchParams.get('refresh')==='1');
+      // Installed browsing only reads the host's installation records and schemas.
+      // Remote source availability must never delay this view, including refresh.
+      const catalog: SkillCatalog = installed
+        ? await this.runtime.skills.installedCatalog()
+        : await this.runtime.skills.catalog(url.searchParams.get('refresh')==='1');
       const filtered = catalog.items.filter(item => (!installed || item.installed) && (item.name + ' ' + item.description).toLocaleLowerCase().includes(query));
       // Unpaged calls remain compatible with welcome setup and skill suggestions.
       const paged = !installed && (url.searchParams.has('offset') || url.searchParams.has('limit'));
@@ -75,7 +79,7 @@ export class SkillsManagementApi {
         result = await this.runtime.skillConfigs.clear(id,body.expectedRevision as number);
       } else {
         if (request.method === 'GET') {
-          const entry = await this.runtime.skills.packageEntry(id);
+          const entry = await this.runtime.skills.packageMetadata(id);
           result = {...await this.runtime.skillConfigs.read(id,entry.config),packageVersion:entry.item.packageVersion};
         } else {
           const body = await readJson(request,256*1024);

@@ -25,8 +25,12 @@
 .run-process-interactions .interaction-box { margin-block: 12px; }
 .run-summaries .run-approval-heading, .run-summaries .run-approval-body { padding: 12px; }
 .run-summaries .run-approval-heading p { display: none; }
-.run-summaries .run-approval-actions { padding: 10px 12px; }
+.run-summaries .run-approval-actions { padding: 8px 12px; }
 .run-summaries .run-approval-command pre { max-height: 140px; }
 .run-summaries .run-process-interactions { --panel: var(--canvas-panel); --canvas: var(--canvas-bg); --text: var(--canvas-text); --muted: var(--canvas-muted); --stroke: var(--canvas-border); --fill: var(--canvas-hover); --active: var(--canvas-active); color: var(--text); }
-.run-summaries .run-approval-actions button { flex: 1 1 100%; justify-content: center; min-height: 44px; white-space: nowrap; }
+.run-summaries .run-approval-actions button { flex: 0 1 auto; justify-content: center; gap: 4px; min-height: 30px; padding: 5px 10px; border-radius: 6px; font-size: 12px; line-height: 18px; white-space: normal; }
+.run-summaries .run-approval-actions button svg { flex-shrink: 0; width: 14px; height: 14px; }
 .run-summaries .run-approval-actions .secondary-button { color: var(--text); }
+@media (pointer: coarse) {
+  .run-summaries .run-approval-actions button { min-height: 44px; }
+}

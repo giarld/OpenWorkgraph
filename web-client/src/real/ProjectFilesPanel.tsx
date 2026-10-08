@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { RefreshIcon } from '../components/RefreshIcon';
 import { FileVideo, Play } from 'lucide-react';
-import { AlertCircle, ArrowUp, ChevronDown, ChevronRight, ChevronsDownUp, File, FileArchive, FileCode2, FileImage, FileJson, FileText, Folder, FolderOpen, FolderTree, LayoutGrid, Link2, ListTree, LoaderCircle, Plus, RefreshCw, Unplug } from 'lucide-react';
+import { AlertCircle, ArrowUp, ChevronDown, ChevronRight, ChevronsDownUp, File, FileArchive, FileCode2, FileImage, FileJson, FileText, Folder, FolderOpen, FolderTree, LayoutGrid, Link2, ListTree, LoaderCircle, Plus, Unplug } from 'lucide-react';
 import { formatFileSize, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
 import type { ResourceRequest } from './ResourcesPanel';
 import { beginProjectFileDrag } from './project-file-drag';
@@ -88,6 +89,7 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
 export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { request: ResourceRequest; projectId?: string; ready: boolean; onPlace: (path: string, position?: { x: number; y: number }) => void }) {
   const { t } = useI18n();
   const [view, setView] = useState<View>(readView);
+  const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [showHidden, setShowHidden] = useState(readShowHidden);
   const [location, setLocation] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -249,7 +251,7 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
           <button type="button" title={t('Large icon view')} aria-label={t('Large icon view')} aria-pressed={view === 'grid'} onClick={() => setView('grid')}><LayoutGrid size={15}/><span>{t('Icons')}</span></button>
         </div>
         {view === 'tree' && <button type="button" className="ow-project-file-action" aria-label={t('Collapse all directories')} title={t('Collapse all directories')} disabled={!expanded.size} onClick={() => setExpanded(new Set())}><ChevronsDownUp size={16}/></button>}
-        <button type="button" className="ow-project-file-action" title={t('Refresh project files')} aria-label={t('Refresh project files')} onClick={refresh} disabled={!available || busy}><RefreshCw size={16} className={busy ? 'is-spinning' : undefined}/></button>
+        <button type="button" className="ow-project-file-action" title={t('Refresh project files')} aria-label={t('Refresh project files')} onClick={() => { setRefreshAnimationKey(n => n + 1); refresh(); }} disabled={!available || busy}><RefreshIcon animationKey={refreshAnimationKey} /></button>
       </div>
       <label className="ow-project-file-hidden"><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)}/><span>{t('Show hidden files')}</span></label>
       <nav className="ow-project-file-location" aria-label={t('Project directory path')}>

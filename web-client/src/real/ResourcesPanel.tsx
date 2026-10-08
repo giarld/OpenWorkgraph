@@ -1,10 +1,12 @@
+import { RefreshIcon } from '../components/RefreshIcon';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ImagePreviewMetadata } from './ImagePreviewMetadata';
+import { ImagePreviewViewport } from './ImagePreviewViewport';
 import { PreviewActionButton } from './PreviewActionButton';
 import { randomId } from "../adapter/random";
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, ChevronDown, ChevronLeft, ChevronRight, File, FileText, FileVideo, Image, Play, MoreHorizontal, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-react';
+import { Archive, ChevronDown, ChevronLeft, ChevronRight, File, FileText, FileVideo, Image, Play, MoreHorizontal, Plus, Search, Trash2, Upload, X } from 'lucide-react';
 import './ResourcesPanel.css';
 import type { Point } from '../canvas/geometry';
 import { beginAssetDrag } from './asset-drag';
@@ -281,14 +283,14 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     {!imageNode && <footer className="ow-preview-download"><PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer>}
     {expanded && current?.url && createPortal(<div className="modal-backdrop ow-image-backdrop" onPointerDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setExpanded(false); }}><section className="ow-image-dialog panel" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={dialog} onClick={e => e.stopPropagation()} onKeyDown={e => {
       e.stopPropagation();
-      if (e.key === 'Escape' || (e.code === 'Space' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey)) { e.preventDefault(); setExpanded(false); }
+      if (e.key === 'Escape' || (e.code === 'Space' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !(e.target as Element).closest('button'))) { e.preventDefault(); setExpanded(false); }
       if (e.key === 'Tab') {
         const controls = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
         const first = controls[0], last = controls.at(-1);
         if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
         else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
       }
-    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <img src={originalUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /> : <p role="status">{t('Reading original image…')}</p>}<footer className="ow-preview-download">{originalBlob && <ImagePreviewMetadata blob={originalBlob} name={name} mime={mime}/>}<PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer></section></div>, document.body)}
+    }}><header><h2 id={titleId}>{name}</h2><button type="button" aria-label={t('Close image preview')} onClick={() => setExpanded(false)}>{t('Close')}</button></header>{originalUrl ? <ImagePreviewViewport key={originalUrl} src={originalUrl} alt={name}/> : <p role="status">{t('Reading original image…')}</p>}<footer className="ow-preview-download">{originalBlob && <ImagePreviewMetadata blob={originalBlob} name={name} mime={mime}/>}<PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer></section></div>, document.body)}
   </div>;
 }
 
@@ -444,6 +446,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [refresh, setRefresh] = useState(0);
+  const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -589,7 +592,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
         {<div id={uploadMenuId} className={"ow-assets-upload-menu" + (uploadOpen ? " is-open" : "")} inert={!uploadOpen} aria-hidden={!uploadOpen} role="group" aria-label={t('Asset upload settings')}><label>{t('Target project workspace')}<select aria-label={t('Target project workspace')} value={uploadProjectId} onChange={e => setUploadProjectId(e.target.value)}>{availableProjects.length ? availableProjects.map(p => <option key={p.projectId} value={p.projectId}>{p.name}</option>) : <option value={ownerProjectId}>{t('Current project workspace')}</option>}</select></label><label>{t('Sharing scope')}<select aria-label={t('Sharing scope')} value={uploadShared ? 'shared' : 'private'} onChange={e => setUploadShared(e.target.value === 'shared')}><option value="private">{t('Target project workspace only')}</option><option value="shared">{t('Shared with all projects in this Workspace')}</option></select></label><button className="ow-assets-upload" disabled={disabled} onClick={() => uploadInput.current?.click()}><Upload size={15} />{t('Choose file to upload')}</button></div>}
       </div>
     </div>
-    <div className="ow-assets-library-settings" role="group" aria-label={t('Asset library management')}><div className="ow-assets-filters"><label>{t('Asset scope')}<select value={scope} onChange={e => { setScope(e.target.value as typeof scope); setPage(0); }}><option value="project">{t('Current project workspace')}</option><option value="shared">{t('Shared with all projects in this Workspace')}</option><option value="available">{t('Current project workspace and shared')}</option></select></label><label className="ow-resources-check"><input type="checkbox" checked={deleted} onChange={e => { setDeleted(e.target.checked); setPage(0); }} />{t('Show deleted assets')}</label><button className="ow-assets-icon-button" aria-label={t('Refresh')} disabled={loading || busy} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16} /></button></div>{deleted && <button className="ow-assets-empty-trash" disabled={disabled || loading} onClick={() => setConfirmation({ text: t('Permanently remove all deleted assets from the current workspace? This applies regardless of search, scope filters, or pagination and cannot be undone. Independent Work Graph copies are unaffected.'), run: emptyTrash })}><Trash2 size={14} aria-hidden="true" />{t('Empty trash')}</button>}</div>
+    <div className="ow-assets-library-settings" role="group" aria-label={t('Asset library management')}><div className="ow-assets-filters"><label>{t('Asset scope')}<select value={scope} onChange={e => { setScope(e.target.value as typeof scope); setPage(0); }}><option value="project">{t('Current project workspace')}</option><option value="shared">{t('Shared with all projects in this Workspace')}</option><option value="available">{t('Current project workspace and shared')}</option></select></label><label className="ow-resources-check"><input type="checkbox" checked={deleted} onChange={e => { setDeleted(e.target.checked); setPage(0); }} />{t('Show deleted assets')}</label><button className="ow-assets-icon-button" aria-label={t('Refresh')} disabled={loading || busy} onClick={() => { setRefreshAnimationKey(n => n + 1); setRefresh(v => v + 1); }}><RefreshIcon animationKey={refreshAnimationKey} /></button></div>{deleted && <button className="ow-assets-empty-trash" disabled={disabled || loading} onClick={() => setConfirmation({ text: t('Permanently remove all deleted assets from the current workspace? This applies regardless of search, scope filters, or pagination and cannot be undone. Independent Work Graph copies are unaffected.'), run: emptyTrash })}><Trash2 size={14} aria-hidden="true" />{t('Empty trash')}</button>}</div>
     </div>
     <input ref={uploadInput} className="ow-assets-file-input" aria-label={t('Upload to asset library')} type="file" disabled={disabled || !!selection} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (file) chooseFile(file); }} />
 

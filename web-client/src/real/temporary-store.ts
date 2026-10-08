@@ -1,6 +1,6 @@
 import { portableSkillContent } from "./project-file-mentions";
 import { documentSnapshot, recordDocumentVersion, travelDocumentVersion, type DocumentTimeline } from './document-versions';
-import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '@openworkgraph/protocol';
+import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '../../../packages/protocol/src/index';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import { randomId } from '../adapter/random';

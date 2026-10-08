@@ -1,0 +1,8 @@
+.image-preview-viewport { position: relative; isolation: isolate; width: 100%; height: min(65vh, 720px); flex: 1 1 auto; min-height: 120px; overflow: hidden; }
+.image-preview-viewport[data-pan-enabled="true"] { cursor: grab; }
+.image-preview-viewport[data-dragging="true"] { cursor: grabbing; }
+.image-preview-viewport > .image-preview-zoom-image { position: absolute; top: 50%; left: 50%; display: block; max-width: none; max-height: none; margin: 0; object-fit: contain; transform-origin: center; user-select: none; }
+.image-preview-zoom-controls { position: absolute; z-index: 1; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 4px; padding: 4px; border: 1px solid color-mix(in srgb, var(--stroke) 50%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--panel) 55%, transparent); box-shadow: 0 2px 8px #0002; color: var(--text); }
+.image-preview-zoom-controls > span { min-width: 56px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.image-preview-viewport .image-preview-zoom-controls > button { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; background: transparent; border-color: color-mix(in srgb, var(--stroke) 50%, transparent); }
+.image-preview-viewport .image-preview-zoom-controls > button:hover:not(:disabled) { background: color-mix(in srgb, var(--fill) 45%, transparent); }

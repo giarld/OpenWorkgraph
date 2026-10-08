@@ -1,5 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
+import { SERVICE_VERSION, TERMINAL_RUN_STATUSES } from '@openworkgraph/protocol';
 import { createService } from '../service.js';
 import { listenerInfo } from '../network.js';
 import { localControl } from '../local-control.js';
@@ -11,7 +12,8 @@ import { registerLocalPlugin } from './plugins.js';
 import { fileURLToPath } from 'node:url';
 import { isGlobalNpmInstallation, isNpxInstallation, startWebUpdate } from './update.js';
 export function activeRunCount(db: DatabaseSync): number {
-  return Number(db.prepare("SELECT count(*) AS n FROM runs WHERE status NOT IN ('accepted','queued','paused_restore','succeeded','failed','cancelled','interrupted')").get()!.n);
+  // Match the workspace queue: pending work is active even before claiming a slot.
+  return Number(db.prepare('SELECT count(*) AS n FROM runs WHERE status NOT IN (' + TERMINAL_RUN_STATUSES.map(() => '?').join(',') + ')').get(...TERMINAL_RUN_STATUSES)!.n);
 }
 /** Public host wrapper: the lock is acquired BEFORE opening SQLite or listeners. */
 export async function serveManaged(dataDir: string | undefined, host: string, port: number, onStopped?: () => Promise<void>) {
@@ -38,7 +40,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
   const removeSignals = () => { process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal); };
   // server.address() becomes null as soon as HTTP shutdown begins; local
   // management must remain available until connections close and locks release.
-  const status = () => ({ state, activeRuns: closing ? 0 : activeRunCount(service.db), listenHost: listenAddress.address, ...listenerInfo(listenAddress, service.info.serviceId, service.instanceId) });
+  const status = () => ({ state, version: SERVICE_VERSION, activeRuns: closing ? 0 : activeRunCount(service.db), connectedClients: service.events.connectedClientCount(), listenHost: listenAddress.address, ...listenerInfo(listenAddress, service.info.serviceId, service.instanceId) });
   async function stop(interrupt: boolean): Promise<void> {
     // Escalation remains available while an earlier drain waits indefinitely.
     if (stopping && (!interrupt || state === 'interrupting')) return;
@@ -99,7 +101,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
         const result = await service.api.backups.create(argument);
         await log.append('backup_ready'); return result;
       }
-      await stop(command === 'interrupt-and-stop'); return { state, serviceId: service.info.serviceId, instanceId: service.instanceId };
+      await stop(command === 'interrupt-and-stop'); return { state, version: SERVICE_VERSION, serviceId: service.info.serviceId, instanceId: service.instanceId };
     }, service.instanceId);
     await log.append('started');
   } catch (error) {

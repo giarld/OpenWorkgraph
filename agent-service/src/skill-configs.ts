@@ -79,17 +79,33 @@ export class SkillConfigs {
     if (await powershell(aclCheck, JSON.stringify({ path, sid })) !== 'ok') throw Error('Unsafe ACL');
   }
 
-  private async directory(skillId: string): Promise<string> {
+  private async directory(skillId: string, writable = true): Promise<string> {
     identifier(skillId);
     if (!['win32', 'darwin', 'linux'].includes(process.platform)) throw new ServiceError('MODEL_UNAVAILABLE', '当前平台不支持受限技能配置存储。');
     const root = join(this.directories.config, 'skill-configs');
     const workspace = join(root, hash(this.serviceId));
     const skill = join(workspace, hash(skillId));
     for (const path of [this.directories.config, root, workspace, skill]) {
-      ensureDirectory(path);
-      if (process.platform === 'win32') await this.windowsAcl(path, true, true);
+      if (writable) {
+        ensureDirectory(path);
+        if (process.platform === 'win32') await this.windowsAcl(path, true, true);
+      } else {
+        try {
+          const stat = lstatSync(path);
+          if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) throw Error('Unsafe storage');
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
     }
     return skill;
+  }
+
+  /** Immutable snapshots and an atomically published manifest need no read lock. */
+  private async reading<T>(skillId: string, action: (path: string) => Promise<T>): Promise<T> {
+    try { return await action(await this.directory(skillId, false)); }
+    catch (error) {
+      if (error instanceof ServiceError) throw error;
+      throw new ServiceError('MODEL_UNAVAILABLE', '技能配置读取不可用。');
+    }
   }
 
   private async locked<T>(skillId: string, action: (path: string) => Promise<T>): Promise<T> {
@@ -114,15 +130,41 @@ export class SkillConfigs {
     }
   }
 
-  private async claim(lock: string): Promise<LockOwner | undefined> {
+  /** Coordinate revocation with final validation/dispatch, independently of write locks.
+   * Owner metadata contains no configuration values and needs no ACL subprocesses. */
+  private async withDispatchLock<T>(action: () => Promise<T>): Promise<T> {
+    const lock = join(this.directories.config, '.skill-dispatch-' + hash(this.serviceId));
+    try {
+      ensureDirectory(this.directories.config);
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        if (await this.claim(lock, false)) break;
+        if (await this.recover(lock, 0, false)) continue;
+        if (Date.now() >= deadline) throw new ServiceError('CONFLICT', '技能配置正在清除或派发，请稍后重试。', { retryable: true });
+        await delay(20);
+      }
+    } catch (error) {
+      if (error instanceof ServiceError) throw error;
+      throw new ServiceError('MODEL_UNAVAILABLE', '技能配置撤销协调不可用。');
+    }
+    try { return await action(); }
+    finally {
+      try {
+        const released = join(this.directories.config, '.released-' + randomUUID());
+        await rename(lock, released); await rm(released, { recursive: true, force: true });
+      } catch { throw new ServiceError('MODEL_UNAVAILABLE', '技能配置撤销协调不可用。'); }
+    }
+  }
+
+  private async claim(lock: string, restrict = true): Promise<LockOwner | undefined> {
     const prepared = join(dirname(lock), '.owner-' + randomUUID());
     await mkdir(prepared, { mode: 0o700 });
     try {
-      if (process.platform === 'win32') await this.windowsAcl(prepared, true, true);
+      if (restrict && process.platform === 'win32') await this.windowsAcl(prepared, true, true);
       const owner: LockOwner = { pid: process.pid, started: new Date(Date.now() - process.uptime() * 1000).toISOString(), hostname: hostname(), token: randomUUID() };
       // Publish a nonempty directory only after durable owner metadata exists.
       // rename cannot replace another nonempty lock directory, on either OS.
-      await this.atomic(prepared, 'owner-' + owner.token + '.json', owner);
+      await this.atomic(prepared, 'owner-' + owner.token + '.json', owner, restrict);
       try { lstatSync(lock); return undefined; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       try { await rename(prepared, lock); return owner; }
@@ -156,16 +198,16 @@ export class SkillConfigs {
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   }
 
-  private async recover(lock: string, depth = 0): Promise<boolean> {
+  private async recover(lock: string, depth = 0, restrict = true): Promise<boolean> {
     const owner = await this.owner(lock);
     if (!owner || !this.dead(owner) || depth > 4) return false;
     const recovery = join(lock, '.recovery');
     let claim: LockOwner | undefined;
     try {
-      claim = await this.claim(recovery);
+      claim = await this.claim(recovery, restrict);
       if (!claim) {
         // A recovery worker can itself crash. Its owner follows the same rule.
-        await this.recover(recovery, depth + 1); return false;
+        await this.recover(recovery, depth + 1, restrict); return false;
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
     let moved = false;
@@ -196,22 +238,26 @@ export class SkillConfigs {
     try {
       const stat = await file.stat();
       if (!stat.isFile() || stat.nlink !== 1 || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) || stat.size > storageBytes || (process.getuid && stat.uid !== process.getuid())) throw Error('Unsafe storage');
-      if (process.platform === 'win32') await this.windowsAcl(path, false, false);
       return JSON.parse(await file.readFile('utf8')) as unknown;
     } finally { await file.close(); }
   }
 
-  private async manifest(path: string): Promise<Manifest> {
+  private async manifest(path: string, writable = true): Promise<Manifest> {
     const raw = await this.load(join(path, 'current.json'));
     if (raw === undefined) {
       // Establish revision zero before a first write. A lost committed manifest
       // must not make old revision numbers eligible for reuse with new secrets.
-      if ((await readdir(path)).some(name => /^[0-9]+\.json$/.test(name))) throw Error('Missing revision manifest');
-      const manifest = initial(); await this.atomic(path, 'current.json', manifest); return manifest;
+      const names = await readdir(path).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; });
+      if (names.some(name => /^[0-9]+\.json$/.test(name))) {
+        // A first writer may have committed after our initial read.
+        if (!writable && await this.load(join(path, 'current.json')) !== undefined) return this.manifest(path, false);
+        throw Error('Missing revision manifest');
+      }
+      const manifest = initial(); if (writable) await this.atomic(path, 'current.json', manifest); return manifest;
     }
     const value = raw as Manifest;
     if (!value || value.version !== 1 || !Number.isSafeInteger(value.revision) || value.revision < 0 || !Number.isSafeInteger(value.minimumRevision) || value.minimumRevision < 0 || value.minimumRevision > value.revision) throw Error('Invalid storage');
-    if (value.minimumRevision > 0) await this.removeRevoked(path, value.minimumRevision);
+    if (writable && value.minimumRevision > 0) await this.removeRevoked(path, value.minimumRevision);
     return value;
   }
 
@@ -236,13 +282,13 @@ export class SkillConfigs {
     return value;
   }
 
-  private async atomic(path: string, name: string, value: unknown): Promise<void> {
+  private async atomic(path: string, name: string, value: unknown, restrict = true): Promise<void> {
     const text = JSON.stringify(value);
     if (Buffer.byteLength(text) > storageBytes) invalid();
     const temporary = join(path, '.' + randomUUID() + '.tmp');
     const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
-      if (process.platform === 'win32') await this.windowsAcl(temporary, false, true);
+      if (process.platform === 'win32') { if (restrict) await this.windowsAcl(temporary, false, true); }
       else await file.chmod(0o600);
       await file.writeFile(text, 'utf8'); await file.sync();
     } catch (error) { await file.close(); await unlink(temporary).catch(() => {}); throw error; }
@@ -271,8 +317,8 @@ export class SkillConfigs {
 
   async read(skillId: string, schema: SkillConfigSchema): Promise<SkillConfiguration> {
     const checked = schemaCopy(schema);
-    return this.locked(skillId, async path => {
-      const manifest = await this.manifest(path);
+    return this.reading(skillId, async path => {
+      const manifest = await this.manifest(path, false);
       return this.view(skillId, checked, manifest, await this.snapshot(path, manifest, manifest.revision));
     });
   }
@@ -327,30 +373,31 @@ export class SkillConfigs {
       const snapshot: Snapshot = { revision, values: {} };
       const next: Manifest = { ...manifest, revision, minimumRevision: revision };
       await this.atomic(path, String(revision) + '.json', snapshot);
-      await this.atomic(path, 'current.json', next);
+      await this.withDispatchLock(() => this.atomic(path, 'current.json', next));
       // Revocation commits before deletion. A crash midway is safe, and the
-      // next locked read resumes deleting the revoked private files.
+      // next write resumes deleting the revoked private files.
       await this.removeRevoked(path, revision);
       return this.view(skillId, emptySchema, next, snapshot);
     });
   }
 
-  async revision(skillId: string): Promise<number> { return this.locked(skillId, async path => (await this.manifest(path)).revision); }
+  async revision(skillId: string): Promise<number> { return this.reading(skillId, async path => (await this.manifest(path, false)).revision); }
 
   async hasRevision(skillId: string, revision: number): Promise<boolean> {
     revisionNumber(revision);
-    return this.locked(skillId, async path => {
-      const manifest = await this.manifest(path);
+    return this.reading(skillId, async path => {
+      const manifest = await this.manifest(path, false);
       if (revision < manifest.minimumRevision || revision > manifest.revision) return false;
-      try { await this.snapshot(path, manifest, revision); return true; }
+      try { await this.snapshot(path, manifest, revision); return revision >= (await this.manifest(path, false)).minimumRevision; }
       catch (error) { if (error instanceof ServiceError && error.code === 'INVALID_REQUEST') return false; throw error; }
     });
   }
 
   async environment(skillId: string, schema: SkillConfigSchema, revision: number): Promise<Record<string, string>> {
     const checked = schemaCopy(schema); revisionNumber(revision);
-    return this.locked(skillId, async path => {
-      const manifest = await this.manifest(path), snapshot = await this.snapshot(path, manifest, revision);
+    return this.reading(skillId, async path => {
+      const manifest = await this.manifest(path, false), snapshot = await this.snapshot(path, manifest, revision);
+      if (revision < (await this.manifest(path, false)).minimumRevision) unavailable();
       return this.snapshotEnvironment(checked, snapshot);
     });
   }
@@ -365,9 +412,8 @@ export class SkillConfigs {
     return environment;
   }
 
-  /** Deterministic multi-skill locking prevents clear between the final revision
-   * check, secret read, and synchronous spawn/request. No nested public store
-   * methods may be awaited inside dispatch. Never await a returned command. */
+  /** Read snapshots without write locks. Only final validation and synchronous
+   * dispatch exclude clear's commit, across instances and processes. */
   async withRevisions<T>(requests: readonly SkillConfigRevisionRequest[], dispatch: (environments: ReadonlyMap<string, Record<string,string>>) => T): Promise<{ value: T }> {
     const unique = new Map<string, SkillConfigRevisionRequest>();
     for (const request of requests) {
@@ -377,25 +423,27 @@ export class SkillConfigs {
     }
     const ids = [...unique.keys()].sort();
     const paths = new Map<string,string>();
-    let dispatchFailed = false, dispatchError: unknown;
-    const acquire = (index: number): Promise<{ value: T }> => {
-      const id = ids[index];
-      if (id !== undefined) return this.locked(id, async path => { paths.set(id, path); return acquire(index + 1); });
-      return (async () => {
-        const environments = new Map<string,Record<string,string>>();
-        for (const skillId of ids) {
-          const request = unique.get(skillId)!, path = paths.get(skillId)!;
-          const manifest = await this.manifest(path);
-          const snapshot = await this.snapshot(path, manifest, request.revision);
-          if (request.schema) environments.set(skillId, this.snapshotEnvironment(request.schema, snapshot));
-        }
-        // The envelope prevents Promise assimilation from holding locks for the
-        // lifetime of command/exec rather than only its synchronous dispatch.
-        try { return { value: dispatch(environments) }; }
-        catch (error) { dispatchFailed = true; dispatchError = error; throw error; }
-      })();
+    const environments = new Map<string,Record<string,string>>();
+    for (const skillId of ids) {
+      const request = unique.get(skillId)!;
+      await this.reading(skillId, async path => {
+        paths.set(skillId, path);
+        const manifest = await this.manifest(path, false);
+        const snapshot = await this.snapshot(path, manifest, request.revision);
+        if (request.schema) environments.set(skillId, this.snapshotEnvironment(request.schema, snapshot));
+      });
+    }
+    const dispatchChecked = async () => {
+      for (const skillId of ids) {
+        const request = unique.get(skillId)!;
+        await this.reading(skillId, async () => {
+          const manifest = await this.manifest(paths.get(skillId)!, false);
+          if (request.revision < manifest.minimumRevision || request.revision > manifest.revision) unavailable();
+        });
+      }
+      // Keep command promises inside the envelope so the lock ends at dispatch.
+      return { value: dispatch(environments) };
     };
-    try { return await acquire(0); }
-    catch (error) { if (dispatchFailed) throw dispatchError; throw error; }
+    return ids.length ? this.withDispatchLock(dispatchChecked) : dispatchChecked();
   }
 }

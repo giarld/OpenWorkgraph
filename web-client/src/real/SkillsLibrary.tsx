@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { RefreshIcon } from '../components/RefreshIcon';
 import { ArrowUpCircle, BookOpen, CheckCircle2, ChevronRight, Circle, Download, RefreshCw, Search, Settings2, TriangleAlert, X } from 'lucide-react';
 import type { SkillCatalog, SkillCatalogItem, SkillConfiguration, SkillDetail } from '../../../packages/protocol/src/skills';
 import type { Transport } from '../adapter/transport';
@@ -7,11 +8,13 @@ import { isLifecycleCancellation } from '../adapter/transport';
 import { useI18n } from '../i18n/I18nProvider';
 import { skillConfigPatch, missingSkillFields, skillFieldCopy, type SkillFieldEdit } from './skill-library-state';
 import { SkillReadme } from './SkillReadme';
+import { clearSkillCatalogCache, readSkillCatalogCache, skillCatalogCacheOwner, writeSkillCatalogCache } from './skill-catalog-cache';
 import '../components/content.css';
 import './SkillsLibrary.css';
 
-type SkillClient = Pick<Transport, 'listSkills' | 'skillDetail' | 'installSkill' | 'updateSkill' | 'uninstallSkill' | 'readSkillConfig' | 'writeSkillConfig' | 'clearSkillConfig'> & Partial<Pick<Transport, 'readSkillFile'>>;
+type SkillClient = Pick<Transport, 'listSkills' | 'skillDetail' | 'installSkill' | 'updateSkill' | 'uninstallSkill' | 'readSkillConfig' | 'writeSkillConfig' | 'clearSkillConfig'> & Partial<Pick<Transport, 'readSkillFile' | 'serviceId'>>;
 type Copy = (english: string, chinese: string) => string;
+const SKILL_DESCRIPTION_LIMIT = 100;
 const notifySkillsChanged = () => window.dispatchEvent(new Event('openworkgraph:skills-changed'));
 function errorText(error: unknown, copy: Copy): string {
   if (isLifecycleCancellation(error)) return copy('Workspace connection changed. Reload to continue.', '工作空间连接已改变，请重新加载。');
@@ -51,7 +54,9 @@ function SkillDialog({ title, workspaceName, onClose, children, copy, readme = f
 export function SkillsLibrary({ transport, ready, workspaceName, visible = true }: { transport?: SkillClient; ready: boolean; workspaceName: string; visible?: boolean }) {
   const { language, locale } = useI18n();
   const copy: Copy = (en, zh) => language === 'zh-CN' ? zh : en;
-  const [catalog, setCatalog] = useState<SkillCatalog>();
+  const cacheOwner = transport ? skillCatalogCacheOwner(transport, workspaceName) : undefined;
+  const [catalog, setCatalog] = useState<SkillCatalog | undefined>(() => readSkillCatalogCache(cacheOwner, '', false));
+  const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
@@ -68,8 +73,8 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
   const mutation = useRef(false);
   const copyRef = useRef(copy);
   copyRef.current = copy;
-  const catalogOwner = useRef({ transport, query, installedOnly });
-  const catalogSnapshot = useRef<SkillCatalog | undefined>(undefined);
+  const catalogOwner = useRef({ transport, cacheOwner, query, installedOnly });
+  const catalogSnapshot = useRef<SkillCatalog | undefined>(catalog);
   const listsInFlight = useRef(0);
   const load = useCallback(async (refresh = false, append = false, preserve = false) => {
     if (!transport || !ready || (append && (listsInFlight.current > 0 || mutation.current))) return;
@@ -98,6 +103,7 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
       if (!append && previous && (previous.installedSignature !== result.installedSignature || signature(previous) !== signature({ ...result, items: rows }))) notifySkillsChanged();
       const items = [...new Map((append ? [...previous!.items, ...rows] : rows).map(item => [item.skillId, item])).values()];
       const next = { ...result, items };
+      if (cacheOwner) writeSkillCatalogCache(cacheOwner, query, installedOnly, next);
       catalogSnapshot.current = next; setCatalog(next); setError('');
     } catch (error) {
       if (epoch === scope.current && sequence === loadSequence.current) {
@@ -108,23 +114,29 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
       if (epoch === scope.current) listsInFlight.current--;
       if (epoch === scope.current && sequence === loadSequence.current) { setLoading(false); setLoadingMore(false); }
     }
-  }, [transport, ready, installedOnly, query]);
+  }, [transport, ready, installedOnly, query, cacheOwner]);
   useEffect(() => {
     scope.current++; setModal(undefined); setConfirmUninstall(undefined); setPending(undefined); mutation.current = false;
     listsInFlight.current = 0;
     setLoading(false); setLoadingMore(false); setMoreError('');
     const owner = catalogOwner.current;
-    if (owner.transport !== transport || owner.query !== query || owner.installedOnly !== installedOnly) {
-      catalogOwner.current = { transport, query, installedOnly };
-      catalogSnapshot.current = undefined; setCatalog(undefined); setError('');
+    if (owner.transport !== transport || owner.cacheOwner !== cacheOwner || owner.query !== query || owner.installedOnly !== installedOnly) {
+      catalogOwner.current = { transport, cacheOwner, query, installedOnly };
+      const cached = readSkillCatalogCache(cacheOwner, query, installedOnly);
+      catalogSnapshot.current = cached; setCatalog(cached); setError('');
       // Reset the actual scroll host (the sidebar in the app, the panel when standalone).
       for (let host = library.current; host; host = host.parentElement) {
         if (/(auto|scroll)/.test(getComputedStyle(host).overflowY) && host.scrollHeight > host.clientHeight) { host.scrollTop = 0; break; }
       }
     }
-    void load(false, false, true);
+    void load(!installedOnly && !query, false, true);
     return () => { scope.current++; loadSequence.current++; };
   }, [load]);
+  const previouslyVisible = useRef(visible);
+  useEffect(() => {
+    if (visible && !previouslyVisible.current) void load(true, false, true);
+    previouslyVisible.current = visible;
+  }, [visible, load]);
   useEffect(() => {
     const sentinel = moreSentinel.current;
     if (!sentinel || !visible || !ready || loading || loadingMore || moreError || error || pending || installedOnly || catalog?.nextOffset === undefined) return;
@@ -141,9 +153,13 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
     mutation.current = true; ++loadSequence.current; setLoading(false); setLoadingMore(false); setPending({ id: item.skillId, action }); setError('');
     try {
       const result = await (action === 'install' ? transport.installSkill(item.skillId, item.revision) : action === 'update' ? transport.updateSkill(item.skillId, item.revision) : transport.uninstallSkill(item.skillId, item.revision));
+      if (cacheOwner) clearSkillCatalogCache(cacheOwner);
       notifySkillsChanged();
       if (epoch !== scope.current) return;
-      setCatalog(previous => previous ? { ...previous, items: previous.items.map(row => row.skillId === result.skillId ? result : row) } : { items: [result], stale: false });
+      const previous = catalogSnapshot.current;
+      const next = previous ? { ...previous, items: previous.items.map(row => row.skillId === result.skillId ? result : row) } : { items: [result], stale: false };
+      if (cacheOwner) writeSkillCatalogCache(cacheOwner, query, installedOnly, next);
+      catalogSnapshot.current = next; setCatalog(next);
       void load(false, false, true);
     } catch (error) { if (epoch === scope.current) setError(errorText(error, copy)); }
     finally { if (epoch === scope.current) { mutation.current = false; setPending(undefined); } }
@@ -155,22 +171,25 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
         <label className="ow-skills-search"><Search size={15} aria-hidden="true"/><input type="search" aria-label={copy('Search skills', '搜索技能')} value={query} onChange={event => setQuery(event.target.value)} placeholder={copy('Search name or description', '搜索名称或简介')}/>{query && <button className="ow-skills-clear" type="button" aria-label={copy('Clear skill search', '清除技能搜索')} onClick={() => setQuery('')}><X size={14} aria-hidden="true"/></button>}</label>
         <div className="ow-skills-toolbar">
           <div className="ow-skills-filter" role="group" aria-label={copy('Skill filter', '技能筛选')}><button type="button" aria-pressed={!installedOnly} onClick={() => setInstalledOnly(false)}>{copy('All', '全部')}</button><button type="button" aria-pressed={installedOnly} onClick={() => setInstalledOnly(true)}>{copy('Installed', '已安装')}</button></div>
-          <button className="ow-skills-refresh" type="button" disabled={!ready || !transport || loading || !!pending} aria-label={copy('Refresh skills', '刷新技能')} onClick={() => void load(true)}><RefreshCw size={16} aria-hidden="true"/></button>
+          <button className="ow-skills-refresh" type="button" disabled={!ready || !transport || loading || !!pending} aria-busy={loading} aria-label={copy('Refresh skills', '刷新技能')} onClick={() => { setRefreshAnimationKey(n => n + 1); void load(true); }}><RefreshIcon animationKey={refreshAnimationKey} spinning={loading} /></button>
         </div>
         <small className="ow-skills-workspace">{copy('Workspace', '工作空间')} · {workspaceName || copy('Not connected', '未连接')}</small>
       </div>
       {!ready && <p role="status">{copy('Workspace is disconnected. Reconnect to manage skills.', '工作空间已断开，重新连接后可管理技能。')}</p>}
-      {loading && <p role="status">{copy('Loading skills…', '正在加载技能…')}</p>}
+      {loading && !catalog && <p role="status">{copy('Loading skills…', '正在加载技能…')}</p>}
       {(error || catalog?.error || catalog?.stale) && <div className="ow-skills-error" role="alert"><p>{error || catalog?.error || copy('Showing cached skills. Refresh to check the source.', '正在显示缓存技能，请刷新以检查来源。')}</p><button type="button" disabled={!ready || loading || !!pending} onClick={() => void load(true)}>{copy('Reload and retry', '重新加载并重试')}</button></div>}
       {!loading && catalog && !items.length && !error && !catalog.error && !catalog.stale && <p className="ow-skills-empty">{query || installedOnly ? copy('No matching skills.', '没有匹配的技能。') : copy('No skills in this source.', '此来源暂无技能。')}</p>}
-      <ul className="ow-skills-list" aria-busy={loading || loadingMore}>{items.map(item => <li key={item.skillId}>
-        <button className="ow-skills-open" type="button" aria-label={item.name} aria-haspopup="dialog" disabled={!ready || !!pending} onClick={() => setModal({ item, mode: 'detail' })}/>
+      <ul className="ow-skills-list" aria-busy={loading || loadingMore}>{items.map(item => {
+        const description = Array.from(item.description);
+        const truncated = description.length > SKILL_DESCRIPTION_LIMIT;
+        return <li key={item.skillId} title={truncated ? item.description : undefined}>
+        <button className="ow-skills-open" type="button" aria-label={item.name} aria-description={truncated ? item.description : undefined} aria-haspopup="dialog" disabled={!ready || !!pending} onClick={() => setModal({ item, mode: 'detail' })}/>
         <h3 className="ow-skills-title"><BookOpen size={16} aria-hidden="true"/><span>{item.name}</span><ChevronRight size={14} className="ow-skills-chevron" aria-hidden="true"/></h3>
-        <p>{item.description}</p><small>{item.source.repository} · {item.directory}</small>
+        <p>{truncated ? description.slice(0, SKILL_DESCRIPTION_LIMIT - 1).join('') + '…' : item.description}</p><small>{item.source.repository} · {item.directory}</small>
         <div className="ow-skills-badges">
-          <span className={item.installed ? 'ow-skills-status is-success' : 'ow-skills-status'}>{item.installed ? <CheckCircle2 size={13} aria-hidden="true"/> : <Circle size={13} aria-hidden="true"/>}{item.installed ? copy('Installed', '已安装') : copy('Not installed', '未安装')}</span>
-          {item.updateAvailable && <span className="ow-skills-status is-update"><ArrowUpCircle size={13} aria-hidden="true"/>{copy('Update available', '可更新')}</span>}
-          <span className={item.configuration === 'required' ? 'ow-skills-status is-warning' : 'ow-skills-status'}>{item.configuration === 'required' ? <TriangleAlert size={13} aria-hidden="true"/> : item.configuration === 'ready' ? <CheckCircle2 size={13} aria-hidden="true"/> : null}{item.configuration === 'required' ? copy('Configuration required', '待配置') : item.configuration === 'ready' ? copy('Configured', '已配置') : copy('No configuration', '无需配置')}</span>
+          <span key={item.installed ? 'installed' : 'not-installed'} className={item.installed ? 'ow-skills-status is-success' : 'ow-skills-status'}>{item.installed ? <CheckCircle2 size={13} aria-hidden="true"/> : <Circle size={13} aria-hidden="true"/>}<span>{item.installed ? copy('Installed', '已安装') : copy('Not installed', '未安装')}</span></span>
+          {item.updateAvailable && <span key="update" className="ow-skills-status is-update"><ArrowUpCircle size={13} aria-hidden="true"/>{copy('Update available', '可更新')}</span>}
+          <span key="configuration" className={item.configuration === 'required' ? 'ow-skills-status is-warning' : 'ow-skills-status'}>{item.configuration === 'required' ? <TriangleAlert size={13} aria-hidden="true"/> : item.configuration === 'ready' ? <CheckCircle2 size={13} aria-hidden="true"/> : null}{item.configuration === 'required' ? copy('Configuration required', '待配置') : item.configuration === 'ready' ? copy('Configured', '已配置') : copy('No configuration', '无需配置')}</span>
         </div>
         {item.error && <p role="alert">{item.error}</p>}
         {pending?.id === item.skillId && <p role="status">{pending.action === 'install' ? copy('Installing…', '正在安装…') : pending.action === 'update' ? copy('Updating…', '正在更新…') : copy('Uninstalling…', '正在卸载…')}</p>}
@@ -179,7 +198,7 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
           {item.updateAvailable && <button className="ow-skills-primary" type="button" disabled={!ready || !!pending || !!item.error} onClick={() => void operate(item, 'update')}><RefreshCw size={14} aria-hidden="true"/>{copy('Update', '更新')}</button>}
           <button className="ow-skills-remove" type="button" disabled={!ready || !!pending} onClick={() => setConfirmUninstall(item)}>{copy('Uninstall', '卸载')}</button>
         </> : <button className="ow-skills-primary" type="button" disabled={!ready || !!pending || !!item.error} onClick={() => void operate(item, 'install')}><Download size={14} aria-hidden="true"/>{copy('Install', '安装')}</button>}</div>
-      </li>)}</ul>
+      </li>; })}</ul>
       {!installedOnly && catalog?.nextOffset !== undefined && <div ref={moreSentinel} className="ow-skills-more">
         {loadingMore ? <p role="status">{copy('Loading more skills…', '正在加载更多技能…')}</p> : <>
           {moreError && <p role="alert">{moreError}</p>}
@@ -188,7 +207,7 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true 
       </div>}
       <p className="ow-skills-note">{copy('Skills are shared by all projects in this Workspace. Automatic use loads configuration as needed. Uninstalling keeps saved configuration.', '技能供此工作空间的所有项目共用。自动使用时按需加载配置。卸载会保留已保存的配置。')}</p>
     </>}
-    {modal && transport && ready && visible && <SkillContents key={modal.item.skillId + ':' + modal.mode + ':' + locale} item={modal.item} mode={modal.mode} client={transport} locale={locale} copy={copy} workspaceName={workspaceName} onClose={() => setModal(undefined)} onChanged={() => { void load(false, false, true); }}/>}
+    {modal && transport && ready && visible && <SkillContents key={modal.item.skillId + ':' + modal.mode + ':' + locale} item={modal.item} mode={modal.mode} client={transport} locale={locale} copy={copy} workspaceName={workspaceName} onClose={() => setModal(undefined)} onChanged={() => { if (cacheOwner) clearSkillCatalogCache(cacheOwner); void load(false, false, true); }}/>}
     {confirmUninstall && ready && <SkillDialog title={copy('Uninstall skill', '卸载技能')} workspaceName={workspaceName} copy={copy} onClose={() => setConfirmUninstall(undefined)}>
       <p>{copy('Uninstall', '卸载')} {confirmUninstall.name}？{copy('Saved configuration is retained.', '已保存的配置会保留。')}</p><footer><button type="button" onClick={() => setConfirmUninstall(undefined)}>{copy('Cancel', '取消')}</button><button type="button" onClick={() => { const item = confirmUninstall; setConfirmUninstall(undefined); void operate(item, 'uninstall'); }}>{copy('Uninstall', '卸载')}</button></footer>
     </SkillDialog>}

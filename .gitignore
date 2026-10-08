@@ -154,6 +154,7 @@ playwright/.cache/
 
 # Local development scratch data
 .local/
+.tmp/
 
 # macOS Finder metadata
 .DS_Store

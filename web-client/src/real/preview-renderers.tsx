@@ -1,8 +1,6 @@
+import { MarkdownPreview } from './MarkdownPreview';
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { VideoPreview } from './VideoPreview';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { markdownCodeComponents, markdownRemarkPlugins } from '../components/MarkdownCodeBlock';
 import { codeMarkdown, parseCsv, previewFormat, previewImageMime } from './preview-formats';
 import { buildHtmlPreviewDocument, HTML_PREVIEW_SANDBOX, HTML_PREVIEW_PERMISSIONS } from './preview-html';
 import type { PreviewRendererDefinition, PreviewRendererProps } from './preview-registry';
@@ -39,9 +37,6 @@ function ImagePreview({blob,name,mime}: PreviewRendererProps) {
   },[blob,name,mime]);
   if (failed) return <p role="status">{t('Image preview failed. Switch to hexadecimal to inspect the file contents.')}</p>;
   return image?.blob === blob ? <img className="ow-preview-image" src={image.url} alt={name} draggable={false} onContextMenu={e => e.preventDefault()} onError={() => setFailed(true)}/> : <p role="status">{t('Loading image…')}</p>;
-}
-function MarkdownPreview({text}: PreviewRendererProps) {
-  return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm,...markdownRemarkPlugins]} skipHtml components={{...markdownCodeComponents,a:({children})=><span>{children}</span>,img:({alt})=><span>{alt}</span>}}>{text}</ReactMarkdown></div>;
 }
 function CodePreview(props: PreviewRendererProps) { return <MarkdownPreview {...props} text={codeMarkdown(props.text,props.name)}/>; }
 function PdfPreview({blob}: PreviewRendererProps) { const {t} = useI18n(); return <Suspense fallback={<p role="status">{t('Loading PDF reader…')}</p>}><Pdf blob={blob}/></Suspense>; }

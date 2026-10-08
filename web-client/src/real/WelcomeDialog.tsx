@@ -133,7 +133,7 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
             <li>
               <h3>{t('Start Workspace')}</h3>
               <p>{t('Run this command in a terminal on the device that will run your Workspace:')}</p>
-              <WelcomeCommand command="npx openworkgraph start" copyLabel={t('Copy start command')} />
+              <WelcomeCommand command="npx openworkgraph@latest start" copyLabel={t('Copy start command')} />
               <p className="welcome-start-note">{t('Requires Node.js 24+. No global installation needed; the first run downloads the required package.')}</p>
               <details className="welcome-start-options">
                 <summary>{t('Other startup options')}</summary>

@@ -1,5 +1,7 @@
 # OpenWorkgraph
 
+简体中文 | [English](README.en.md)
+
 OpenWorkgraph 是基于无限画布思想的软件开发工作流产品，同时面向其他领域的工作组织与协作。
 
 ## 快速开始

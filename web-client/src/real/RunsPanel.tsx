@@ -5,6 +5,7 @@ import { isTerminalRunStatus, type GraphSnapshot, type InputSnapshot, type Inter
 import type { RunStatus } from '../../../packages/protocol/src/index';
 import { RunProcessList } from '../components/NodeContent';
 import { ArrowDown, Check, ChevronRight, ShieldCheck, Terminal, X } from 'lucide-react';
+import { RefreshIcon } from '../components/RefreshIcon';
 import './RunApproval.css';
 import { ExecutionStartPanel } from './ExecutionStartPanel';
 import '../i18n/catalogs/runs';
@@ -12,6 +13,7 @@ import { useI18n } from '../i18n/I18nProvider';
 import { translate } from '../i18n/translate';
 
 export interface RunsPanelProps {
+  onClose?: () => void;
   mode?: 'all' | 'queue' | 'details'; selectedRunId?: string; onSelectRun?: (run: Run) => void;
   describeRun?: (run: Run) => { node: string; graph: string; project: string };
   request: <T>(path: string, body?: unknown, method?: string) => Promise<T>;
@@ -210,6 +212,7 @@ export function RunsPanel(props: RunsPanelProps) {
   const [capacity, setCapacity] = useState<{ request: Request; value: Capacity } | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const [submittedInteraction, setSubmittedInteraction] = useState<string>();
   const [confirmCancel, setConfirmCancel] = useState<Run | null>(null);
@@ -278,8 +281,20 @@ export function RunsPanel(props: RunsPanelProps) {
   };
   const disabled = readOnly || busy || loading;
   const queue = ordered.filter(run => !isTerminalRunStatus(run.status));
-  return <section className="panel real-runs-panel" aria-label={t('Workspace tasks and run history')} data-canvas-no-zoom style={{ padding: 16, minWidth: 0, overflowWrap: 'anywhere' }}>
-    {mode !== 'details' && <div className="panel-heading run-panel-controls"><strong>{t('Workspace task queue')}</strong><span className="run-refresh-control"><button className="secondary-button run-refresh-button" disabled={disabled || !!scopeError} onClick={() => { setError(''); setRevision(n => n + 1); onChanged(); }}>{t('Refresh')}</button><span className={'run-loading-ring' + (loading ? ' active' : '')} role="status" aria-label={loading ? t('Reading current Workspace records') : undefined} aria-hidden={!loading}/></span></div>}
+  const queueHeader = mode === 'queue' && !!props.onClose;
+  const refreshControl = <button type="button" className="icon-button run-refresh-button"
+    title={t('Refresh')} aria-label={loading ? t('Reading current Workspace records') : t('Refresh')}
+    aria-busy={loading} disabled={disabled || !!scopeError}
+    onClick={() => { setRefreshAnimationKey(n => n + 1); setError(''); setRevision(n => n + 1); onChanged(); }}>
+    <RefreshIcon animationKey={refreshAnimationKey} />
+  </button>;
+  return <>
+    {queueHeader && <div className="service-panel-heading">
+      <h2>{t('Workspace queue')}</h2>
+      <div className="run-header-actions">{refreshControl}<button type="button" className="icon-button" title={t('Close Workspace queue')} aria-label={t('Close Workspace queue')} onClick={props.onClose}><X size={16} aria-hidden="true" /></button></div>
+    </div>}
+    <section className="panel real-runs-panel" aria-label={t('Workspace tasks and run history')} data-canvas-no-zoom style={{ padding: 16, minWidth: 0, overflowWrap: 'anywhere' }}>
+    {mode !== 'details' && !queueHeader && <div className="panel-heading run-panel-controls"><strong>{t('Workspace task queue')}</strong>{refreshControl}</div>}
     {scopeError ? <p role="status">{t('The Workspace task scope is invalid. Check the notification and correct it.')}</p> : <>
       {mode !== 'details' && <>
       <p className="muted">{t('Current connected Workspace only · FIFO within the project · Read-only capacity')}{capacity?.request === request ? t(' · {occupied}/{capacity} occupied', { occupied: capacity.value.occupied, capacity: capacity.value.capacity }) : t(' · Capacity pending confirmation')}</p>
@@ -336,5 +351,5 @@ export function RunsPanel(props: RunsPanelProps) {
       </>}
       </>}
     </>}
-  </section>;
+  </section></>;
 }

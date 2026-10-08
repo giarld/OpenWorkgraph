@@ -56,6 +56,9 @@
 .ow-skills-error p { margin: 0 0 8px; }
 .ow-skills-dialog { box-sizing: border-box; width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; overscroll-behavior: contain; padding: 24px; color: var(--text); background: var(--panel); border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); }
 .ow-skills-readme-dialog { width: var(--document-dialog-width); max-width: var(--document-dialog-width); }
+.ow-skills-readme-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+.ow-skills-readme-dialog > header { flex-shrink: 0; }
+.ow-skills-readme-dialog > .ow-skills-readme { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .ow-skills-dialog::backdrop { background: #0006; backdrop-filter: blur(8px); }
 .ow-skills-dialog h2 { margin: 4px 0 0; font-size: 18px; overflow-wrap: anywhere; }
 .ow-skills-dialog header { padding-bottom: 16px; border-bottom: 1px solid var(--stroke); }

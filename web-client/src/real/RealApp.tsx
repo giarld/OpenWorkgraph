@@ -1,6 +1,7 @@
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
+import { ProgressDialog } from '../components/ProgressDialog';
 import { Moon, Sun, PanelLeftClose, PanelLeftOpen, Settings2, Bell, Check, Layers, Download, Pencil, Trash2, Upload, Plus, RotateCcw, Server, ChevronRight, CheckCircle2, Unplug, WifiOff, CircleAlert, Copy, Archive } from "lucide-react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, FolderPlus } from "lucide-react";
 import { randomId } from "../adapter/random";
 import { FILE_NODE_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
 import { runtimeStatus } from './runtime-status';
@@ -49,6 +50,7 @@ import '../i18n/catalogs/app';
 import "./real.css";
 import { WelcomeDialog } from './WelcomeDialog';
 import { WelcomeCommand } from './WelcomeCommand';
+import { WorkspaceRestartHint } from './WorkspaceRestartHint';
 import webClientPackage from '../../package.json';
 interface ServiceData {
   generation: number;
@@ -114,6 +116,8 @@ export function RealApp() {
   const [libraryProjectId, setLibraryProjectId] = useState('');
   const enterLibrary = useRef(() => {});
   const [creating, setCreating] = useState(false);
+  const [creationPending, setCreationPending] = useState(false);
+  const creationInFlight = useRef(false);
   const [cardRename, setCardRename] = useState<GraphSnapshot>();
   const [runtimeRename, setRuntimeRename] = useState<{ serviceId: string; sessionId: string; name: string }>();
   const [cardTitle, setCardTitle] = useState('');
@@ -138,6 +142,12 @@ export function RealApp() {
   const [servicePage, setServicePage] = useState<"list" | "connect" | "projects">("list");
   const [managementInitialPage, setManagementInitialPage] = useState<'projects' | 'add'>('projects');
   const [managementEntry, setManagementEntry] = useState(0);
+  const openAddProject = () => {
+    setManagementInitialPage('add');
+    setManagementEntry(entry => entry + 1);
+    setServicePage('projects');
+    setServicePanelOpen(true);
+  };
   const [nodeSidebar, setNodeSidebar] = useState<HTMLDivElement | null>(null);
   const [leftOpen, setLeftOpen] = useState(() => window.innerWidth > 700);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState<number | null>(() => {
@@ -237,6 +247,11 @@ export function RealApp() {
   }, [enqueueToast]);
   const local = useTemporaryCanvases(onError);
   const changed = useCallback(() => setRefresh((n) => n + 1), []);
+  const serviceRefreshers = useRef(new Map<string, (created?: GraphSnapshot) => void>());
+  const registerServiceRefresh = useCallback((id: string, refresh: (created?: GraphSnapshot) => void) => {
+    serviceRefreshers.current.set(id, refresh);
+    return () => { if (serviceRefreshers.current.get(id) === refresh) serviceRefreshers.current.delete(id); };
+  }, []);
   const [notifications] = useState(() =>
     createRunNotifications({
       storage: localStorage,
@@ -426,6 +441,10 @@ export function RealApp() {
       projectName: item.temporary ? t('Temporary Work Graph') : data[item.serviceId]?.projects.find(project => project.projectId === item.projectId)?.name ?? item.projectName,
     }];
   });
+  const libraryRecentGraphs = availableRecentGraphs.filter(item =>
+    item.temporary === localMode && (localMode || item.serviceId === serviceId) &&
+    visibleGraphs.some(graph => graph.projectId === item.projectId && graph.graphId === item.graphId),
+  ).slice(0, 3);
   const openRecentGraph = (item: RecentGraph) => {
     const found = (item.temporary ? local.graphs : data[item.serviceId]?.graphs)?.find(candidate => candidate.projectId === item.projectId && candidate.graphId === item.graphId && !candidate.trashed);
     if (!found) { onError(Error(t('This recently opened Work Graph is no longer available. Select it again in My Work Graphs.'))); return; }
@@ -484,7 +503,10 @@ export function RealApp() {
   const activeRuntimeStatus = runtimeStatus(statusConnection, current?.eventStatus, current?.error, webClientPackage.version);
   const runtimeDisconnected =
     !localMode &&
-    (connection?.status === "offline" || current?.eventStatus === "offline");
+    (current?.eventStatus === "offline" ||
+      // Registry restoration and initial SSE setup fence writes with offline
+      // while the monitor is still starting; neither confirms an outage.
+      (connectionsRestored && current?.eventStatus !== "starting" && connection?.status === "offline"));
   const copyConnection = services.find(c => c.serviceId === copyServiceId) ?? connection;
   const copyProjects = data[copyConnection?.serviceId ?? '']?.projects.filter(p => p.state === 'active') ?? [];
   const copyProject = copyProjects.find(p => p.projectId === copyProjectId) ?? copyProjects[0];
@@ -855,13 +877,15 @@ export function RealApp() {
   return (
     <main className={"app real-app " + (leftOpen ? "" : "sidebar-closed")}>
       {confirmTrashGraphs && <ConfirmationDialog title={t('Confirm move to trash')}
-        text={t('Move {count} Work Graphs to the trash?', { count: confirmTrashGraphs.length })} disabled={busy || !canvasOnline}
+        text={confirmTrashGraphs.length === 1
+          ? t('Move “{title}” to the trash? You can restore it from the trash later.', { title: confirmTrashGraphs[0].title })
+          : t('Move {count} Work Graphs to the trash?', { count: confirmTrashGraphs.length })} disabled={busy || !canvasOnline}
         onCancel={() => setConfirmTrashGraphs(undefined)} onConfirm={() => {
           const targets = confirmTrashGraphs; setConfirmTrashGraphs(undefined);
           act(async () => {
             const guard = captureCanvasSelection();
             for (const target of targets) { guard(); await updateCard(target, [{ type: 'graph.trash', trashed: true }]); }
-            setSelectedCards([]);
+            setSelectedCards(ids => ids.filter(id => !targets.some(target => target.graphId === id)));
           });
         }}/>}
       {connectionsRestored && (services.length === 0 || welcomePairing) && local.graphs.length > 0 && <WelcomeDialog
@@ -883,6 +907,7 @@ export function RealApp() {
           connection={c}
           refresh={refresh}
           onData={acceptData}
+          registerRefresh={registerServiceRefresh}
         />
       ))}
       {runtimeRename && <div className="library-dialog-backdrop"><form className="library-dialog panel" role="dialog" aria-modal="true" aria-label={t('Rename Workspace')}
@@ -1080,16 +1105,7 @@ export function RealApp() {
         />}
         <section className={"real-main workspace " + (page === "library" ? "library-active" : "")}>
           {page === 'library' && <section className="workgraph-library" aria-label={t('Work Graph list')}>
-            <header><div><div className="library-brand"><img className="library-brand-logo" src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/><span className="brand-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span></div><h1>{t('Work Graph')}</h1></div><div className="library-actions">
-              <button disabled={busy || runtimeDisconnected || !deletableGraphs.length} onClick={() => setSelectedCards(allLibraryGraphsSelected ? [] : deletableGraphs.map(g => g.graphId))}>
-                {allLibraryGraphsSelected ? t('Deselect all') : t('Select all')}
-              </button>
-              {filter !== 'trashed' && selectedLibraryGraphs.length > 0 && <button disabled={busy || !canvasOnline} onClick={() => {
-                setConfirmTrashGraphs(selectedLibraryGraphs);
-              }}>{t('Delete selected ({count})', { count: selectedLibraryGraphs.length })}</button>}
-              <button disabled={busy || !canvasOnline || !canvasProjectActive} title={localMode ? undefined : libraryTargetProject?.name} onClick={() => importInput.current?.click()}><Upload size={16}/>{t('Import Work Graph')}</button>
-              <button disabled={busy || !canvasOnline || !canvasProjectActive} className="library-primary" onClick={() => setCreating(true)}><Plus size={16}/>{t('New Work Graph')}</button>
-            </div></header>
+            <header><div><div className="library-brand"><img className="library-brand-logo" src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/><span className="brand-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span></div><h1>{t('Work Graph')}</h1></div></header>
           <div className="library-filters">
           <label>{t('Workspace')}<select aria-label={t('Select Workspace')} value={localMode ? 'browser' : serviceId} onChange={event => {
             const value = event.target.value;
@@ -1138,8 +1154,39 @@ export function RealApp() {
                   <option value="trashed">{t('Trash')}</option>
                 </select>
               </label>
+              {!localMode && connection && <button type="button" className="library-link-project" disabled={busy || !online} onClick={openAddProject}>
+                <FolderPlus size={16} aria-hidden="true" />{t('Link new project workspace')}
+              </button>}
 </div>
-              {!runtimeDisconnected && <div className="library-groups">{libraryGroups.map(group => <section className="library-project-group" key={group.projectId} aria-label={localMode ? t('Temporary browser storage') : group.name}>
+            <div className="library-actions">
+              <button disabled={busy || runtimeDisconnected || !deletableGraphs.length} onClick={() => setSelectedCards(allLibraryGraphsSelected ? [] : deletableGraphs.map(g => g.graphId))}>
+                {allLibraryGraphsSelected ? t('Deselect all') : t('Select all')}
+              </button>
+              {filter !== 'trashed' && selectedLibraryGraphs.length > 0 && <button disabled={busy || !canvasOnline} onClick={() => {
+                setConfirmTrashGraphs(selectedLibraryGraphs);
+              }}>{t('Delete selected ({count})', { count: selectedLibraryGraphs.length })}</button>}
+              <button disabled={busy || !canvasOnline || !canvasProjectActive} title={localMode ? undefined : libraryTargetProject?.name} onClick={() => importInput.current?.click()}><Upload size={16}/>{t('Import Work Graph')}</button>
+              <button disabled={busy || !canvasOnline || !canvasProjectActive} className="library-primary" onClick={() => setCreating(true)}><Plus size={16}/>{t('New Work Graph')}</button>
+            </div>
+              {!runtimeDisconnected && <div className="library-groups">
+                {libraryRecentGraphs.length > 0 && <section className="library-project-group library-recent-group" aria-label={t('Recently opened')}>
+                  <h2>{t('Recently opened')}<span>{libraryRecentGraphs.length}</span></h2>
+                  <div className="library-grid">{libraryRecentGraphs.map(item => {
+                    const g = visibleGraphs.find(graph => graph.projectId === item.projectId && graph.graphId === item.graphId)!;
+                    return <article className="library-card" key={JSON.stringify([item.serviceId, item.projectId, item.graphId])}>
+                      <input className="library-card-check" type="checkbox" disabled={!cardProjectActive(g)} aria-label={t('Select {title}', { title: g.title })} checked={selectedCards.includes(g.graphId)} onChange={e => setSelectedCards(ids => e.target.checked ? [...ids, g.graphId] : ids.filter(id => id !== g.graphId))}/>
+                      <button type="button" className="library-card-open" aria-label={item.title} onClick={() => openRecentGraph(item)}>
+                        <strong>{item.title}</strong>
+                        <span>{t('{nodes} nodes · {edges} edges', { nodes: g.nodes.length, edges: g.edges.length })}</span>
+                      </button>
+                      <footer><span>{localMode ? t('Temporary browser storage') : item.projectName}</span><div>
+                        <button aria-label={t('Export {title}', { title: g.title })} disabled={busy} className="icon-button" title={t('Export')} onClick={() => act(() => exportGraph(g))}><Download size={16}/></button>
+                        <button aria-label={t('Rename {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || g.archived || g.trashed || busy} className="icon-button" title={t('Rename')} onClick={() => { setCardRename(g); setCardTitle(g.title); }}><Pencil size={16}/></button>
+                      </div></footer>
+                    </article>;
+                  })}</div>
+                </section>}
+                {libraryGroups.map(group => <section className="library-project-group" key={group.projectId} aria-label={localMode ? t('Temporary browser storage') : group.name}>
                 <h2>{localMode ? t('Temporary browser storage') : group.name}<span>{group.graphs.length}</span></h2>
                 <div className="library-grid">{group.graphs.map(g => <article className="library-card" key={g.graphId}>
                 <input className="library-card-check" type="checkbox" disabled={!cardProjectActive(g)} aria-label={t('Select {title}', { title: g.title })} checked={selectedCards.includes(g.graphId)} onChange={e => setSelectedCards(ids => e.target.checked ? [...ids, g.graphId] : ids.filter(id => id !== g.graphId))}/>
@@ -1147,24 +1194,20 @@ export function RealApp() {
                 <footer><span>{localMode ? t('Temporary browser storage') : group.name}</span><div>
                   <button aria-label={t('Export {title}', { title: g.title })} disabled={busy} className="icon-button" title={t('Export')} onClick={() => act(() => exportGraph(g))}><Download size={16}/></button>
                   <button aria-label={t('Rename {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || g.archived || g.trashed || busy} className="icon-button" title={t('Rename')} onClick={() => { setCardRename(g); setCardTitle(g.title); }}><Pencil size={16}/></button>
-                  <button aria-label={g.trashed ? t('Restore {title}', { title: g.title }) : t('Delete {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || busy} className="icon-button" title={g.trashed ? t('Restore') : t('Delete')} onClick={() => act(() => updateCard(g, [{ type: 'graph.trash', trashed: !g.trashed }]))}>{g.trashed ? <RotateCcw size={16}/> : <Trash2 size={16}/>}</button>
+                  <button aria-label={g.trashed ? t('Restore {title}', { title: g.title }) : t('Delete {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || busy} className="icon-button" title={g.trashed ? t('Restore') : t('Delete')} onClick={() => g.trashed ? act(() => updateCard(g, [{ type: 'graph.trash', trashed: false }])) : setConfirmTrashGraphs([g])}>{g.trashed ? <RotateCcw size={16}/> : <Trash2 size={16}/>}</button>
                   {g.trashed && <button aria-label={t('Permanently delete {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || busy} className="icon-button" title={t('Permanently delete')} onClick={() => { setCardPurge(g); setCardPurgeTitle(''); }}><Trash2 size={16}/></button>}
                 </div></footer>
               </article>)}</div></section>)}</div>}
               {runtimeDisconnected && <div className="library-empty library-disconnected" role="status">
                 <WifiOff size={48} aria-hidden="true"/>
                 <h2>{t('Workspace connection disconnected')}</h2>
+                <WorkspaceRestartHint />
               </div>}
               {!runtimeDisconnected && (localMode || (current && !current.error)) && visibleGraphs.length === 0 && (!localMode && !project ? <div className="library-empty"><Layers size={32}/>
                 <>
                   <h2>{t('No bound projects')}</h2>
                   <p>{t('Register a directory on the Workspace device in Workspace management.')}</p>
-                  <button type="button" onClick={() => {
-                    setManagementInitialPage('add');
-                    setManagementEntry(entry => entry + 1);
-                    setServicePage('projects');
-                    setServicePanelOpen(true);
-                  }}>{t('Bind project')}</button>
+                  <button type="button" onClick={openAddProject}>{t('Bind project')}</button>
                 </>
               </div> : filter === 'active' ? <div className="library-empty"><Layers size={48}/>
                   <h2>{t('There are currently no Work Graphs')}</h2>
@@ -1174,18 +1217,37 @@ export function RealApp() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  if (localMode || libraryTargetProject)
+                  if (busy || creationInFlight.current) return;
+                  if (localMode || libraryTargetProject) {
+                    creationInFlight.current = true;
+                    setCreationPending(true);
                     act(async () => {
-                      const currentSelection = captureCanvasSelection();
-                      if (localMode && editor.current?.getSnapshot().drafts.length) await editor.current.flush();
-                      currentSelection();
-                      const created = localMode ? await local.store.create(graphName)
-                        : await request<GraphSnapshot>(`/v1/projects/${libraryTargetProject!.projectId}/graphs`, { title: graphName, idempotencyKey: randomId() });
-                      currentSelection();
-                      selectGraph(created.graphId);
-                      if (!localMode) setProjectId(created.projectId);
-                      setTab('canvas'); setGraphName(''); setFilter('active'); setCreating(false); showPage('editor'); canvasChanged();
+                      try {
+                        const currentSelection = captureCanvasSelection();
+                        if (localMode && editor.current?.getSnapshot().drafts.length) await editor.current.flush();
+                        currentSelection();
+                        const created = localMode ? await local.store.create(graphName)
+                          : await request<GraphSnapshot>(`/v1/projects/${libraryTargetProject!.projectId}/graphs`, { title: graphName, idempotencyKey: randomId() });
+                        currentSelection();
+                        // Fence older authority reads synchronously, before publishing the new graph.
+                        if (!localMode) serviceRefreshers.current.get(serviceId)?.(created);
+                        // Publish the returned snapshot before entering the editor.
+                        // Waiting for a later list refresh would render an existing graph.
+                        if (localMode) local.acceptCreated(created);
+                        else setData(rows => {
+                          const source = rows[serviceId];
+                          if (!source || source.graphs.some(g => g.graphId === created.graphId)) return rows;
+                          return { ...rows, [serviceId]: { ...source, graphs: [...source.graphs, created] } };
+                        });
+                        selectGraph(created.graphId);
+                        if (!localMode) setProjectId(created.projectId);
+                        setTab('canvas'); setGraphName(''); setFilter('active'); setCreating(false); showPage('editor');
+                      } finally {
+                        creationInFlight.current = false;
+                        setCreationPending(false);
+                      }
                     });
+                  }
                 }}
               >
                 {!localMode && <label>{t('Projects on Workspace')}<select value={libraryTargetProject?.projectId ?? ''} onChange={event => { navigation.current++; setProjectId(event.target.value); }}>
@@ -1206,6 +1268,7 @@ export function RealApp() {
               </form>
               </section></div>}
           </section>}
+          {creationPending && <ProgressDialog title={t('Creating Work Graph…')} />}
           {!leftOpen && <button className="icon-button panel real-sidebar-open" aria-label={t('Expand sidebar')} onClick={() => setLeftOpen(true)}><PanelLeftOpen size={18}/></button>}
           <div className="workgraph-status-dock">
             {page === 'editor' && <RunNotifications todos={todos}
@@ -1300,6 +1363,7 @@ export function RealApp() {
                 key={
                   graph.serviceId + ":" + (localMode ? 0 : connection?.generation) + ":" + graph.graphId
                 }
+                onHome={() => navigate(() => { location.href = './index.html'; })}
                 onLibrary={() => navigate(() => { enterLibrary.current(); showPage('library'); })}
                 onNew={() => navigate(() => { enterLibrary.current(); showPage('library'); setCreating(true); })}
                 onDelete={() => setActionDialog('trash')}
@@ -1316,7 +1380,7 @@ export function RealApp() {
                 imageReason={executionUnavailableReason(!!online, localMode, connection?.info.capabilities?.imageGeneration)}
                 graph={graph}
                 online={canvasOnline}
-                runtimeUnavailable={!localMode && current?.eventStatus === 'offline'}
+                runtimeUnavailable={runtimeDisconnected}
                 projectActive={canvasProjectActive}
                 onOpenRun={run => { setDetailRun(run); setRightPanel(run ? 'details' : null); }}
                 onRunSubmitted={run => { setDetailRun(run); setRightPanel('details'); }}
@@ -1403,9 +1467,10 @@ export function RealApp() {
               readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/>
           </div>}
           {panelContent === 'queue' && connection && (
-            <div className="real-right-panel-content"><div className="service-panel-heading"><h2>{t('Workspace queue')}</h2><button className="icon-button" aria-label={t('Close Workspace queue')} onClick={() => setRightPanel(null)}>×</button></div><RunsPanel
+            <div className="real-right-panel-content"><RunsPanel
               key={serviceId + ":" + connection.generation}
               mode="queue"
+              onClose={() => setRightPanel(null)}
               onSelectRun={run => { setDetailRun(run); setRightPanel('details'); }}
               describeRun={run => ({ node: String((current?.graphs.find(g => g.graphId === run.graphId)?.nodes.find(n => n.id === run.nodeId)?.content as { title?: string })?.title ?? t('Node removed')), graph: current?.graphs.find(g => g.graphId === run.graphId)?.title ?? t('Work Graph'), project: current?.projects.find(p => p.projectId === run.projectId)?.name ?? run.projectId })}
               request={request}
@@ -1635,7 +1700,7 @@ function Pairing({
         <small>{t('Current origin: {origin}', { origin: location.origin })}</small>
         <details><summary>{t('View public key fingerprint')}</summary><small>{t('Public key fingerprint SHA-256: {fingerprint}', { fingerprint: identity.fingerprint })}</small></details>
         <p>{t('Run this on the Workspace device (no need to enter the origin manually):')}</p>
-        <code>npx openworkgraph pair --client-code {clientCode}</code>
+        <code>npx openworkgraph@latest pair --client-code {clientCode}</code>
         <p>{t('The client code is valid for 5 minutes. Keep this page open; refreshing or regenerating requires authorization again.')}</p>
         {busy && <p role="status">{t('Waiting for Workspace approval…')}</p>}
       </>}
@@ -1656,11 +1721,13 @@ function ServiceMonitor({
   connection,
   refresh,
   onData,
+  registerRefresh,
 }: {
   registry: ConnectionRegistry;
   connection: Connection;
   refresh: number;
   onData: (id: string, data: ServiceData) => void;
+  registerRefresh: (id: string, refresh: (created?: GraphSnapshot) => void) => () => void;
 }) {
   const latest = useRef({ connection, onData });
   latest.current = { connection, onData };
@@ -1838,17 +1905,26 @@ function ServiceMonitor({
     const reconnectBootstrap = () => {
       if (!stream) trigger.current();
     };
+    const unregisterRefresh = registerRefresh(connection.serviceId, created => {
+      // Error/offline updates reuse this snapshot too, so retain the committed POST result.
+      if (created && !snapshot.graphs.some(graph => graph.graphId === created.graphId)) {
+        snapshot = { ...snapshot, graphs: [...snapshot.graphs, created] };
+        try { sessionStorage.setItem(cacheKey, JSON.stringify(snapshot)); } catch { /* Cache is optional. */ }
+      }
+      trigger.current();
+    });
     window.addEventListener("online", reconnectBootstrap);
     trigger.current();
     return () => {
       alive = false;
+      unregisterRefresh();
       clearTimeout(bootstrapRetry);
       window.removeEventListener("online", reconnectBootstrap);
       lifecycle.abort();
       trigger.current = () => undefined;
       void stream?.stop();
     };
-  }, [registry, connection.serviceId, connection.generation]);
+  }, [registry, connection.serviceId, connection.generation, registerRefresh]);
   useEffect(() => trigger.current(), [refresh]);
   return null;
 }

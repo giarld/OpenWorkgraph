@@ -53,9 +53,7 @@
 .candidate-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .candidate-heading > div { min-width: 0; }
 .management-panel .candidate-heading h3 { margin: 0 0 4px; font-size: 14px; }
-.candidate-heading span, .candidate-source { color: var(--muted); font-size: 12px; }
-.management-panel .candidate-source summary { width: fit-content; padding: 8px 0; }
-.management-panel .candidate-source p { margin: 0 0 12px; line-height: 1.6; }
+.candidate-heading span { color: var(--muted); font-size: 12px; }
 .management-panel .candidate-list { gap: 0; margin: 8px 0 16px; border: 1px solid var(--stroke); border-radius: 10px; overflow: clip; }
 .management-panel .candidate-list:empty { display: none; }
 .management-panel .candidate-row { grid-template-columns: 20px minmax(0, 1fr) 44px; align-items: start; gap: 10px; padding: 14px 12px; border: 0; border-bottom: 1px solid var(--stroke); border-radius: 0; background: transparent; }

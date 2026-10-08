@@ -221,21 +221,38 @@ export class BuiltinSkills {
     return {items:[...result.values()].sort((a,b)=>a.name.localeCompare(b.name)),stale:!!error,...(error ? {error} : {})};
   }
   async installed(): Promise<SkillCatalogItem[]> { await this.initialize(); return Object.values((await this.state()).items).filter(item=>item.installed); }
+  /** Local records plus already-known update information; never refresh the source. */
+  async installedCatalog(): Promise<SkillCatalog> {
+    const items = await this.installed();
+    const cache = await this.readJson<CatalogCache>('catalog-' + key(JSON.stringify(this.source)) + '.json');
+    const versions = new Map((cache?.packages ?? []).map(pkg=>[pkg.item.skillId,pkg.item.packageVersion]));
+    return {items:items.map(item=>({...item,updateAvailable:versions.has(item.skillId) && versions.get(item.skillId)!==item.packageVersion})).sort((a,b)=>a.name.localeCompare(b.name)),stale:false};
+  }
   private versionDirectory(id: string, version: string): string {
     if (!id || id.length > 1024 || !/^[a-f0-9]{64}$/.test(version)) throw new ServiceError('INVALID_REQUEST','技能身份或包版本无效。');
     return 'versions/' + key(id) + '/' + version;
   }
+  /** UI reads only the installed schema and manifest, without hashing package contents. */
+  async packageMetadata(skillId: string, packageVersion?: string): Promise<{config:SkillConfigSchema;item:SkillCatalogItem}> {
+    const {config,item} = await this.readPackageEntry(skillId,packageVersion,false);
+    return {config,item};
+  }
   async packageEntry(skillId: string, packageVersion?: string): Promise<{path:string;config:SkillConfigSchema;item:SkillCatalogItem}> {
+    return this.readPackageEntry(skillId,packageVersion,false);
+  }
+  private async readPackageEntry(skillId: string, packageVersion: string | undefined, verifyIntegrity: boolean): Promise<{path:string;config:SkillConfigSchema;item:SkillCatalogItem}> {
     await this.initialize(); const current = (await this.state()).items[skillId];
     const version = packageVersion ?? (current?.installed ? current.packageVersion : undefined);
     if (!version) throw new ServiceError('NOT_FOUND','技能尚未安装或已卸载。');
     const relative = this.versionDirectory(skillId,version); const manifest = await this.readJson<Manifest>(relative + '/manifest.json');
     if (!manifest || manifest.version !== 1 || manifest.item.skillId !== skillId || manifest.item.packageVersion !== version) throw new ServiceError('NOT_FOUND','技能固定包版本不可用。');
     validatePackageFiles({directory:manifest.item.directory,files:manifest.files});
-    if (packageDigest(manifest.files) !== version) throw new ServiceError('INVALID_REQUEST','技能包元数据摘要无效。');
-    for (const file of manifest.files) {
-      const path = await this.checked(relative + '/package/' + file.path); const stat = await fs.stat(path);
-      if (!stat.isFile() || stat.size !== file.size || gitBlobSha(await fs.readFile(path)) !== file.sha) throw new ServiceError('INVALID_REQUEST','已安装技能包完整性校验失败。');
+    if (verifyIntegrity) {
+      if (packageDigest(manifest.files) !== version) throw new ServiceError('INVALID_REQUEST','技能包元数据摘要无效。');
+      for (const file of manifest.files) {
+        const path = await this.checked(relative + '/package/' + file.path); const stat = await fs.stat(path);
+        if (!stat.isFile() || stat.size !== file.size || gitBlobSha(await fs.readFile(path)) !== file.sha) throw new ServiceError('INVALID_REQUEST','已安装技能包完整性校验失败。');
+      }
     }
     const config = parseSkillConfig(await fs.readFile(await this.checked(relative + '/package/config.json'),'utf8'));
     return {path:await this.checked(relative + '/package/SKILL.md'),config,item:current?.installed && current.packageVersion === version ? current : manifest.item};
@@ -256,14 +273,14 @@ export class BuiltinSkills {
     if (manifest) {
       if (manifest.version !== 1 || manifest.item.skillId !== skillId || manifest.item.packageVersion !== packageVersion) throw new ServiceError('INVALID_REQUEST','技能包元数据无效。');
       validatePackageFiles({directory:manifest.item.directory,files:manifest.files});
-      if (packageDigest(manifest.files) !== packageVersion) throw new ServiceError('INVALID_REQUEST','技能包元数据摘要无效。');
       const file = manifest.files.find(file=>file.path===path);
       if (!file) throw new ServiceError('NOT_FOUND','技能包资源不存在。');
       const target = await this.checked(relative + '/package/' + path);
       const stat = await fs.stat(target);
-      if (!stat.isFile() || stat.size !== file.size) throw new ServiceError('INVALID_REQUEST','技能资源完整性校验失败。');
+      if (!stat.isFile()) throw new ServiceError('INVALID_REQUEST','技能资源不是普通文件。');
+      if (stat.size > SKILL_LIMITS.fileBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','技能资源超过大小限制。');
       const bytes = await fs.readFile(target);
-      if (gitBlobSha(bytes) !== file.sha) throw new ServiceError('INVALID_REQUEST','技能资源完整性校验失败。');
+      if (bytes.length > SKILL_LIMITS.fileBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','技能资源超过大小限制。');
       return bytes;
     }
     const {cache,error} = await this.cached();
@@ -321,7 +338,7 @@ export class BuiltinSkills {
         const existing = await this.readJson<Manifest>(target + '/manifest.json');
         deadline.check();
         if (!existing) await fs.rename(await this.checked(staging),await this.checked(target));
-        else await this.packageEntry(skillId,item.packageVersion!);
+        else await this.readPackageEntry(skillId,item.packageVersion!,true);
         deadline.check();
         state.items[skillId] = item; await this.atomicJson('installed.json',state); return item;
       } finally { await fs.rm(await this.checked(staging),{recursive:true,force:true}); }

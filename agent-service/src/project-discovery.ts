@@ -2,7 +2,8 @@ import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, stat
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { ProjectCandidates, ProjectCandidate } from '@openworkgraph/protocol';
-const MAX_BYTES = 2 * 1024 * 1024;
+// Desktop state also contains unrelated UI/thread metadata and can exceed 2 MiB.
+const MAX_BYTES = 16 * 1024 * 1024;
 /** Best-effort private desktop format; not a public Codex RPC or a trusted registration. */
 export function discoverProjects(codexHome = process.env['CODEX_HOME'] || join(homedir(),'.codex')): ProjectCandidates {
   const unavailable = (reason: string): ProjectCandidates => ({source:'codex-desktop-saved-roots',status:'unavailable',reason,candidates:[]});
@@ -12,10 +13,11 @@ export function discoverProjects(codexHome = process.env['CODEX_HOME'] || join(h
     fd = openSync(join(codexHome,'.codex-global-state.json'),constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_BYTES) return unavailable('Codex 桌面目录来源不是常规文件或超过读取上限；请手动输入路径。');
-    const raw = Buffer.alloc(MAX_BYTES + 1);
+    // Read one extra byte to detect growth without allocating the entire limit.
+    const raw = Buffer.alloc(stat.size + 1);
     let length = 0;
     while (length < raw.length) { const bytes = readSync(fd,raw,length,raw.length-length,null); if (!bytes) break; length += bytes; }
-    if (length > MAX_BYTES) return unavailable('Codex 桌面目录来源超过读取上限；请手动输入路径。');
+    if (length === raw.length) return unavailable('Codex 桌面目录来源在读取期间变化；请刷新后重试。');
     data = JSON.parse(raw.subarray(0,length).toString('utf8'));
   } catch { return unavailable('Codex 桌面已保存目录来源不存在、不可读或格式无效；请手动输入路径。'); }
   finally { if (fd !== undefined) closeSync(fd); }

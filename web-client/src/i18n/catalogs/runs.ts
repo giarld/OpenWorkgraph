@@ -1,6 +1,8 @@
 import { zhCN } from '../messages';
 
 export const runsZhCN = {
+  'Workspace queue': '工作空间队列',
+  'Close Workspace queue': '关闭工作空间队列',
   'A task queue can only contain tasks from the currently connected Workspace.': '任务队列只能包含当前关联工作空间的任务。',
   'Please answer every question completely (up to 16,000 characters each).': '请完整回答每一个问题（每项最多 16000 字）。',
   'The candidate target Workspace or Work Graph does not match.': '候选目标工作空间或工作图不匹配。',

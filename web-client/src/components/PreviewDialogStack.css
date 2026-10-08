@@ -1,0 +1,11 @@
+.preview-dialog-heading { flex-shrink: 0; gap: 12px; }
+.preview-dialog-heading h2 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.preview-dialog-heading > button { flex-shrink: 0; }
+.preview-dialog-heading .preview-dialog-back { margin-right: 0; }
+.preview-dialog-layers { position: relative; display: grid; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.preview-dialog-layer { grid-area: 1 / 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; outline: none; }
+.preview-dialog-layer[data-preview-layer-active="false"] { visibility: hidden; pointer-events: none; }
+.preview-dialog-layer > .ow-preview-node { height: auto; flex: 1; min-height: 0; }
+.document-dialog .preview-dialog-file-layer .markdown-body { max-height: none; overflow: visible; }
+.document-dialog.preview-stack-dialog { height: min(880px, 88vh); }
+.document-dialog.preview-stack-dialog.document-dialog-editing { height: min(780px, calc(100dvh - 60px)); }

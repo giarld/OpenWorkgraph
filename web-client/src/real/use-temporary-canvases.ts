@@ -20,6 +20,12 @@ export function useTemporaryCanvases(onError: (error: unknown) => void) {
     setGraphs(rows);
     setRevision(n => n + 1);
   }, [store]);
+  const acceptCreated = useCallback((graph: GraphSnapshot) => {
+    // A list read started before creation must not remove the new snapshot.
+    ++sequence.current;
+    setGraphs(rows => [...rows.filter(row => row.graphId !== graph.graphId), graph]);
+    setRevision(n => n + 1);
+  }, []);
   useEffect(() => {
     let alive = true;
     const ticket = ++sequence.current;
@@ -34,5 +40,5 @@ export function useTemporaryCanvases(onError: (error: unknown) => void) {
   }, [selected]);
   // The caller owns the service/project selection. Binding never migrates a graph.
   const bridgeFor = useCallback((graphId: string, binding?: TemporaryServiceBinding) => createTemporaryServiceBridge(store, graphId, binding), [store]);
-  return { store, graphs, selected, select: setSelected, revision, refresh, bridgeFor };
+  return { store, graphs, selected, select: setSelected, revision, refresh, acceptCreated, bridgeFor };
 }
