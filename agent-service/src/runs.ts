@@ -1,17 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import { isTerminalRunStatus } from '@openworkgraph/protocol';
+import { isTerminalRunStatus, limitNodeTitle } from '@openworkgraph/protocol';
 import type { InputSnapshot, Interaction, InteractionReply, Json, Run, RunNotification, RunStatus, SubmitRun, SandboxMode } from '@openworkgraph/protocol';
 import { Graphs } from './graphs.js';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
+import { DEFAULT_EXECUTION_TITLES, promptRunTitle } from './run-title.js';
 
 export interface RunContext { runId: string; projectId: string; graphId: string; nodeId: string; kind: SubmitRun['kind']; baseVersion: number; canonicalPath: string; publicationVersion: 1 | 2; sandboxMode?: SandboxMode }
 export interface RunsDependencies {
   /** Synchronous: extraction/preflight caches must already be prepared. */
   freeze: (request: SubmitRun, context: RunContext) => InputSnapshot;
   validate?: (request: SubmitRun, context: RunContext) => void;
+  preserveOutputs?: (request: SubmitRun, graphs: Graphs) => void;
   validateReply?: (interaction: Interaction, answer: Json) => void;
   now?: () => number;
 }
@@ -121,6 +123,7 @@ export class Runs {
     });
   }
   submit(request: SubmitRun, principal = 'local', holdExecution = false): Run {
+    if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
     return this.repo.idempotent(principal + ':run.submit', request.idempotencyKey, json(request), () => {
       if (request.serviceId !== this.serviceId) throw new ServiceError('SERVICE_MISMATCH', 'Wrong service');
       if (this.repo.setting('acceptingRuns') !== true) throw new ServiceError('MAINTENANCE', 'Service is not accepting runs');
@@ -146,10 +149,14 @@ export class Runs {
       } else if (!snapshot.model?.model || (request.kind==='image_generation' && canonicalJson(((snapshot.imageRoute?.type==='codex'?snapshot.imageRoute.options:undefined)??null) as Json)!==canonicalJson(((route?.type==='codex'?route.options:undefined)??null) as Json))) throw new ServiceError('INPUT_BLOCKED','Invalid frozen Codex model/route');
       const graphHistory=new Graphs(this.db,this.serviceId);
       const historyBefore=graphHistory.history.capture(request);
+      if (request.preserveHistoricalOutputs && !holdExecution) {
+        if (!this.dependencies.preserveOutputs) throw new ServiceError('INPUT_BLOCKED', 'Historical outputs must be prepared before submission');
+        sync(this.dependencies.preserveOutputs(request, graphHistory));
+      }
       if(request.kind==='execution' && !holdExecution)graphHistory.retireExecutionOutputs(request,request.nodeId);
       this.db.prepare('INSERT INTO runs(id,project_id,graph_id,node_id,kind,status,input_digest,created_at) VALUES(?,?,?,?,?,?,?,?)').run(context.runId, request.projectId, request.graphId, request.nodeId, request.kind, 'accepted', snapshot.inputDigest, new Date(this.now()).toISOString());
       graphHistory.history.recordRunSubmission(request,context.runId,historyBefore);
-      this.db.prepare('INSERT INTO run_runtime(run_id,epoch,details) VALUES(?,?,?)').run(context.runId, '', canonicalJson(json({...context, ...(request.kind === 'execution' ? {chainDependencies: []} : {}), ...(holdExecution ? {executionStart:'manual'} : {})})));
+      this.db.prepare('INSERT INTO run_runtime(run_id,epoch,details) VALUES(?,?,?)').run(context.runId, '', canonicalJson(json({...context, ...(request.kind === 'execution' ? {chainDependencies: []} : {}), ...(holdExecution ? {executionStart:'manual'} : {}), ...(request.preserveHistoricalOutputs !== undefined ? {preserveHistoricalOutputs:request.preserveHistoricalOutputs} : {})})));
       this.db.prepare('INSERT INTO snapshots(run_id,input_digest,payload) VALUES(?,?,?)').run(context.runId, snapshot.inputDigest, canonicalJson(json(snapshot)));
       const seen = new Set<string>();
       for (const input of snapshot.resources) {
@@ -209,7 +216,40 @@ export class Runs {
       if (this.get(id).status !== 'preparing' || runtime.details.backendLaunchAttempted === true) throw new ServiceError('CONFLICT', 'Run is not eligible to launch');
       this.db.prepare('UPDATE run_runtime SET revision=revision+1,details=? WHERE run_id=?').run(canonicalJson({ ...runtime.details, backendLaunchAttempted: true }), id);
       this.event(this.get(id), runtime.revision + 1);
+      const title = promptRunTitle(this.snapshot(id).prompt);
+      if (title) this.updateNodeTitle(id, this.runtime(id), title, false);
       return this.runtime(id);
+    });
+  }
+  /** Title-only versions must not look like user edits when publishing generation. */
+  updateNodeTitle(id: string, token: RunToken, value: string, generated = true): boolean {
+    return atomic(this.db, () => {
+      const run = this.get(id), runtime = this.runtime(id);
+      if (runtime.epoch !== token.epoch || runtime.revision !== token.revision) throw new ServiceError('REVISION_CONFLICT', 'Stale title callback');
+      if (!['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(run.status) || runtime.details.cancelRequested === true || runtime.details.generatedTitle === true) return false;
+      if (typeof value !== 'string' || !value.trim() || value.length > 1024 || /[\u0000-\u001f\u007f]/.test(value)) throw new ServiceError('INVALID_REQUEST', 'Node title must be a nonempty single line');
+      const title = limitNodeTitle(value.trim());
+      if (DEFAULT_EXECUTION_TITLES.has(title)) return false;
+      const node = this.db.prepare('SELECT n.current_version,n.read_only,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=? AND n.deleted=0').get(run.nodeId, run.graphId);
+      if (!node || node.read_only || node.current_version !== (runtime.details.titleVersion ?? runtime.details.baseVersion)) return false;
+      const content = JSON.parse(String(node.content)) as Json;
+      if (!content || typeof content !== 'object' || Array.isArray(content)) return false;
+      if (runtime.details.kind === 'execution' && runtime.details.titleVersion === undefined && content.title && !DEFAULT_EXECUTION_TITLES.has(String(content.title))) return false;
+      const graphs = new Graphs(this.db, this.serviceId);
+      graphs.writable(run);
+      const changed = content.title !== title;
+      const version = Number(node.current_version) + Number(changed);
+      if (changed) {
+        const next = { ...content, title };
+        this.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,?,?)').run(run.nodeId, version, canonicalJson(next));
+        this.db.prepare('UPDATE nodes SET current_version=? WHERE id=?').run(version, run.nodeId);
+        graphs.retainResources(run, run.nodeId, version, next);
+        this.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1 WHERE id=?').run(run.graphId);
+        graphs.event(run);
+      }
+      this.db.prepare('UPDATE run_runtime SET revision=revision+1,details=? WHERE run_id=?').run(canonicalJson({ ...runtime.details, titleVersion: version, generatedTitle: generated }), id);
+      this.event(run, runtime.revision + 1);
+      return true;
     });
   }
   /** Only a known lock-contention result BEFORE the spawn boundary can requeue.

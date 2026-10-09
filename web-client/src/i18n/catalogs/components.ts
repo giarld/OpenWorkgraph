@@ -39,6 +39,8 @@ export const componentsZhCN: Record<string, string> = {
   "Temporarily switch between select and pan tools when no node is selected": "未选中节点时临时切换选择 / 平移工具",
   "Edit or preview the selected node": "编辑或预览选中的节点",
   "Center selected nodes at 100% zoom": "将选中节点居中并缩放至 100%",
+  "Snap node movement to half-grid steps": "节点移动按 0.5 网格对齐",
+  "Snap node resizing to half-grid steps": "调整尺寸按 0.5 网格对齐",
   "Middle mouse drag": "鼠标中键拖动",
   "Pan the Work Graph": "平移工作图",
   "Two-finger scroll / Mouse wheel": "双指滑动 / 鼠标滚轮",

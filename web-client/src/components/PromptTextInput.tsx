@@ -193,6 +193,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
     renderedConfig.current = config;
   }, [value, config]);
   const commit = (next: string, start: number, previousCaret = api.selectionStart, edit?: PromptEdit, restoredRefs?: SkillReference[]) => {
+    if (next !== current.current) root.current?.dispatchEvent(new Event('owg-prompt-edit', { bubbles: true }));
     const captured = nativeEdit.current;
     if (!edit && captured?.value === current.current) edit = { start: captured.start, end: captured.end, text: next.slice(captured.start, next.length - (captured.value.length - captured.end)) };
     nativeEdit.current = null;
@@ -216,6 +217,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
   };
   const undo = (redo: boolean) => {
     const from = redo ? future.current : history.current; const to = redo ? history.current : future.current; const state = from.pop(); if (!state) return;
+    if (state.value !== current.current) root.current?.dispatchEvent(new Event('owg-prompt-edit', { bubbles: true }));
     to.push({ value: api.value, caret: api.selectionStart, refs: currentRefs.current }); current.current = state.value; currentRefs.current = state.refs;
     render(root.current!, state.value, skillEnabled, state.refs, skillNames, openFile, openReference); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret, state.refs);
   };

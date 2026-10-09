@@ -1,6 +1,8 @@
 .ow-skills-library { box-sizing: border-box; width: 100%; min-width: 0; overflow: auto; padding: 16px; color: var(--text); background: var(--panel); font-size: 13px; line-height: 1.5; }
 .real-sidebar .ow-skills-library { padding-top: 0; }
-.sidebar-tabs.has-skills { flex-wrap: wrap; gap: 6px 14px; height: auto; min-height: 54px; }
+.sidebar-tabs.has-skills { flex-wrap: nowrap; gap: 14px; height: 54px; overflow-x: auto; }
+.sidebar-tabs.has-skills > button { flex-shrink: 0; white-space: nowrap; }
+.sidebar-tabs.has-skills > .sidebar-collapse { position: sticky; right: 0; background: inherit; }
 .sidebar-tabs.has-skills > button:not(.icon-button) { white-space: nowrap; min-height: 40px; }
 .ow-skills-library header, .ow-skills-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ow-skills-library small, .ow-skills-dialog small, .ow-skills-note { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }

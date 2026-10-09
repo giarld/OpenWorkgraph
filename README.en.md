@@ -1,8 +1,8 @@
 # OpenWorkgraph
 
-[简体中文](README.md) | English
-
 OpenWorkgraph is a software development workflow product built around the infinite canvas concept, with support for organizing work and collaborating across other fields.
+
+[简体中文](README.md) | English
 
 ## Quick Start
 

@@ -1,3 +1,4 @@
+import { limitNodeTitle, limitNodeContentTitle } from '@openworkgraph/protocol';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
@@ -15,6 +16,7 @@ import { canonicalJson } from './persistence/repositories.js';
 import { Resources, type CanvasResource } from './resources.js';
 import { Runs, type RunToken } from './runs.js';
 import { ProjectFiles, classifyProjectFile } from './project-files.js';
+import { DEFAULT_EXECUTION_TITLES, promptRunTitle } from './run-title.js';
 
 type OutputRole = 'delivery-document' | 'project-file' | 'workgraph-node';
 type OutputNodeType = 'text' | 'document' | 'image' | 'file';
@@ -35,27 +37,17 @@ function generatedTextTitle(text: string): string {
   const firstLine = text.split(/\r?\n/).find(line => line.trim())?.trim() ?? '';
   const heading = firstLine.match(/^#{1,6}\s+(.+?)\s*#*\s*$/);
   const title = (heading?.[1] ?? firstLine).trim();
-  // Graphs limits node titles to 1024 UTF-16 code units. Keep a generated
-  // heading within that bound without splitting a surrogate pair.
-  const bounded = title.slice(0, 1024);
-  return /[\uD800-\uDBFF]$/.test(bounded) ? bounded.slice(0, -1) : bounded;
+  return limitNodeTitle(title);
 }
-const DEFAULT_EXECUTION_TITLES = new Set(['执行任务', 'Execution task']);
 function executionTitle(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !value.trim() || value !== value.trim() || value.length > 80 || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) invalid('executionTitle must be a single concise line of at most 80 characters');
-  return value;
-}
-function promptExecutionTitle(prompt: string): string | undefined {
-  const line = prompt.split(String.fromCharCode(10)).find(part => part.trim())?.trim() ?? '';
-  const first = line.replace(/^#+ /, '').split(/[。！？.!?]/, 1)[0]!.trim();
-  const title = first.slice(0, 80).trim();
-  return title && !DEFAULT_EXECUTION_TITLES.has(title) ? title : undefined;
+  if (typeof value !== 'string' || !value.trim() || value !== value.trim() || value.length > 1024 || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) invalid('executionTitle must be a nonempty single line of at most 1024 input characters');
+  return limitNodeTitle(value);
 }
 function generatedTextContent(current: Json, text: string, output?: Json, title = generatedTextTitle(text)): Json {
   if (!object(current)) return invalid('Text generation target requires editable text content');
   if (!title.trim() || title.length > 1024) invalid('Generated node title must be 1..1024 characters');
-  const next: Record<string, unknown> = { ...current, title, text };
+  const next: Record<string, unknown> = { ...current, title: limitNodeTitle(title), text };
   // Repair nodes written by the old publication path, which embedded output-file
   // metadata into an ordinary text node and made the UI treat it as a resource.
   for (const key of ['resourceId', 'resourceVersion', 'mime', 'outputKey', 'runId', 'outputs']) delete next[key];
@@ -94,7 +86,7 @@ function manifest(value: unknown, version: 1 | 2): Manifest {
       if (!['text','document','image','file'].includes(String(item.nodeType))) invalid('workgraph-node requires a supported nodeType');
       nodeType = item.nodeType as OutputNodeType;
       if (typeof item.title !== 'string' || !item.title.trim() || item.title.length > 1024) invalid('workgraph-node requires a title of 1..1024 characters');
-      title = item.title;
+      title = limitNodeTitle(item.title);
       if ((nodeType === 'text' || nodeType === 'document') && (!supportsText(mime) || Number(item.bytes) > MAX_TEXT)) invalid(nodeType + ' workgraph-node requires bounded text content');
       if (nodeType === 'image' && !imageMime(mime) && mime !== 'image/svg+xml') invalid('image workgraph-node requires an image MIME');
     } else if (item.nodeType !== undefined || item.title !== undefined) invalid('Only workgraph-node accepts nodeType and title');
@@ -353,7 +345,7 @@ export class Publication {
           return { ...item, content };
         }
         const resourceName = basename(item.output.path);
-        const title = item.output.title ?? resourceName;
+        const title = limitNodeTitle(item.output.title ?? resourceName);
         const created = this.resources.createCanvasFromPrepared(run, item.blob!, resourceName);
         this.db.prepare('INSERT INTO canvas_outputs(run_id,graph_id,output_key,resource_id,resource_version) VALUES(?,?,?,?,1)').run(run.id, run.graphId, item.output.outputKey, created.resource.id);
         const resourceOutput: { [key: string]: Json } = { resourceId:created.resource.id, resourceVersion:1, name:resourceName, mime:item.output.mime, bytes:item.output.bytes, outputKey:item.output.outputKey, runId:run.id };
@@ -365,7 +357,7 @@ export class Publication {
       const document = publicationVersion === 2 ? artifacts.find(item => item.output.role === 'delivery-document')! : artifacts.find(item => item.output.mime === 'text/markdown')!;
       if (kind === 'execution') {
         const currentContent = JSON.parse(String(source.node_content)) as Json;
-        const taskTitle = selected.executionTitle ?? promptExecutionTitle(this.runs.snapshot(run.id).prompt);
+        const taskTitle = selected.executionTitle ?? promptRunTitle(this.runs.snapshot(run.id).prompt);
         if (taskTitle && object(currentContent) && (currentContent.title === undefined || currentContent.title === '' || DEFAULT_EXECUTION_TITLES.has(String(currentContent.title)))) {
           this.append(run, Number(source.current_version), { ...currentContent, title:taskTitle });
         }
@@ -417,7 +409,7 @@ export class Publication {
             : invalid('Text generation target requires editable text content')
           : generatedImageContent(currentContent, { ...primary.content, title: generatedTextTitle(document.text ?? ''), outputs: artifacts.map(item => item.content) });
         if (Buffer.byteLength(canonicalJson(content)) > 2 * MAX_TEXT) invalid('Generation content exceeds node content limit');
-        if (source.current_version === runtime.details.baseVersion) this.append(run, Number(source.current_version), content);
+        if (source.current_version === (runtime.details.titleVersion ?? runtime.details.baseVersion)) this.append(run, Number(source.current_version), content);
         else this.db.prepare("INSERT INTO generation_candidates(run_id,node_id,base_version,content,state) VALUES(?,?,?,?,'pending')").run(run.id, run.nodeId, Number(runtime.details.baseVersion), canonicalJson(content));
       }
       for (const item of artifacts) if ('referenceId' in item) this.resources.releaseCanvasReference(run, item.referenceId);
@@ -429,6 +421,7 @@ export class Publication {
   }
 
   private append(run: Run, expected: number, content: Json): void {
+    content = limitNodeContentTitle(content);
     if (Buffer.byteLength(canonicalJson(content)) > 2 * MAX_TEXT) invalid('Generation content exceeds node content limit');
     const changed = this.db.prepare('UPDATE nodes SET current_version=current_version+1 WHERE id=? AND graph_id=? AND current_version=? AND read_only=0 AND deleted=0').run(run.nodeId, run.graphId, expected);
     if (changed.changes !== 1) conflict('Generation target changed');

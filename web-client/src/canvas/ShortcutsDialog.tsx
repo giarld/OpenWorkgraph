@@ -11,6 +11,8 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     { keys: [primaryLabel + " / Space", t("Drag")], description: t("Temporarily switch between select and pan tools when no node is selected") },
     { keys: ["Space"], description: t("Edit or preview the selected node") },
     { keys: ["F"], description: t("Center selected nodes at 100% zoom") },
+    { keys: [primaryLabel, t("Drag")], description: t("Snap node movement to half-grid steps") },
+    { keys: [primaryLabel, t("Drag")], description: t("Snap node resizing to half-grid steps") },
     { keys: [t("Middle mouse drag")], description: t("Pan the Work Graph") },
     { keys: [t("Two-finger scroll / Mouse wheel")], description: t("Pan the Work Graph") },
     { keys: [primaryLabel + " + " + t("Mouse wheel")], description: t("Zoom around the pointer") },

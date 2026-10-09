@@ -1,4 +1,5 @@
 import { syncSkillReferences, validSkillReferences } from "./project-file-mentions";
+import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
 import { projectOperations } from './optimistic-operations';
 import { randomId } from "../adapter/random";
 import type { GraphSnapshot, GraphOperation, Json, Request, Run } from "./contracts";
@@ -240,7 +241,7 @@ export class GraphEditor {
     };
   }
   private prepareQueuedCommand(operations: GraphOperation[]): () => Promise<GraphSnapshot> {
-    const captured = structuredClone(operations);
+    const captured = structuredClone(limitNodeTitleOperations(operations));
     let pending: Promise<GraphSnapshot> | undefined;
     let completed: GraphSnapshot | undefined;
     let body: CommandBody | undefined;
@@ -480,7 +481,7 @@ export class GraphEditor {
     });
     await this.flushDrafts(draftId);
   }
-  async run(nodeId: string, kind: string, modelOverride?: unknown, imageRoute?: ImageRoute) {
+  async run(nodeId: string, kind: string, modelOverride?: unknown, imageRoute?: ImageRoute, preserveHistoricalOutputs?: boolean) {
     if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
     const epoch = this.connectionEpoch;
     await this.flush();
@@ -510,6 +511,7 @@ export class GraphEditor {
       expectedExecutionRevision: g.executionRevision,
       ...(modelOverride ? { modelOverride } : {}),
       ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
+      ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
     });
   }
   dispose() {

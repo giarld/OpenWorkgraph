@@ -12,6 +12,8 @@ export interface BackendRunContext { runId: string; kind: 'execution' | 'text_ge
 export interface BackendCallbacks {
   onSnapshot(snapshot: RuntimeSnapshot): void | Promise<void>;
   onInteraction(interaction: BackendInteraction): void | Promise<void>;
+  /** Independent title generation updates this Run's source while work proceeds. */
+  setNodeTitle?(title: string): boolean | Promise<boolean>;
   /** Must authorize against this Run's project; no global graph/database endpoint. */
   queryHistory?(query: string): Promise<string>;
   /** Exact, paginated read; project scope is derived from the calling Run. */

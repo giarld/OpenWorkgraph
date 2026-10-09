@@ -125,13 +125,13 @@
   font-size: 14px;
   margin: 24px 0 12px;
 }
-.real-app :where(label:not(.owg-canvas label)) {
+.real-app :where(label:not(.owg-canvas label):not(.run-preserve-outputs)) {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin: 10px 0;
 }
-.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.ow-resources-panel input) {
+.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
   min-width: 0;
   width: 100%;
 }
@@ -328,8 +328,19 @@
 .real-app { position: relative; }
 .real-header { position: absolute; top: 16px; right: 16px; z-index: 45; padding: 0; border: 0; gap: 8px; }
 .real-layout { height: 100%; }
-.real-sidebar.left-sidebar { width: 280px; min-width: 0; max-width: min(480px, calc(100vw - 320px)); padding: 0 16px 20px; display: block; visibility: visible; transition: width 240ms ease, padding 240ms ease, border-right-width 240ms ease, visibility 0s; }
+.real-sidebar.left-sidebar { width: 280px; min-width: 0; min-height: 0; max-width: max(var(--sidebar-minimum-width, 280px), min(480px, calc(100vw - 320px))); padding: 0 16px; display: flex; flex-direction: column; overflow: hidden; visibility: visible; transition: width 240ms ease, padding 240ms ease, border-right-width 240ms ease, visibility 0s; }
 .real-sidebar.left-sidebar > * { transition: opacity 180ms ease, transform 240ms ease; }
+.sidebar-content { flex: 1; min-height: 0; margin: 0 -16px; padding: 0 16px; overflow: auto; scrollbar-gutter: stable; }
+.sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; margin: 0 -16px; padding: 8px 12px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid var(--stroke); }
+.real-sidebar .sidebar-library-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); text-align: left; font-size: 13px; cursor: pointer; }
+.sidebar-library-link > svg { flex-shrink: 0; color: var(--muted); }
+.sidebar-library-chevron { margin-left: auto; }
+.real-sidebar .sidebar-library-link:hover:not(:disabled) { background: var(--fill); border-color: transparent; }
+.sidebar-footer .sidebar-brand { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 8px 12px; border-radius: 8px; text-decoration: none; }
+.sidebar-footer .sidebar-brand img { width: 136px; max-width: calc(100% - 52px); height: auto; }
+.sidebar-footer .sidebar-version-badge { flex-shrink: 0; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sidebar-footer .sidebar-brand:hover { background: var(--fill); }
+.sidebar-footer :is(.sidebar-brand, .sidebar-library-link):focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
 .real-sidebar.left-sidebar.left-sidebar-collapsed { padding: 0; overflow: hidden; border-right-width: 0; visibility: hidden; pointer-events: none; transition-delay: 0s, 0s, 0s, 240ms; }
 .real-sidebar.left-sidebar.left-sidebar-collapsed > * { opacity: 0; transform: translateX(-12px); }
 .left-sidebar-resizer { position: relative; z-index: 41; flex: 0 0 8px; margin: 0 -4px; cursor: col-resize; touch-action: none; }
@@ -338,7 +349,7 @@
 .left-sidebar-resizer:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
 body.resizing-left-sidebar { cursor: col-resize !important; user-select: none; }
 body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
-.real-sidebar .sidebar-tabs { position: sticky; top: 0; z-index: 10; margin: 0 -16px; background: inherit; }
+.real-sidebar .sidebar-tabs { flex-shrink: 0; position: sticky; top: 0; z-index: 10; margin: 0 -16px; background: inherit; }
 .sidebar-brand { display: flex; flex-direction: column; align-items: flex-start; width: min(152px, 100%); padding: 18px 0; }
 .sidebar-brand img { display: block; width: 100%; height: auto; }
 .brand-version-badge {
@@ -463,11 +474,10 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 
 .real-app input.pairing-short-code { font-family: ui-monospace, monospace; font-size: 1.5rem; letter-spacing: .12em; font-variant-numeric: tabular-nums; }
 
-.real-sidebar .sidebar-brand { min-height: 33px; padding: 6px 0 12px; }
 .graph-browser { font-size: 12px; margin: 0 0 10px; }
 .graph-browser > summary { padding: 10px 0; cursor: pointer; color: var(--muted); }
 .real-node-sidebar { margin: 0 -16px; }
-.real-node-sidebar .sidebar-search { position: sticky; top: 54px; z-index: 9; margin-top: 4px; }
+.real-node-sidebar .sidebar-search { position: sticky; top: 0; z-index: 9; margin-top: 4px; }
 .real-sidebar .ow-project-file-controls,
 .real-sidebar .ow-assets-controls { top: 54px; }
 .real-node-sidebar .node-list { overflow: visible; }
@@ -475,7 +485,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 /* Shared inset and control sizing for the four left-sidebar pages. */
 .real-sidebar :is(.ow-resources-panel, .ow-skills-library, .ow-project-files-panel) { height: auto; overflow: visible; padding: 8px 0 16px; }
 .real-sidebar :is(.ow-skills-controls, .ow-assets-controls, .ow-project-file-controls) { top: 0; }
-.real-sidebar:has(> .sidebar-tabs) :is(.ow-skills-controls, .ow-assets-controls, .ow-project-file-controls) { top: 54px; }
+.real-sidebar .sidebar-content :is(.ow-skills-controls, .ow-assets-controls, .ow-project-file-controls) { top: 0; }
 .real-sidebar .real-node-sidebar { padding-top: 8px; }
 .real-sidebar .real-node-sidebar .sidebar-search { margin: 0 16px 10px; }
 .real-sidebar .ow-skills-controls { padding-top: 0; }
@@ -665,3 +675,6 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 
 .real-toolbar .workgraph-project-prefix { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 35%; flex-shrink: 1; color: var(--muted); font-size: 13px; }
 .workgraph-project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.run-preserve-outputs { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; min-height: 24px; margin: 16px 0; cursor: pointer; }
+.run-preserve-outputs input { flex: 0 0 16px; width: 16px; min-width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; accent-color: var(--text); }

@@ -4,6 +4,7 @@ import type { ExecutionPlan, Run } from '../../../packages/protocol/src/index';
 import { randomId } from '../adapter/random';
 import type { Request } from './contracts';
 import '../i18n/catalogs/runs';
+import '../i18n/catalogs/real-core';
 import { useI18n } from '../i18n/I18nProvider';
 
 export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEditNode}:{run:Run;request:Request;disabled:boolean;onChanged:()=>void;onError:(error:unknown)=>void;onEditNode?:(nodeId:string)=>void}) {
@@ -11,6 +12,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
   const [open,setOpen]=useState(run.executionStart==='confirm');
   const [plan,setPlan]=useState<ExecutionPlan>();
   const [seeds,setSeeds]=useState<string[]>([]);
+  const [preserve,setPreserve]=useState<boolean>();
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [reload,setReload]=useState(0);
@@ -34,6 +36,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
     for(let i=0;i<queue.length;i++)for(const e of plan?.edges??[])if(e.sourceId===queue[i]&&!ids.has(e.targetId)){ids.add(e.targetId);queue.push(e.targetId);}
     return ids;
   },[seeds,plan]);
+  const keepOutputs=preserve ?? plan?.preserveHistoricalOutputs ?? plan?.nodes.some(n=>selected.has(n.id)&&n.hasExpandedOutputs) ?? false;
   const missing=plan?.nodes.filter(n=>selected.has(n.id)&&n.missingPrompt)??[];
   const layout=useMemo(()=>{
     if(!plan)return undefined;
@@ -55,7 +58,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
   const toggle=(id:string)=>{if(!busy&&!disabled&&!plan?.nodes.find(n=>n.id===id)?.required){setSeeds(ids=>ids.includes(id)?ids.filter(v=>v!==id):[...ids,id]);setKey(randomId());}};
   const start=async()=>{
     if(!plan||busy||disabled||missing.length)return;setBusy(true);setError('');
-    try{await request('/v1/runs/'+encodeURIComponent(run.id)+'/start',{nodeIds:[...selected],expectedExecutionRevision:plan.executionRevision,idempotencyKey:key},'POST');onChanged();setOpen(false);}
+    try{await request('/v1/runs/'+encodeURIComponent(run.id)+'/start',{nodeIds:[...selected],expectedExecutionRevision:plan.executionRevision,idempotencyKey:key,preserveHistoricalOutputs:keepOutputs},'POST');onChanged();setOpen(false);}
     catch(e){setError(e instanceof Error?e.message:String(e));onError(e);}
     finally{setBusy(false);}
   };
@@ -95,6 +98,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
       <div className="execution-depth-summary"><span>{t('Execution order')}</span><span>{t('{count} nodes total', { count: selected.size })}</span></div>
       {missing.length>0&&<div role="alert"><p>{t('The following nodes are missing prompts. Fill them in before starting. They will be checked again automatically after saving.')}</p><ul>{missing.map(n=><li key={n.id}>{n.title} <button className="secondary-button" disabled={disabled||busy||!onEditNode} onClick={()=>onEditNode?.(n.id)} aria-label={t('Fill in the prompt for {title}', { title: n.title })}>{t('Fill in')}</button></li>)}</ul></div>}
       <ol>{layout.order.filter(id=>selected.has(id)).map(id=><li key={id}>{plan.nodes.find(n=>n.id===id)!.title}</li>)}</ol>
+      <label className="run-preserve-outputs"><input type="checkbox" checked={keepOutputs} disabled={busy||disabled} onChange={event=>{setPreserve(event.target.checked);setKey(randomId());}}/><span>{t('Keep historical outputs')}</span></label>
       <div className="button-row"><button className="primary-button" disabled={busy||disabled||missing.length>0} onClick={()=>void start()}>{busy?t('Confirming…'):t('Confirm and start execution')}</button><button className="secondary-button" disabled={busy} onClick={()=>setOpen(false)}>{t('Not now')}</button></div>
     </>}
   </section>;

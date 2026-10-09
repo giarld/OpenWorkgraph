@@ -107,6 +107,11 @@ export class RuntimeBackend implements SchedulerBackend {
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
     const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, skills: snapshot.skills ?? [], ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
       onSnapshot: value => this.snapshot(value, context, run.id),
+      setNodeTitle: title => {
+        const token = this.runs.runtime(run.id);
+        if (token.epoch !== context.epoch) return false;
+        return this.runs.updateNodeTitle(run.id, token, title);
+      },
       onInteraction: value => {
         if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(run.id)) return;
         const token = this.runs.runtime(run.id);

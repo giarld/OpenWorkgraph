@@ -4,6 +4,7 @@ import type { ApiResult } from './api.js';
 import { Auth } from './auth.js';
 import { WorkflowRuntime } from './runtime.js';
 import { readJson } from './http.js';
+import { atomic } from './persistence/database.js';
 import { ServiceError } from './errors.js';
 import { Repositories, canonicalJson } from './persistence/repositories.js';
 import { BackendError } from './backend/types.js';
@@ -135,7 +136,7 @@ export class RunApi {
       if(graph[3]==='input-preview'&&request.method==='POST'){fields(body,['nodeId','excludeFiles']);if(body.excludeFiles!==undefined&&typeof body.excludeFiles!=='boolean')throw new ServiceError('INVALID_REQUEST','无效输入预检选项');return ok(read(()=>rt.inputs.inputPreview(scope.graphId,text(body.nodeId),body.excludeFiles===true)));}
       if(graph[3]==='runs'&&request.method==='GET')return ok(read(()=>rt.runs.list(scope.projectId).filter(value=>value.graphId===scope.graphId)));
       if(graph[3]==='runs'&&request.method==='POST'){
-        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute']);
+        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs']);
         const route=imageRoute(body);
         const input={...body,...scope,...(route?{imageRoute:route}:{})} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
         let prior: Json | undefined;
@@ -147,7 +148,9 @@ export class RunApi {
           prior=read(()=>repo.replay(principal+':run.submit',input.idempotencyKey,{...body,...scope} as Json));
         }
         if(prior!==undefined)return ok(prior && typeof prior==='object' && !Array.isArray(prior) && 'executionStart' in prior ? read(()=>rt.runs.get(String(prior.id))) : prior);
-        const commit=await rt.prepareSubmission(input);return ok(read(()=>commit(principal)));
+        const cleanups: (() => unknown)[] = [];
+        try { const commit=await rt.prepareSubmission(input, cleanups);return ok(read(()=>commit(principal))); }
+        finally { if (cleanups.length) atomic(rt.db, () => { for (const cleanup of cleanups) cleanup(); }); }
       }
     }
     if(history&&request.method==='POST'){
@@ -161,14 +164,17 @@ export class RunApi {
         const current=read(()=>rt.runs.get(id));
         if(request.method==='GET'&&action==='execution-plan')return ok(read(()=>rt.executionChains.forRun(id)));
         if(request.method==='POST'&&action==='start'){
-          fields(body,['nodeIds','expectedExecutionRevision','idempotencyKey']);
+          fields(body,['nodeIds','expectedExecutionRevision','idempotencyKey','preserveHistoricalOutputs']);
+          if(body.preserveHistoricalOutputs!==undefined&&typeof body.preserveHistoricalOutputs!=='boolean')throw new ServiceError('INVALID_REQUEST','无效历史输出选项。');
           const key=text(body.idempotencyKey);
           if(!Array.isArray(body.nodeIds)||body.nodeIds.some(v=>typeof v!=='string')||!Number.isSafeInteger(body.expectedExecutionRevision))throw new ServiceError('INVALID_REQUEST','无效执行范围。');
-          const data={nodeIds:body.nodeIds,expectedExecutionRevision:body.expectedExecutionRevision};
+          const data={nodeIds:body.nodeIds,expectedExecutionRevision:body.expectedExecutionRevision,...(body.preserveHistoricalOutputs===undefined?{}:{preserveHistoricalOutputs:body.preserveHistoricalOutputs})};
           const prior=read(()=>repo.replay(principal+':run.start:'+id,key,data as Json));
           if(prior!==undefined)return ok(read(()=>rt.runs.get(id)));
-          const commit=await rt.prepareExecutionStart(id,body.nodeIds as string[],body.expectedExecutionRevision as number);
-          return ok(read(()=>commit(principal,key)));
+          const cleanups: (() => unknown)[] = [];
+          try { const commit=await rt.prepareExecutionStart(id,body.nodeIds as string[],body.expectedExecutionRevision as number,body.preserveHistoricalOutputs as boolean|undefined,cleanups);
+            return ok(read(()=>commit(principal,key))); }
+          finally { if(cleanups.length)atomic(rt.db,()=>{for(const cleanup of cleanups)cleanup();}); }
         }
         if(request.method==='GET'&&!action)return ok(current);
         if(request.method==='GET'&&action==='history')return ok(read(()=>rt.history.records(id)));

@@ -29,10 +29,10 @@ export class ExecutionChains {
       // Already submitted runs use their frozen prompt, not subsequent node edits.
       const submitted = n.id === targetId && exclude || history.find(r => r.status === 'accepted' && ['manual','confirm'].includes(r.executionStart ?? ''))?.id;
       const prompt = submitted ? this.runs.snapshot(submitted).prompt : content.prompt;
-      return { id:n.id, title:typeof content.title === 'string' ? content.title : n.id, required:n.id === targetId || !history.some(r => r.status === 'succeeded'), hasRun:history.some(r => r.status !== 'accepted'), missingPrompt:typeof prompt !== 'string' || !prompt.trim() };
+      return { id:n.id, title:typeof content.title === 'string' ? content.title : n.id, required:n.id === targetId || !history.some(r => r.status === 'succeeded'), hasRun:history.some(r => r.status !== 'accepted'), missingPrompt:typeof prompt !== 'string' || !prompt.trim(), hasExpandedOutputs:graph.edges.some(e=>e.kind==='delivery'&&e.sourceId===n.id) };
     });
     const requiresConfirmation = nodes.some(n => n.hasRun) && nodes.length > 1;
-    return { targetId, executionRevision:graph.executionRevision, nodes, edges:edges.filter(e => ids.has(e.sourceId) && ids.has(e.targetId)), initialNodeIds:nodes.filter(n => n.required).map(n => n.id), requiresConfirmation };
+    return { targetId, executionRevision:graph.executionRevision, nodes, edges:edges.filter(e => ids.has(e.sourceId) && ids.has(e.targetId)), initialNodeIds:nodes.filter(n => n.required).map(n => n.id), requiresConfirmation, ...(exclude && typeof this.runs.runtime(exclude).details.preserveHistoricalOutputs === 'boolean' ? {preserveHistoricalOutputs:this.runs.runtime(exclude).details.preserveHistoricalOutputs as boolean} : {}) };
   }
   forRun(id: string) { const run = this.runs.get(id); return this.plan(this.graphs.snapshot(run), run.nodeId, id); }
   cancel(id: string, key: string, principal: string): Run {
@@ -68,9 +68,15 @@ export class ExecutionChains {
     this.runs.repo.appendEvent({eventId:randomUUID(),type:'run.changed',projectId:run.projectId,graphId:run.graphId,entityId:id,revision:runtime.revision+1,occurredAt:new Date().toISOString(),payload:run as unknown as Json});
   }
   /** Prepare every missing run before entering the auth transaction. No partial batch on failure. */
-  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun) => Promise<(principal:string)=>Run>) {
+  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun) => Promise<(principal:string)=>Run>, preserveHistoricalOutputs = false, prepareHistory?: (nodeId: string, copies: Map<string, string>) => Promise<() => void>) {
     const missing = plan.nodes.filter(n => selected.includes(n.id) && n.missingPrompt);
     if (missing.length) throw new ServiceError('INPUT_BLOCKED', '请先填写以下节点的提示词：' + missing.map(n => n.title).join('、'));
+    const historyCopies: (() => void)[] = [];
+    const preservedNodes = new Map<string, string>();
+    if (preserveHistoricalOutputs) {
+      if (!prepareHistory) throw new ServiceError('INPUT_BLOCKED', 'Historical outputs must be prepared before starting');
+      for (const id of selected) historyCopies.push(await prepareHistory(id, preservedNodes));
+    }
     const members = new Map<string, string>();
     const commits = new Map<string, (principal:string)=>Run>();
     for (const id of selected) {
@@ -97,6 +103,8 @@ export class ExecutionChains {
       if(target)committedMembers.set(plan.targetId,target.id);
       for(const [id,commit] of commits) if(!committedMembers.has(id))committedMembers.set(id,commit(principal).id);
       for(const id of committedMembers.values()){const run=this.runs.get(id);if(run.status!=='accepted'||!['manual','confirm'].includes(run.executionStart??''))throw new ServiceError('CONFLICT','任务已开始或已取消，请刷新。');}
+      preservedNodes.clear();
+      for (const copy of historyCopies) copy();
       const batch=committedMembers.get(plan.targetId)!;
       for(const [nodeId,id] of committedMembers){
         const dependencies=plan.edges.filter(e=>e.targetId===nodeId).map(e=>committedMembers.get(e.sourceId)??reused.get(e.sourceId)!);

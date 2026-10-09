@@ -1,12 +1,12 @@
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ProgressDialog } from '../components/ProgressDialog';
-import { Moon, Sun, PanelLeftClose, PanelLeftOpen, Settings2, Bell, Check, Layers, Download, Pencil, Trash2, Upload, Plus, RotateCcw, Server, ChevronRight, CheckCircle2, Unplug, WifiOff, CircleAlert, Copy, Archive } from "lucide-react";
-import { ArrowLeft, FolderPlus } from "lucide-react";
+import { Moon, Sun, PanelLeftClose, PanelLeftOpen, Settings, Settings2, Bell, Check, Layers, Download, Pencil, Trash2, Upload, Plus, RotateCcw, Server, ChevronRight, CheckCircle2, Unplug, WifiOff, CircleAlert, Copy, Archive } from "lucide-react";
+import { ArrowLeft, ChevronLeft, FolderPlus } from "lucide-react";
 import { randomId } from "../adapter/random";
 import { FILE_NODE_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
 import { runtimeStatus } from './runtime-status';
 import { runtimeNeedsUpgrade } from '../domain/runtime-version';
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ConnectionRegistry, RUNTIME_NAME_MAX_LENGTH, type Connection } from "../adapter/connections";
 import { createPairingIdentity, type PairingIdentity } from '../adapter/client-pairing';
 import {
@@ -139,6 +139,7 @@ export function RealApp() {
   const servicePanelOpen = rightPanel === 'management';
   const setServicePanelOpen = (value: boolean | ((open: boolean) => boolean)) =>
     setRightPanel(current => (typeof value === 'function' ? value(current === 'management') : value) ? 'management' : current === 'management' ? null : current);
+  const toggleWorkspaceManagement = () => setServicePanelOpen(open => !open);
   const [servicePage, setServicePage] = useState<"list" | "connect" | "projects">("list");
   const [managementInitialPage, setManagementInitialPage] = useState<'projects' | 'add'>('projects');
   const [managementEntry, setManagementEntry] = useState(0);
@@ -157,9 +158,32 @@ export function RealApp() {
     } catch { return null; }
   });
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number; width: number } | null>(null);
-  const sidebarWidthLimit = () => Math.max(220, Math.min(480, window.innerWidth - 320));
+  const sidebarTabs = useRef<HTMLDivElement>(null);
+  const [sidebarMinimumWidth, setSidebarMinimumWidth] = useState(320);
+  useLayoutEffect(() => {
+    const tabs = sidebarTabs.current;
+    if (!tabs) return;
+    const measure = () => {
+      const sidebar = tabs.parentElement!;
+      if (sidebar.classList.contains('left-sidebar-collapsed')) return;
+      const style = getComputedStyle(tabs);
+      const buttons = Array.from(tabs.children);
+      // Include labels, collapse button, gaps, padding and the sidebar border.
+      const width = buttons.reduce((sum, button) => sum + button.getBoundingClientRect().width, 0)
+        + (buttons.length - 1) * parseFloat(style.columnGap)
+        + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+        + sidebar.offsetWidth - sidebar.clientWidth;
+      setSidebarMinimumWidth(Math.ceil(width));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(tabs);
+    Array.from(tabs.children).forEach(button => observer.observe(button));
+    return () => observer.disconnect();
+  }, [language]);
+  const sidebarWidthLimit = () => Math.max(sidebarMinimumWidth, Math.min(480, window.innerWidth - 320));
   const resizeSidebar = (width: number) => {
-    const next = Math.max(220, Math.min(sidebarWidthLimit(), width));
+    const next = Math.max(sidebarMinimumWidth, Math.min(sidebarWidthLimit(), width));
     if (sidebarResize.current) sidebarResize.current.width = next;
     setLeftSidebarWidth(next);
   };
@@ -942,6 +966,9 @@ export function RealApp() {
       }}/>
       <header className="real-header topbar-right">
         <div className="runtime-header-actions">
+          <button type="button" className="icon-button panel" aria-label={t('Workspace settings')} title={t('Workspace settings')} aria-expanded={servicePanelOpen} aria-controls="service-panel" onClick={toggleWorkspaceManagement}>
+            <Settings size={18} aria-hidden="true"/>
+          </button>
           <button className="icon-button panel desktop-notification-button" aria-label={desktopNotificationsEnabled ? t('Disable desktop notifications') : t('Enable desktop notifications')} title={desktopNotificationsEnabled ? t('Disable desktop notifications') : t('Enable desktop notifications')} aria-pressed={desktopNotificationsEnabled}
             onClick={() => {
               if (desktopNotificationsEnabled) {
@@ -983,7 +1010,7 @@ export function RealApp() {
           <button className="icon-button panel" aria-label={t('Toggle theme')} title={t('Toggle theme')} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18}/> : <Moon size={18}/>}</button>
         </div>
         <div className="runtime-queue-dock">
-          <button type="button" className="runtime-current-status panel" aria-label={t('Workspace management')} aria-expanded={servicePanelOpen} aria-controls="service-panel" aria-describedby="runtime-status-tooltip" data-state={activeRuntimeStatus.state} onClick={() => setServicePanelOpen(v => !v)}>
+          <button type="button" className="runtime-current-status panel" aria-label={t('Workspace management')} aria-expanded={servicePanelOpen} aria-controls="service-panel" aria-describedby="runtime-status-tooltip" data-state={activeRuntimeStatus.state} onClick={toggleWorkspaceManagement}>
             <span className="runtime-status-light" aria-hidden="true" />
             <span className="runtime-status-name">{activeRuntimeStatus.name}</span>
             <span id="runtime-status-tooltip" className="runtime-status-tooltip panel" role="tooltip">{activeRuntimeStatus.details}</span>
@@ -1015,23 +1042,15 @@ export function RealApp() {
         onDismiss={dismissToast}
       />
       <div className="real-layout">
-        <aside className={'real-sidebar left-sidebar' + (leftOpen && page === 'editor' ? '' : ' left-sidebar-collapsed')} aria-label={t('Work Graph sidebar')} aria-hidden={!leftOpen || page !== 'editor'} inert={!leftOpen || page !== 'editor'} style={{ width: leftOpen && page === 'editor' ? leftSidebarWidth ?? undefined : 0 }}>
-          <div className="sidebar-tabs has-skills">
+        <aside className={'real-sidebar left-sidebar' + (leftOpen && page === 'editor' ? '' : ' left-sidebar-collapsed')} aria-label={t('Work Graph sidebar')} aria-hidden={!leftOpen || page !== 'editor'} inert={!leftOpen || page !== 'editor'} style={{ '--sidebar-minimum-width': `${sidebarMinimumWidth}px`, width: leftOpen && page === 'editor' ? Math.max(sidebarMinimumWidth, leftSidebarWidth ?? 280) : 0 } as CSSProperties}>
+          <div ref={sidebarTabs} className="sidebar-tabs has-skills">
             <button className={tab === "canvas" ? "active" : ""} onClick={() => setTab("canvas")}>{t('Work Graph')}</button>
             <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>{t('Asset library')}</button>
             <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>{language === 'zh-CN' ? '技能库' : 'Skill library'}</button>
             <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{t('Project files')}</button>
             <button className="icon-button sidebar-collapse" aria-label={t('Collapse sidebar')} onClick={() => setLeftOpen(false)}><PanelLeftClose size={18}/></button>
           </div>
-          <div className="sidebar-brand">
-            <img
-              src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'}
-              alt=""
-              aria-hidden="true"
-            />
-            <span className="brand-version-badge sidebar-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span>
-            <h1 className="visually-hidden">OpenWorkgraph</h1>
-          </div>
+          <div className="sidebar-content">
           <div ref={setNodeSidebar} className={tab !== "canvas" ? "real-hidden" : "real-node-sidebar"}/>
           {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''}/>}
           {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position) => { void placeProjectFile(path, position).catch(onError); }}/>}
@@ -1063,15 +1082,31 @@ export function RealApp() {
               <p>{t('Select a target Work Graph to view the asset library.')}</p>
             ))}
 {tab === 'assets' && !assetsAvailable && <p className="muted">{t('Connect a Workspace and select an active project to browse the asset library. Drag local files into the Work Graph or import them from the Add node menu.')}</p>}
+          </div>
+          <footer className="sidebar-footer">
+            <button className="sidebar-library-link" aria-label={t('Work Graph library')} onClick={() => navigate(() => { enterLibrary.current(); showPage('library'); })}>
+              <Layers size={18} aria-hidden="true"/><span>{t('Work Graph library')}</span>
+              <ChevronLeft className="sidebar-library-chevron" size={16} aria-hidden="true"/>
+            </button>
+            <a className="sidebar-brand" href="./index.html" aria-label={t('Go to home')} onClick={event => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              navigate(() => { location.href = './index.html'; });
+            }}>
+              <img src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/>
+              <span className="sidebar-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span>
+              <h1 className="visually-hidden">OpenWorkgraph</h1>
+            </a>
+          </footer>
         </aside>
         {leftOpen && page === 'editor' && <div
           className="left-sidebar-resizer"
           role="separator"
           aria-label={t('Resize left sidebar')}
           aria-orientation="vertical"
-          aria-valuemin={220}
+          aria-valuemin={sidebarMinimumWidth}
           aria-valuemax={sidebarWidthLimit()}
-          aria-valuenow={Math.min(sidebarWidthLimit(), leftSidebarWidth ?? (window.innerWidth <= 1000 ? 220 : 280))}
+          aria-valuenow={Math.max(sidebarMinimumWidth, Math.min(sidebarWidthLimit(), leftSidebarWidth ?? 280))}
           tabIndex={0}
           onPointerDown={event => {
             if (event.button !== 0) return;
@@ -1096,11 +1131,11 @@ export function RealApp() {
           }}
           onKeyDown={event => {
             const width = event.currentTarget.previousElementSibling?.getBoundingClientRect().width ?? 280;
-            const next = event.key === 'ArrowLeft' ? width - 20 : event.key === 'ArrowRight' ? width + 20 : event.key === 'Home' ? 220 : event.key === 'End' ? sidebarWidthLimit() : null;
+            const next = event.key === 'ArrowLeft' ? width - 20 : event.key === 'ArrowRight' ? width + 20 : event.key === 'Home' ? sidebarMinimumWidth : event.key === 'End' ? sidebarWidthLimit() : null;
             if (next === null) return;
             event.preventDefault();
             resizeSidebar(next);
-            try { localStorage.setItem('openworkgraph:left-sidebar-width', String(Math.max(220, Math.min(sidebarWidthLimit(), next)))); } catch { /* Resizing still works without storage. */ }
+            try { localStorage.setItem('openworkgraph:left-sidebar-width', String(Math.max(sidebarMinimumWidth, Math.min(sidebarWidthLimit(), next)))); } catch { /* Resizing still works without storage. */ }
           }}
         />}
         <section className={"real-main workspace " + (page === "library" ? "library-active" : "")}>

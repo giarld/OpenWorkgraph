@@ -1,3 +1,4 @@
+import { NodeTitleInput } from '../components/NodeTitleInput';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
 import { MarkdownPreview, MarkdownPreviewProvider } from './MarkdownPreview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
@@ -1086,7 +1087,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     selectedGroups.length === selected.length &&
     canGeometry(selected);
   let canCopyText = false;
-  if (node && !locked(node.id)) {
+  if (node && node.type !== 'execution' && !locked(node.id)) {
     try {
       textCopyContent(node, content);
       canCopyText = true;
@@ -1416,11 +1417,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const unavailableReason = !props.online ? t('The Workspace is disconnected or synchronizing. Connect and try again.')
     : node?.type==='image' ? imageBlock ?? (selectedRoute.type==='codex' && !props.executionAvailable ? props.executionReason ?? t('Codex execution is unavailable.') : undefined)
     : !props.executionAvailable ? props.executionReason ?? t('Workspace execution is unavailable.') : undefined;
-  const submitNodeRun = async () => {
+  const submitNodeRun = async (preserveHistoricalOutputs?: boolean) => {
     if (!node || runDisabled) return;
     setRunning(true);
     try {
-      const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined);
+      const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined, preserveHistoricalOutputs);
       submittedNodeKeys.current.add(JSON.stringify([g.serviceId, g.projectId, g.graphId, node.id]));
       props.onRunSubmitted?.(submitted);
       if (node.type === "execution") setDetailsOpen(false);
@@ -1671,8 +1672,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         title={String(content.title ?? '')}
         action={node.type === 'execution' ? t('Run') : t('Generate')}
         disabled={runDisabled}
+        preserveOption={node.type === 'execution'}
+        defaultPreserve={g.edges.some(edge => edge.kind === 'delivery' && edge.sourceId === node.id)}
         onClose={() => setConfirmRunNodeId(undefined)}
-        onConfirm={() => { setConfirmRunNodeId(undefined); act(submitNodeRun); }}
+        onConfirm={preserve => { setConfirmRunNodeId(undefined); act(() => submitNodeRun(preserve)); }}
       />}
       {confirmUndoRunIds && <div className="modal-backdrop markdown-link-confirm-backdrop" onClick={()=>{if(!stoppingUndoRuns)setConfirmUndoRunIds(undefined);}}><section className="reference-preview panel markdown-link-confirm" role="alertdialog" aria-modal="true" aria-label={t('Undo running task')} tabIndex={-1} ref={undoRunDialog} onClick={event=>event.stopPropagation()} onKeyDown={event=>{event.stopPropagation();if(event.key==='Escape'&&!stoppingUndoRuns){event.preventDefault();setConfirmUndoRunIds(undefined);}if(event.key==='Tab'){const buttons=Array.from(undoRunDialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')??[]);const first=buttons[0],last=buttons.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}}}}>
         <div className="panel-heading"><strong>{t('Undo running task')}</strong></div>
@@ -1870,7 +1873,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             return counts;
           }, {})}
           renderToolbar={n => <div className="node-toolbar" data-canvas-interactive>
-            <input className="node-title-input" aria-label={n.type === "group" ? t("Group name") : "Node name"} value={n.type === "group" ? groupTitle : n.title} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onChange={e => n.type === "group" ? setGroupTitle(e.target.value) : edit("title", e.target.value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
+            <NodeTitleInput key={n.id} className="node-title-input" title={t("Node titles can contain up to 32 characters.")} aria-label={n.type === "group" ? t("Group name") : "Node name"} value={n.type === "group" ? groupTitle : n.title} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onValueChange={value => n.type === "group" ? setGroupTitle(value) : edit("title", value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
               onKeyDown={e => {
                 if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 e.preventDefault();
@@ -1889,7 +1892,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <button className="icon-button" aria-label="Save to asset library (independent copy)" title="Save to asset library" disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
               const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
             })}><FolderPlus size={16}/></button>}
-            {n.type !== 'group' && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label="View node content" title="View node content" onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else if (n.type === "execution" && selectedRun) props.onOpenRun?.(selectedRun); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
+            {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label="View node content" title="View node content" onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
             {n.type === 'group' && <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16}/></button>}
             <button className="icon-button" aria-label="Delete selected node" title="Delete selected node" disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
           </div>}
@@ -2116,8 +2119,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     </MarkdownPreviewProvider>
   );
 }
-function RunResubmitDialog({ title, action, disabled, onClose, onConfirm }: { title: string; action: string; disabled: boolean; onClose(): void; onConfirm(): void }) {
+function RunResubmitDialog({ title, action, disabled, preserveOption, defaultPreserve, onClose, onConfirm }: { title: string; action: string; disabled: boolean; preserveOption: boolean; defaultPreserve: boolean; onClose(): void; onConfirm(preserve: boolean): void }) {
   const {t} = useI18n();
+  const [preserve, setPreserve] = useState(defaultPreserve);
   const dialog = useRef<HTMLElement>(null);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2128,7 +2132,7 @@ function RunResubmitDialog({ title, action, disabled, onClose, onConfirm }: { ti
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); onClose(); }
     if (event.key === 'Tab') {
-      const buttons = Array.from(dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+      const buttons = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)') ?? []);
       const first = buttons[0], last = buttons.at(-1);
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -2136,7 +2140,8 @@ function RunResubmitDialog({ title, action, disabled, onClose, onConfirm }: { ti
   }}>
     <div className="panel-heading"><strong>{t('Submit this node again?')}</strong></div>
     <p>{t('“{title}” has already been submitted. Confirm to start another run.', { title })}</p>
-    <div className="button-row"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="button" className="primary-button" disabled={disabled} onClick={onConfirm}>{t('Confirm {action}', { action })}</button></div>
+    {preserveOption && <label className="run-preserve-outputs"><input type="checkbox" checked={preserve} disabled={disabled} onChange={event => setPreserve(event.target.checked)}/><span>{t('Keep historical outputs')}</span></label>}
+    <div className="button-row"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="button" className="primary-button" disabled={disabled} onClick={() => onConfirm(preserveOption && preserve)}>{t('Confirm {action}', { action })}</button></div>
   </section></div>;
 }
 function ReferenceDialog({ title, onClose, children, fitted=false, navigation }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean; navigation?: PreviewDialogNavigation }) {

@@ -5,6 +5,7 @@ import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus } from '@openwor
 import type { Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
+import { prepareOutputHistory } from './execution-output-history.js';
 import { GraphFiles } from './graph-files.js';
 import { Resources } from './resources.js';
 import { PluginRegistry } from './plugins.js';
@@ -172,15 +173,17 @@ export class WorkflowRuntime {
     if (state.status !== 'available') throw new ServiceError('NOT_IMPLEMENTED', state.reason);
   }
   /** Returns a request-scoped synchronous commit closure; no shared mutable cache. */
-  async prepareSubmission(input: SubmitRun): Promise<(principal: string) => Run> {
-    if(input.kind!=='execution')return this.prepareSingleSubmission(input);
+  async prepareSubmission(input: SubmitRun, cleanups: (() => unknown)[] = []): Promise<(principal: string) => Run> {
+    if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups);
     const graph=this.graphs.snapshot(input);
-    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false);
+    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false,cleanups);
     const plan=this.executionChains.plan(graph,input.nodeId);
     const outgoing=graph.edges.some(e=>e.kind==='execution'&&e.sourceId===input.nodeId);
-    const commit=await this.prepareSingleSubmission(input);
+    const commit=await this.prepareSingleSubmission(input, true, cleanups);
     const auto=!outgoing&&!plan.requiresConfirmation&&!plan.nodes.some(n=>n.required&&n.missingPrompt);
-    const members=auto?await this.executionChains.prepareMembers(graph,plan,this.executionChains.selection(plan,plan.initialNodeIds),undefined,request=>this.prepareSingleSubmission(request)):undefined;
+    const selected=this.executionChains.selection(plan,plan.initialNodeIds);
+    const preserve=input.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
+    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>this.prepareSingleSubmission(request,true,cleanups),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies)):undefined;
     return principal=>atomic(this.db,()=>{
       const run=this.runs.get(commit(principal).id);
       if(run.status!=='accepted'||run.executionStart==='dependencies')return run;
@@ -189,17 +192,26 @@ export class WorkflowRuntime {
       return this.runs.get(run.id);
     });
   }
-  async prepareExecutionStart(id:string,nodeIds:string[],expectedExecutionRevision:number):Promise<(principal:string,key:string)=>Run>{
+  async prepareExecutionStart(id:string,nodeIds:string[],expectedExecutionRevision:number,preserveHistoricalOutputs?:boolean,cleanups:(()=>unknown)[] = []):Promise<(principal:string,key:string)=>Run>{
+    if (preserveHistoricalOutputs !== undefined && typeof preserveHistoricalOutputs !== 'boolean') throw new ServiceError('INVALID_REQUEST', 'Invalid historical output option');
     const run=this.runs.get(id);
     if(run.status!=='accepted'||!['manual','confirm'].includes(run.executionStart??''))throw new ServiceError('CONFLICT','任务已开始或不可启动。');
     const graph=this.graphs.snapshot(run),plan=this.executionChains.plan(graph,run.nodeId,id);
     if(plan.executionRevision!==expectedExecutionRevision)throw new ServiceError('REVISION_CONFLICT','工作图已变化，请重新选择执行深度。');
-    const members=await this.executionChains.prepareMembers(graph,plan,this.executionChains.selection(plan,nodeIds),id,request=>this.prepareSingleSubmission(request));
-    return (principal,key)=>this.runs.repo.idempotent(principal+':run.start:'+id,key,{nodeIds,expectedExecutionRevision},()=>members(principal) as unknown as Json) as unknown as Run;
+    const selected=this.executionChains.selection(plan,nodeIds);
+    const preserve=preserveHistoricalOutputs ?? plan.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
+    const members=await this.executionChains.prepareMembers(graph,plan,selected,id,request=>this.prepareSingleSubmission(request,true,cleanups),preserve,(nodeId,copies)=>this.prepareChainOutputHistory({...run,kind:'execution',expectedExecutionRevision},nodeId,cleanups,copies));
+    return (principal,key)=>this.runs.repo.idempotent(principal+':run.start:'+id,key,{nodeIds,expectedExecutionRevision,...(preserveHistoricalOutputs === undefined ? {} : {preserveHistoricalOutputs})},()=>members(principal) as unknown as Json) as unknown as Run;
   }
-  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true): Promise<(principal: string) => Run> {
+  private async prepareChainOutputHistory(scope: Omit<SubmitRun, 'idempotencyKey'>, nodeId: string, cleanups: (() => unknown)[], copies: Map<string, string>) {
+    const request = {...scope,nodeId,kind:'execution' as const,idempotencyKey:randomUUID()} as SubmitRun;
+    const commit = await prepareOutputHistory(this.graphs,this.resources,request,cleanups,copies);
+    return () => commit(request,this.graphs);
+  }
+  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true, cleanups: (() => unknown)[] = []): Promise<(principal: string) => Run> {
     if (this.db.isTransaction) throw new ServiceError('CONFLICT', 'Preflight must precede the auth transaction');
     const request = structuredClone(input);
+    if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
     if(request.imageRoute && request.kind!=='image_generation')throw new ServiceError('INVALID_REQUEST','Only image tasks can select an image route');
     let apiRoute: FrozenApiImageRoute | undefined;
     if(request.kind==='image_generation'){
@@ -273,7 +285,9 @@ export class WorkflowRuntime {
       const frozen=this.imageProviders.frozen(apiRoute.providerId,apiRoute.configRevision,apiRoute.modelId);
       planOpenAiImage({route:apiRoute,model:frozen.model,prompt:scopedPreview.prompt,references:scopedPreview.resources,images:references});
     }
+    const preserveOutputs = request.preserveHistoricalOutputs && !holdExecution ? await prepareOutputHistory(this.graphs, this.resources, request, cleanups) : undefined;
     const scoped = new Runs(this.db, this.serviceId, {
+      ...(preserveOutputs ? { preserveOutputs } : {}),
       validate: (_request, context) => {
         if(apiRoute){
           const current=this.imageProviders.list().find(item=>item.id===apiRoute.providerId);

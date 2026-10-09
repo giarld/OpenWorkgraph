@@ -2,7 +2,7 @@ import { GraphDocumentVersions } from './graph-document-history.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DeleteGraph, Edge, GraphCommand, GraphScope, GraphSnapshot, Json, Node } from '@openworkgraph/protocol';
-import { WORKGRAPH_UPLOAD_MAX_BYTES, TERMINAL_RUN_STATUSES, executionOrder } from '@openworkgraph/protocol';
+import { WORKGRAPH_UPLOAD_MAX_BYTES, TERMINAL_RUN_STATUSES, executionOrder, limitNodeContentTitle, limitNodeTitleOperations } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
@@ -215,6 +215,22 @@ export class Graphs {
     }) as {graphId:string;deleted:true};
   }
   /** Submit owns the transaction; retirement never edits frozen snapshots or Run files. */
+  executionOutputs(scope: GraphScope, executionNodeId: string): Node[] {
+    this.scope(scope);
+    const snapshot = this.snapshot(scope);
+    const nodes = new Map([...snapshot.nodes, ...(snapshot.hiddenExecutionOutputs ?? []).map(output => output.node)].map(node => [node.id, node]));
+    return this.db.prepare('SELECT n.id FROM execution_outputs o JOIN nodes n ON n.id=o.node_id WHERE o.execution_node_id=? AND n.graph_id=? ORDER BY n.created_at,n.creation_order').all(executionNodeId,scope.graphId).map(row => nodes.get(String(row['id']))!);
+  }
+  /** Immutable history copies retain successor links, but are never current outputs. */
+  assertOutputPreservation(scope: GraphScope, executionNodeId: string, prepared: Node[]): void {
+    if (!this.db.isTransaction) throw new Error('Output preservation requires a transaction');
+    const outputs = this.executionOutputs(scope, executionNodeId);
+    if (canonicalJson(outputs as unknown as Json) !== canonicalJson(prepared as unknown as Json)) throw new ServiceError('REVISION_CONFLICT', 'Outputs changed while preserving history');
+    for (const output of outputs) {
+      this.assertNodeEditable(output.id);
+      for (const edge of this.db.prepare('SELECT target_id FROM edges WHERE source_id=?').all(output.id)) this.assertNodeEditable(String(edge['target_id']));
+    }
+  }
   retireExecutionOutputs(scope:GraphScope,executionNodeId:string):void {
     if(!this.db.isTransaction)throw new Error('Output retirement requires a transaction');
     const outputs=this.db.prepare('SELECT o.node_id FROM execution_outputs o JOIN nodes n ON n.id=o.node_id WHERE o.execution_node_id=? AND n.graph_id=?').all(executionNodeId,scope.graphId);
@@ -365,6 +381,7 @@ export class Graphs {
   }
   /** Trusted publication/import only. Public commands cannot create delivery edges/read-only nodes. */
   insertNode(scope:GraphScope,node:Node,trusted=false):void {
+    node={...node,content:limitNodeContentTitle(node.content)};
     identifier(node.id);if(typeof node.type!=='string'||!node.type||node.type.length>128||!Number.isSafeInteger(node.schemaVersion)||node.schemaVersion<1||node.contentVersion!==1)throw new ServiceError('INVALID_REQUEST','节点类型或版本无效。');
     if(node.readOnly&&!trusted)throw new ServiceError('INVALID_REQUEST','客户端不能伪造服务只读产出。');position(node.x);position(node.y);boundedContent(node.content);
     if(node.width!==undefined)nodeDimension(node.width);if(node.height!==undefined)nodeDimension(node.height);
@@ -421,6 +438,7 @@ export class Graphs {
     const lifecycle=command.operations.some(op=>['graph.archive','graph.trash'].includes(op.type));
     if(lifecycle&&command.operations.length!==1)throw new ServiceError('INVALID_REQUEST','生命周期转换必须单独提交。');
     return this.repo.idempotent(principal+':graph.command:'+command.graphId,command.idempotencyKey,command as unknown as Json,()=>{
+      command={...command,operations:limitNodeTitleOperations(command.operations)};
       const graph=lifecycle?this.scope(command):this.writable(command);
       const historyBefore=this.history.capture(command);
       if(lifecycle)assertProjectWritable(this.db,command.projectId);

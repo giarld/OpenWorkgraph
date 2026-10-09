@@ -1,3 +1,4 @@
+import { limitNodeTitle } from '../../../packages/protocol/src/node-title';
 import {
   forwardRef,
   memo,
@@ -10,6 +11,7 @@ import {
   type PointerEvent as PE,
 } from "react";
 import { groupAtCenter, insetNodePosition } from './group-drop';
+import { GRID_SIZE, snapNodeMove } from './move-snap';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import {
   Minus,
@@ -142,8 +144,8 @@ type Gesture = {
 } & (
   | { kind: "pan" }
   | { kind: "box"; initial: string[] }
-  | { kind: "move"; nodes: WorkNode[]; origins: WorkNode[] }
-  | { kind: "resize"; node: WorkNode; corner: ResizeCorner }
+  | { kind: "move"; nodes: WorkNode[]; origins: WorkNode[]; anchorId: string; snapToGrid: boolean; clickSelection?: string[] }
+  | { kind: "resize"; node: WorkNode; corner: ResizeCorner; snapToGrid: boolean; shiftKey: boolean }
   | { kind: "link"; node: WorkNode; port: "input" | "output" | "chain-input" | "chain-output" }
 );
 const INTERACTIVE =
@@ -158,6 +160,13 @@ const acceptsInput = (node: WorkNode) =>
 const suppliesOutput = (node: WorkNode) =>
   node.type !== "execution" && node.type !== "group";
 const resizeMinimum = (_node: WorkNode): Size => ({ width: 220, height: 160 });
+type MoveGesture = Extract<Gesture, { kind: 'move' }>;
+function moveGeometry(g: MoveGesture) {
+  const delta = { x: (g.current.x - g.start.x) / g.viewport.k, y: (g.current.y - g.start.y) / g.viewport.k };
+  if (!g.snapToGrid) return delta;
+  const anchor = g.nodes.find(n => n.id === g.anchorId) ?? g.nodes[0];
+  return snapNodeMove(anchor, delta);
+}
 
 /** Node UI has no viewport dependency; pan/zoom only transforms the world layer. */
 const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRenderer, nodeRenderKey, groupDropTarget, linkTargetId, linkPort }: {
@@ -433,6 +442,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       .sort((a, b) => Number(b.type === "group") - Number(a.type === "group")),
     [props.graph.nodes, pendingLayout, draft]);
     const nodeById = new globalThis.Map(nodes.map((n) => [n.id, n]));
+    const selectedNodeIds = useMemo(() => new Set(props.selectedIds), [props.selectedIds]);
     const toolbarNode = props.selectedIds.length === 1 && !gesture
       ? nodeById.get(props.selectedIds[0])
       : undefined;
@@ -485,6 +495,33 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       cancelViewportAnimation();
       writeViewport(v);
     }
+    useEffect(() => {
+      const canvas = root.current;
+      if (!canvas) return;
+      const focusInputPanel = (event: Event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement) ||
+          !target.matches('textarea:not(:disabled):not([readonly]),input:not(:disabled):not([readonly]),[contenteditable="true"]')) return;
+        const panel = target.closest<HTMLElement>('.owg-node-panel');
+        const { viewport, size } = current.current;
+        if (!panel || viewport.k >= 0.9) return;
+        const bounds = panel.getBoundingClientRect(), canvasBounds = canvas.getBoundingClientRect();
+        const centerX = (bounds.left + bounds.width / 2 - canvasBounds.left - viewport.x) / viewport.k;
+        const top = (bounds.top - canvasBounds.top - viewport.y) / viewport.k;
+        const next = { x: size.width / 2 - centerX, y: size.height / 2 - top, k: 1 };
+        const pending = viewportAnimation.current?.target;
+        if (pending && pending.k === next.k && Math.abs(pending.x - next.x) < 0.01 && Math.abs(pending.y - next.y) < 0.01) return;
+        animateViewport(next, 140);
+      };
+      // Native textareas emit input; rich prompts also report custom edits
+      // such as Enter, paste and undo that do not emit a native input event.
+      canvas.addEventListener('input', focusInputPanel, true);
+      canvas.addEventListener('owg-prompt-edit', focusInputPanel, true);
+      return () => {
+        canvas.removeEventListener('input', focusInputPanel, true);
+        canvas.removeEventListener('owg-prompt-edit', focusInputPanel, true);
+      };
+    }, []);
     function relative(client: Point): Point {
       const r = root.current?.getBoundingClientRect();
       return { x: client.x - (r?.left ?? 0), y: client.y - (r?.top ?? 0) };
@@ -647,6 +684,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     }, []);
     useEffect(() => {
       const down = (e: KeyboardEvent) => {
+        if (e.key === primaryKey) updateSnapModifier(e);
         if (interactive(e.target) || e.defaultPrevented) return;
         if (e.code === "Space") {
           e.preventDefault();
@@ -655,6 +693,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         if (e.key === primaryKey) setModifierDown(true);
       };
       const up = (e: KeyboardEvent) => {
+        if (e.key === primaryKey) updateSnapModifier(e);
         if (e.code === "Space") setSpace(false);
         if (e.key === primaryKey) setModifierDown(false);
       };
@@ -755,6 +794,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             node,
             corner: target.closest<HTMLElement>("[data-resize]")!.dataset
               .resize as ResizeCorner,
+            snapToGrid: primaryModifier(event),
+            shiftKey: event.shiftKey,
           });
           return;
         }
@@ -766,13 +807,19 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           : props.selectedIds.includes(node.id)
             ? props.selectedIds
             : [node.id];
-        props.onSelect(ids);
-        if (ids.includes(node.id) && (!props.canMoveNodes || props.canMoveNodes(ids)))
+        const deferDeselect = primaryModifier(event) && !event.shiftKey && props.selectedIds.includes(node.id);
+        const moveIds = deferDeselect ? props.selectedIds : ids;
+        const canMove = moveIds.includes(node.id) && (!props.canMoveNodes || props.canMoveNodes(moveIds));
+        props.onSelect(canMove ? moveIds : ids);
+        if (canMove)
           begin(event, {
             ...base,
             kind: "move",
-            nodes: nodes.filter((n) => ids.includes(n.id)),
+            nodes: nodes.filter((n) => moveIds.includes(n.id)),
             origins: nodes,
+            anchorId: nodes.find(n => moveIds.includes(n.id) && n.memberIds?.includes(node.id))?.id ?? node.id,
+            snapToGrid: primaryModifier(event),
+            clickSelection: deferDeselect ? ids : undefined,
           });
       } else
         begin(event, {
@@ -781,12 +828,47 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           initial: event.shiftKey || primaryModifier(event) ? props.selectedIds : [],
         });
     }
+    function updateMoveDraft(g: MoveGesture) {
+      const delta = moveGeometry(g);
+      const affected = new Set(g.nodes.flatMap(n => [n.id, ...(n.memberIds ?? [])]));
+      setDraft(Object.fromEntries(g.origins.filter(n => affected.has(n.id))
+        .map(n => [n.id, { x: n.x + delta.x, y: n.y + delta.y }])));
+    }
+    function updateResizeDraft(g: Extract<Gesture, { kind: 'resize' }>) {
+      setDraft({
+        [g.node.id]: resizeRect(
+          g.node,
+          { x: g.current.x - g.start.x, y: g.current.y - g.start.y },
+          g.viewport.k,
+          g.corner,
+          g.node.type === "image" ? g.shiftKey : g.node.type === "video",
+          resizeMinimum(g.node),
+          g.snapToGrid ? GRID_SIZE / 2 : undefined,
+        ),
+      });
+    }
+    function updateSnapModifier(event: KeyboardEvent) {
+      const active = gestureRef.current;
+      if (!active || (active.kind !== 'move' && active.kind !== 'resize')) return;
+      const next = active.kind === 'move'
+        ? { ...active, snapToGrid: primaryModifier(event) }
+        : { ...active, snapToGrid: primaryModifier(event), shiftKey: event.shiftKey };
+      gestureRef.current = next;
+      setGesture(next);
+      if (next.moved) {
+        if (next.kind === 'move') updateMoveDraft(next);
+        else updateResizeDraft(next);
+      }
+    }
     function move(event: PE) {
       lastPointer.current = world({ x: event.clientX, y: event.clientY });
       const old = gestureRef.current;
       if (!old || old.pointer !== event.pointerId) return;
       const g = {
         ...old,
+        ...(old.kind === 'move' ? { snapToGrid: primaryModifier(event) } : {}),
+        ...(old.kind === 'resize' ? { snapToGrid: primaryModifier(event) } : {}),
+        ...(old.kind === 'resize' ? { shiftKey: event.shiftKey } : {}),
         current: { x: event.clientX, y: event.clientY },
         moved:
           old.moved ||
@@ -804,31 +886,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           y: g.viewport.y + dy,
         });
       if (g.kind === "move" && g.moved) {
-        const affected = new Set(
-          g.nodes.flatMap((n) => [n.id, ...(n.memberIds ?? [])]),
-        );
-        setDraft(
-          Object.fromEntries(
-            g.origins
-              .filter((n) => affected.has(n.id))
-              .map((n) => [
-                n.id,
-                { x: n.x + dx / g.viewport.k, y: n.y + dy / g.viewport.k },
-              ]),
-          ),
-        );
+        updateMoveDraft(g);
       }
-      if (g.kind === "resize")
-        setDraft({
-          [g.node.id]: resizeRect(
-            g.node,
-            { x: dx, y: dy },
-            g.viewport.k,
-            g.corner,
-            g.node.type === "image" ? event.shiftKey : g.node.type === "video",
-            resizeMinimum(g.node),
-          ),
-        });
+      if (g.kind === "resize") updateResizeDraft(g);
       if (g.kind === "box") {
         const box = rectFromPoints(world(g.start), world(g.current));
         props.onSelect([
@@ -890,6 +950,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       const g: Gesture = !cancelled && event.type === "pointerup" && (active.kind === "move" || active.kind === "resize")
         ? {
             ...active,
+            ...(active.kind === 'move' ? { snapToGrid: primaryModifier(event) } : {}),
+            ...(active.kind === 'resize' ? { snapToGrid: primaryModifier(event) } : {}),
+            ...(active.kind === 'resize' ? { shiftKey: event.shiftKey } : {}),
             current: release,
             moved: active.moved || Math.hypot(release.x - active.start.x, release.y - active.start.y) > 3,
           }
@@ -902,7 +965,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         attempt(() => {
           const p = current.current.props,
             a = p.adapter;
+          if (g.kind === "move" && !g.moved && g.clickSelection) p.onSelect(g.clickSelection);
           if (g.kind === "move" && g.moved) {
+            const delta = moveGeometry(g);
             const members = new Set(g.nodes.flatMap((n) => n.memberIds ?? []));
             const moves = g.nodes
               .filter(
@@ -912,13 +977,13 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               )
               .map((n) => ({
                 id: n.id,
-                x: n.x + (g.current.x - g.start.x) / g.viewport.k,
-                y: n.y + (g.current.y - g.start.y) / g.viewport.k,
+                x: n.x + delta.x,
+                y: n.y + delta.y,
               }));
             const affected = new Set(g.nodes.flatMap(n => [n.id, ...(n.memberIds ?? [])]));
             const bounds = Object.fromEntries(g.origins.filter(n => affected.has(n.id)).map(n => [n.id, {
-              x: n.x + (g.current.x - g.start.x) / g.viewport.k,
-              y: n.y + (g.current.y - g.start.y) / g.viewport.k,
+              x: n.x + delta.x,
+              y: n.y + delta.y,
             }]));
             commitLayout(bounds, () => {
               if (p.onMove) return p.onMove(moves);
@@ -932,9 +997,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               g.viewport.k,
               g.corner,
               g.node.type === "image"
-                ? event.shiftKey
+                ? g.shiftKey
                 : g.node.type === "video",
               resizeMinimum(g.node),
+              g.snapToGrid ? GRID_SIZE / 2 : undefined,
             );
             commitLayout({ [g.node.id]: next }, () => {
               if (p.onResize) return p.onResize(g.node.id, next);
@@ -1266,7 +1332,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               else {
                 const n = props.adapter!.createNode(props.graph.id, {
                   type: "text",
-                  title: text.trim().slice(0, 32) || t("Pasted text"),
+                  title: limitNodeTitle(text.trim()) || t("Pasted text"),
                   content: text,
                   ...pastePosition(),
                 });
@@ -1304,7 +1370,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         <div
           className={"owg-grid " + (props.backgroundMode ?? "lines")}
           style={{
-            backgroundSize: 48 * viewport.k + "px " + 48 * viewport.k + "px",
+            backgroundSize: GRID_SIZE * viewport.k + "px " + GRID_SIZE * viewport.k + "px",
             backgroundPosition: viewport.x + "px " + viewport.y + "px",
           }}
         />
@@ -1330,7 +1396,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               return (
                 <g
                   key={edge.id}
-                  className={selectedEdge === edge.id ? "selected" : ""}
+                  className={[
+                    selectedEdge === edge.id ? "selected" : "",
+                    selectedNodeIds.has(edge.source) || selectedNodeIds.has(edge.target) ? "node-connected" : "",
+                  ].filter(Boolean).join(" ")}
                 >
                   {edge.kind === "delivery" && (
                     <title>{t("Task output: hiding an artifact disconnects it; show it again from the output folder")}</title>

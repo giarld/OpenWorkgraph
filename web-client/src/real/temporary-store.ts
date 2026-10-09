@@ -8,6 +8,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { GraphBundle, Json, CopiedProvenance } from '../../../packages/protocol/src/index';
 import { sniffResourceMime } from '../../../packages/protocol/src/resource-mime';
+import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
 import { importedGraphTitle } from '../../../packages/protocol/src/graph-title';
 import { FILE_NODE_MAX_BYTES, importedNodeType } from '../domain/file-types';
 import { graphPath, type GraphSnapshot, type GraphOperation, type Request } from './contracts';
@@ -51,6 +52,7 @@ const base64 = (bytes: Uint8Array) => {
 
 /** Pure, atomic command reducer shared by the IndexedDB writer and tests. */
 export function applyTemporaryOperations(source: GraphSnapshot, operations: GraphOperation[]): GraphSnapshot {
+  operations = limitNodeTitleOperations(operations);
   const graph = structuredClone(source);
   let execution = false, layout = false;
   const node = (id: string) => {

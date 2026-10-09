@@ -153,6 +153,7 @@ export function resizeRect(
   corner: ResizeCorner,
   keepRatio = false,
   minimum: Size = { width: 220, height: 160 },
+  snapGrid?: number,
 ): Rect {
   const dx = delta.x / zoom,
     dy = delta.y / zoom,
@@ -171,6 +172,31 @@ export function resizeRect(
     if (width < minimum.width) {
       width = minimum.width;
       height = width / ratio;
+    }
+  }
+  if (snapGrid && snapGrid > 0) {
+    const right = rect.x + rect.width;
+    const bottom = rect.y + rect.height;
+    // Snap the dragged edge in world coordinates, preserving the opposite corner.
+    const snapSize = (size: number, fixed: number, negative: boolean, min: number) => {
+      const edge = Math.round((fixed + (negative ? -size : size)) / snapGrid) * snapGrid;
+      const limit = negative
+        ? Math.floor((fixed - min) / snapGrid) * snapGrid
+        : Math.ceil((fixed + min) / snapGrid) * snapGrid;
+      return negative ? fixed - Math.min(edge, limit) : Math.max(edge, limit) - fixed;
+    };
+    const ratio = rect.width / Math.max(1, rect.height);
+    if (!keepRatio || Math.abs(dx) >= Math.abs(dy)) {
+      width = snapSize(width, left ? right : rect.x, left,
+        keepRatio ? Math.max(minimum.width, minimum.height * ratio) : minimum.width);
+    }
+    if (!keepRatio || Math.abs(dx) < Math.abs(dy)) {
+      height = snapSize(height, top ? bottom : rect.y, top,
+        keepRatio ? Math.max(minimum.height, minimum.width / ratio) : minimum.height);
+    }
+    if (keepRatio) {
+      if (Math.abs(dx) >= Math.abs(dy)) height = width / ratio;
+      else width = height * ratio;
     }
   }
   return {
