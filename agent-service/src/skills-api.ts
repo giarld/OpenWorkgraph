@@ -13,6 +13,7 @@ import { StdioRpc } from './backend/stdio.js';
 import { initialize } from './backend/capabilities.js';
 import type { WorkflowRuntime } from './runtime.js';
 import type { ApiResult } from './api.js';
+import { visualizeFeatureCandidates } from './visualize-features.js';
 
 export type { SkillCandidate } from '@openworkgraph/protocol';
 export type DiscoveredSkill = SkillCandidate & {path:string};
@@ -97,13 +98,18 @@ export class SkillsApi {
     if (!match) return { handled: false };
     this.auth.withSession(token, origin, () => undefined);
     const search = !!match[2];
-    if (request.method !== 'GET' || [...url.searchParams.keys()].some(key => !search || key !== 'query') || url.searchParams.getAll('query').length > 1) throw new ServiceError('INVALID_REQUEST', '无效的技能查询。');
+    const source = url.searchParams.get('source');
+    if (request.method !== 'GET' || [...url.searchParams.keys()].some(key => key !== 'source' && !(search && key === 'query')) || url.searchParams.getAll('query').length > 1 || url.searchParams.getAll('source').length > 1 || (source !== null && !['builtin-feature', 'openworkgraph', 'codex'].includes(source))) throw new ServiceError('INVALID_REQUEST', '无效的技能查询。');
     const row = this.db.prepare("SELECT canonical_path FROM projects WHERE id=? AND state='active'").get(match[1]!);
     if (!row || typeof row.canonical_path !== 'string') throw new ServiceError('NOT_FOUND', '项目不存在或未激活。');
     const cwd = resolve(row.canonical_path);
     const query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase();
     if (query.length > 100) throw new ServiceError('INVALID_REQUEST', '技能查询过长。');
-    const [codex,builtin] = await Promise.all([this.load(cwd),this.runtime.skills.installed()]);
+    // A source-specific search must not wait for discovery of any other source.
+    const [codex,builtin] = await Promise.all([
+      source === null || source === 'codex' ? this.load(cwd) : [],
+      source === null || source === 'openworkgraph' ? this.runtime.skills.installed() : [],
+    ]);
     const candidates: SkillCandidate[] = [...builtin.map(item=>({skillId:item.skillId,source:'openworkgraph' as const,name:item.name,description:item.description})),...codex];
     this.auth.withSession(token, origin, () => undefined);
     const seen = new Set<string>();
@@ -114,6 +120,9 @@ export class SkillsApi {
     }).sort((a, b) => (a.source === b.source ? a.name.localeCompare(b.name) : a.source === 'openworkgraph' ? -1 : 1));
     // Search suggestions are bounded; existence checks need the complete catalog.
     const visible = search ? items.slice(0, 100) : items;
-    return { handled: true, body: { items:visible.map(({skillId,source,name,description})=>({skillId,source,name,description})) } };
+    return { handled: true, body: {
+      items: visible.map(({ skillId, source, name, description }) => ({ skillId, source, name, description })),
+      features: source === null || source === 'builtin-feature' ? visualizeFeatureCandidates(query) : [],
+    } };
   }
 }

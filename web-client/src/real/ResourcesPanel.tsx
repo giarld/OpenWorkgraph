@@ -1,10 +1,11 @@
+import { useNodeViewport } from '../canvas/NodeViewport';
 import { RefreshIcon } from '../components/RefreshIcon';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ImagePreviewMetadata } from './ImagePreviewMetadata';
 import { ImagePreviewViewport } from './ImagePreviewViewport';
 import { PreviewActionButton } from './PreviewActionButton';
 import { randomId } from "../adapter/random";
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Archive, ChevronDown, ChevronLeft, ChevronRight, File, FileText, FileVideo, Image, Play, MoreHorizontal, Plus, Search, Trash2, Upload, X } from 'lucide-react';
 import './ResourcesPanel.css';
@@ -29,6 +30,45 @@ const projectPath = (id: string) => '/v1/projects/' + encodeURIComponent(id);
 const key = () => randomId();
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
 const CHUNK = 1024 * 1024;
+function AssetFilename({ name }: { name: string }) {
+  const measure = useRef<HTMLSpanElement>(null);
+  const [displayName, setDisplayName] = useState(name);
+  useLayoutEffect(() => {
+    const element = measure.current!;
+    const update = () => {
+      if (!element.clientWidth) return;
+      const maxHeight = Number.parseFloat(getComputedStyle(element).lineHeight) * 2;
+      const fits = (text: string) => {
+        element.textContent = text;
+        return element.scrollHeight <= maxHeight + 1;
+      };
+      if (fits(name)) { setDisplayName(name); return; }
+      // A leading dot (e.g. .gitignore) and a trailing dot are not extensions.
+      const dot = name.lastIndexOf('.');
+      const suffix = dot > 0 && dot < name.length - 1 ? name.slice(dot) : '';
+      const stem = suffix ? name.slice(0, dot) : name;
+      const characters = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(stem), part => part.segment);
+      let low = 0, high = characters.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (fits(characters.slice(0, middle).join('') + '…' + suffix)) low = middle;
+        else high = middle - 1;
+      }
+      setDisplayName(characters.slice(0, low).join('') + '…' + suffix);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    let active = true;
+    void document.fonts.ready.then(() => { if (active) update(); });
+    return () => { active = false; observer.disconnect(); };
+  }, [name]);
+  return <strong className="ow-assets-filename">
+    <span aria-hidden="true">{displayName}</span>
+    <span className="ow-assets-filename-full">{name}</span>
+    <span ref={measure} className="ow-assets-filename-measure" aria-hidden="true" />
+  </strong>;
+}
 function assetTypeLabel(asset: LibraryAsset): string {
   const extension = /[^.].([a-z0-9]{1,8})$/i.exec(asset.name)?.[1];
   if (extension) return extension.toUpperCase();
@@ -130,12 +170,13 @@ export function CanvasResourcePreview({ request, projectId, graphId, resourceId,
 }
 export function CanvasProjectFilePreview({ request, projectId, relativePath, mime, name, imageNode = false, onError, missingMessage }: { request: ResourceRequest; projectId: string; relativePath: string; mime: string; name: string; imageNode?: boolean; onError: (e: unknown) => void; missingMessage?: string }) {
   const { t } = useI18n();
+  const translation = useRef(t); translation.current = t;
   const [thumbnailSize, setThumbnailSize] = useState(320);
   const projectRequest = useCallback(async <T,>(path: string, _body?: unknown, method?: string): Promise<T> => {
     const load = async (kind: 'thumbnail' | 'media' | 'content') => {
       const [observation] = await request<Array<{ state: 'available' | 'missing' | 'unavailable'; bytes: number | null; changeToken: string | null }>>(projectPath(projectId) + '/files/stat', { paths: [relativePath] }, 'POST');
-      if (!observation || observation.state !== 'available') throw new Error(observation?.state === 'missing' ? missingMessage ?? t('The project file no longer exists; the reference is retained.') : t('The project file is currently unavailable.'));
-      if (typeof observation.bytes === 'number' && observation.bytes > PROJECT_FILE_PREVIEW_MAX_BYTES) throw new Error(t('Files larger than 50 MiB cannot be previewed.'));
+      if (!observation || observation.state !== 'available') throw new Error(observation?.state === 'missing' ? missingMessage ?? translation.current('The project file no longer exists; the reference is retained.') : translation.current('The project file is currently unavailable.'));
+      if (typeof observation.bytes === 'number' && observation.bytes > PROJECT_FILE_PREVIEW_MAX_BYTES) throw new Error(translation.current('Files larger than 50 MiB cannot be previewed.'));
       const query = new URLSearchParams({ path: relativePath, ...(observation.changeToken ? { cacheKey: observation.changeToken } : {}), ...(kind === 'thumbnail' ? { size: String(thumbnailSize) } : {}) });
       if (kind === 'content') {
         const result = await request<{ base64: string }>(projectPath(projectId) + '/files/content?' + query);
@@ -150,11 +191,12 @@ export function CanvasProjectFilePreview({ request, projectId, relativePath, mim
     }
     if (path.endsWith('/representation')) return { state: 'ready', text: await (await load('content')).text(), reason: null } as T;
     return { mime } as T;
-  }, [request, projectId, relativePath, mime, thumbnailSize, t, missingMessage]);
+  }, [request, projectId, relativePath, mime, thumbnailSize, missingMessage]);
   return <ResourcePreview request={projectRequest} path={'project-file:' + relativePath} mime={mime} name={name} imageNode={imageNode} cacheImages={false} thumbnailSize={thumbnailSize} onThumbnailSize={setThumbnailSize} onError={onError}/>;
 }
 const THUMBNAIL_LEVELS = [320, 640, 1280, 2560, 4096] as const;
 function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = true, thumbnailSize: suppliedThumbnailSize, onThumbnailSize, onError }: { request: ResourceRequest; path: string; mime?: string; name: string; imageNode?: boolean; cacheImages?: boolean; thumbnailSize?: number; onThumbnailSize?: (size: number) => void; onError: (e: unknown) => void }) {
+  const visible = useNodeViewport();
   const { t } = useI18n();
   const [state, setState] = useState<{ path: string; mime?: string; url?: string; text?: string; error?: string }>();
   const [retry, setRetry] = useState(0);
@@ -176,7 +218,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     onThumbnailSize?.(size);
   }, [onThumbnailSize]);
   useEffect(() => {
-    if (!imageNode) return;
+    if (!imageNode || !visible) return;
     const update = () => {
       const rect = imageButton.current?.getBoundingClientRect();
       if (!rect) return;
@@ -192,7 +234,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
     viewportObserver?.observe(world!, { attributes: true, attributeFilter: ['style'] });
     window.addEventListener('resize', update);
     return () => { observer?.disconnect(); viewportObserver?.disconnect(); window.removeEventListener('resize', update); };
-  }, [imageNode, current?.url, thumbnailSize, setSelectedThumbnailSize]);
+  }, [visible, imageNode, current?.url, thumbnailSize, setSelectedThumbnailSize]);
   useEffect(() => {
     downloadEpoch.current++;
     setDownloading(false);
@@ -269,11 +311,11 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
         setState({ path, mime: imageNode ? 'image/webp' : resolvedMime, url });
       } else {
         const representation = await request<{ state: string; text: string | null; reason: string | null }>(path + '/representation');
-        if (active) setState({ path, text: representation.state === 'ready' ? representation.text ?? '' : representation.reason ?? t('Preview is not supported for this format yet.') });
+        if (active) setState({ path, text: representation.state === 'ready' ? representation.text ?? '' : representation.reason ?? translate('Preview is not supported for this format yet.') });
       }
     })().catch(e => { if (active) { setState({ path, error: message(e) }); errors.current(e); } });
     return () => { active = false; if (transientUrl) URL.revokeObjectURL(transientUrl); };
-  }, [request, path, mime, imageNode, cacheImages, retry, thumbnailSize, t]);
+  }, [request, path, mime, imageNode, cacheImages, retry, thumbnailSize]);
   const expandable = imageNode && current?.url && current.mime?.startsWith('image/');
   return <div className={'ow-resource-preview' + (imageNode ? ' ow-image-node-preview' : '')} aria-label={t('{name} preview', { name })}>
     {!current && <p role="status">{t('Loading preview…')}</p>}
@@ -604,7 +646,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     <div className="ow-assets-groups">
       {loading ? <div className="ow-assets-empty" role="status">{ready ? t('Loading assets…') : t('Connecting to Workspace; assets will load automatically when ready…')}</div> : assets.length === 0 ? <div className="ow-assets-empty"><Archive size={24} /><strong>{error ? t('Assets are temporarily unavailable') : t('No matching assets')}</strong><p>{error ? t('Refresh and try again.') : t('No assets match the current filters.')}</p>{!error && <button onClick={() => { setSearch(''); setDeleted(false); setScope('project'); setPage(0); }}>{t('Reset filters')}</button>}</div> : groups.filter(g => g.items.length).map((group, index) => <React.Fragment key={group.id}>
         <button className="ow-assets-group-heading" style={{ top: 'calc(var(--asset-controls-height, 140px) + ' + index * 32 + 'px)' }} aria-expanded={!collapsed[group.id]} onClick={() => setCollapsed(v => ({ ...v, [group.id]: !v[group.id] }))}><ChevronDown size={14} className={collapsed[group.id] ? 'is-collapsed' : ''} /><group.Icon size={15} /><strong>{group.label}</strong><span>{group.items.length}</span></button>
-        {!collapsed[group.id] && <ul className="ow-assets-list">{group.items.map(asset => <li key={asset.id} className="ow-assets-card" title={asset.name} draggable={!disabled && !asset.deleted} onDragStart={event => {
+        {!collapsed[group.id] && <ul className="ow-assets-list">{group.items.map(asset => <li key={asset.id} className="ow-assets-card" draggable={!disabled && !asset.deleted} onDragStart={event => {
             if (!dragAllowed.current || asset.deleted || (event.target as Element).closest('.ow-assets-card-menu, .ow-assets-quick-actions')) { event.preventDefault(); return; }
             cancelDrag.current?.();
             cancelDrag.current = beginAssetDrag(event.dataTransfer, { request, projectId, graphId }, position => { if (dragAllowed.current && mounted.current) mutate(asset, 'copy', position); });
@@ -616,7 +658,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
             {!asset.deleted && <button type="button" disabled={disabled} aria-label={t('Copy independently to Work Graph: {name}', { name: asset.name })} title={t('Copy independently to Work Graph')} onClick={() => mutate(asset, 'copy')}><Plus size={18} aria-hidden="true" /></button>}
             {!asset.deleted && asset.projectId === ownerProjectId && <button type="button" disabled={disabled} aria-label={t('Delete asset: {name}', { name: asset.name })} title={t('Delete asset')} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}><Trash2 size={16} aria-hidden="true" /></button>}
           </div>
-          <div className="ow-assets-card-details"><strong title={asset.name}>{asset.name}</strong><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={() => setPreview(asset)}>{t('Preview')}</button>{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}>{t('Delete')}</button></>}</AssetMenu></div>
+          <div className="ow-assets-card-details"><AssetFilename name={asset.name} /><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={() => setPreview(asset)}>{t('Preview')}</button>{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}>{t('Delete')}</button></>}</AssetMenu></div>
         </li>)}</ul>}
       </React.Fragment>)}
       {(page > 0 || assets.length === 100) && <nav className="ow-assets-pagination" aria-label={t('Asset pagination')}><button aria-label={t('Previous page')} disabled={page === 0 || loading} onClick={() => setPage(v => v - 1)}><ChevronLeft size={16} /></button><span>{t('Page {page}', { page: page + 1 })}</span><button aria-label={t('Next page')} disabled={assets.length < 100 || loading} onClick={() => setPage(v => v + 1)}><ChevronRight size={16} /></button></nav>}

@@ -148,7 +148,15 @@ export class Scheduler {
       }
       this.runs.markBackendLaunching(run.id, this.runs.runtime(run.id));
       await this.backend.start(this.runs.get(run.id), this.runs.snapshot(run.id), this.context(run.id));
-    } catch (error) { this.uncertain(run.id, error); }
+    } catch (error) {
+      if (this.owned(run.id) && this.runs.get(run.id).status === 'preparing' && this.runs.runtime(run.id).details.backendLaunchAttempted !== true) {
+        this.runs.transition(run.id, this.runs.runtime(run.id), 'failed', {
+          error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof ServiceError ? { errorCode: error.code, errorDetails: error.details ?? null } : {}),
+        });
+        this.release(run.id);
+      } else this.uncertain(run.id, error);
+    }
   }
   private dispatch(): void {
     let claimed: Run | null;

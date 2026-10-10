@@ -7,6 +7,8 @@ import type { ImageRoute } from '../../../packages/protocol/src/index';
 import { graphPath, errorCode, messageOf } from "./contracts";
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
+import { validateVisualizeConfiguration } from './temporary-store';
+import { registerClipboardRequest, takeVisualizePasteIntents, createVisualizePasteWorkflow } from './graph-clipboard';
 export type SaveState =
   "saved" | "dirty" | "saving" | "failed" | "conflict" | "recovery";
 export interface Draft {
@@ -66,6 +68,7 @@ export class GraphEditor {
     graph: GraphSnapshot,
     private storage?: Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">,
   ) {
+    registerClipboardRequest(graph, request);
     this.confirmed = graph;
     this.storageKey = graph.serviceId === 'browser-local'
       ? `openworkgraph:temporary:drafts:${graph.graphId}`
@@ -160,6 +163,7 @@ export class GraphEditor {
     if (this.state.drafts.some(d => d.nodeId === nodeId && ["conflict", "recovery"].includes(d.state)))
       throw Error(translate("Resolve the content conflict or recovery draft first."));
     const previous = prior?.content ?? node.content;
+    if (node.type === 'visualize') validateVisualizeConfiguration(previous, content);
     if (previous && typeof previous === 'object' && !Array.isArray(previous) && content && typeof content === 'object' && !Array.isArray(content) && typeof previous.prompt === 'string' && typeof content.prompt === 'string' && previous.prompt !== content.prompt && previous.skillReferences !== undefined && JSON.stringify(previous.skillReferences) === JSON.stringify(content.skillReferences)) {
       content = { ...content, skillReferences: syncSkillReferences(previous.prompt, content.prompt, validSkillReferences(previous.prompt, previous.skillReferences)).map(ref => ({ ...ref })) };
     }
@@ -220,7 +224,15 @@ export class GraphEditor {
   }
   /** Retries retain the same immutable request body, including its idempotency key. */
   prepareCommand(operations: GraphOperation[]): () => Promise<GraphSnapshot> {
-    const submit = this.prepareQueuedCommand(operations);
+    const intents = takeVisualizePasteIntents(operations, this.state.graph);
+    const captured = structuredClone(operations);
+    const creation = captured.map(operation => {
+      if (operation.type !== 'node.create' || !intents.some(intent => intent.node.id === operation.node.id)) return operation;
+      const { page: _page, form: _form, state: _state, ...content } = operation.node.content as Record<string, Json>;
+      return { ...operation, node: { ...operation.node, content } };
+    });
+    const submit = this.prepareQueuedCommand(creation);
+    const workflow = intents.length ? createVisualizePasteWorkflow(intents, captured, this.state.graph, this.request, submit, () => this.confirmed, graph => this.acceptCommitted(graph)) : undefined;
     let pending: Promise<GraphSnapshot> | undefined, completed: GraphSnapshot | undefined;
     return () => {
       if (pending) return pending;
@@ -229,14 +241,27 @@ export class GraphEditor {
       // A content-save dependency keeps all later user commands behind it.
       const previous = this.submissionTail;
       const needsSave = this.state.drafts.length > 0;
-      const work = previous || needsSave
-        ? (previous ?? Promise.resolve()).then(async () => { await this.flush(); return submit(); })
+      const epoch = this.connectionEpoch;
+      const guard = () => { this.writable(); if (epoch !== this.connectionEpoch) throw Error(translate('The connection changed. Run the operation again.')); };
+      const work = previous || needsSave || workflow
+        ? (previous ?? Promise.resolve()).then(async () => {
+          await this.flush();
+          guard();
+          if (!workflow) return submit();
+          this.emit({ busy: true, error: '' });
+          try { return await workflow.run(guard, operations => this.prepareQueuedCommand(operations)); }
+          catch (error) {
+            if (errorCode(error) === 'REVISION_CONFLICT' && epoch === this.connectionEpoch && !this.disposed) { try { await this.refresh(); } catch { /* Preserve the original rejection. */ } }
+            this.emit({ error: messageOf(error) }); throw error;
+          }
+          finally { this.emit({ busy: this.commands.length > 0 }); }
+        })
         : submit();
       pending = work.then(result => { completed = result; return result; }).finally(() => {
         if (this.submissionTail === pending) this.submissionTail = undefined;
         pending = undefined;
       });
-      if (previous || needsSave) this.submissionTail = pending;
+      if (previous || needsSave || workflow) this.submissionTail = pending;
       return pending;
     };
   }
@@ -391,6 +416,9 @@ export class GraphEditor {
           ),
         });
         try {
+          const node = this.confirmed.nodes.find(n => n.id === draft.nodeId);
+          if (!node || node.readOnly) throw Error(translate('The original node was deleted or is read-only. The draft was kept for copying.'));
+          if (node.type === 'visualize') validateVisualizeConfiguration(node.content, draft.content);
           const result = await this.prepareQueuedCommand([{
             type: 'node.content', nodeId: draft.nodeId,
             expectedContentVersion: draft.baseVersion, content: draft.content,
@@ -443,10 +471,10 @@ export class GraphEditor {
       }
     });
   }
-  async resolve(nodeId: string, content?: Json) {
+  async resolve(nodeId: string, content?: Json, selectedDraftId?: string) {
     if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
     this.writable();
-    const selected = this.state.drafts.find(d => d.nodeId === nodeId);
+    const selected = this.state.drafts.find(d => d.nodeId === nodeId && (!selectedDraftId || d.draftId === selectedDraftId));
     if (!selected) return;
     const epoch = this.connectionEpoch;
     const node = this.state.graph.nodes.find((n) => n.id === nodeId);
@@ -465,6 +493,7 @@ export class GraphEditor {
     }
     if (!node || node.readOnly)
       throw Error(translate("The original node was deleted or is read-only. The draft was kept for copying."));
+    if (node.type === 'visualize') validateVisualizeConfiguration(node.content, content);
     const draftId = this.writerId + ':' + randomId();
     this.emit({
       drafts: this.state.drafts.map((d) =>
@@ -489,6 +518,11 @@ export class GraphEditor {
     if (epoch !== this.connectionEpoch)
       throw Error(translate("The connection changed. Click Run again."));
     const g = this.state.graph;
+    const node = g.nodes.find(n => n.id === nodeId);
+    if (!node || node.readOnly) throw Error(translate('The node does not exist or is read-only.'));
+    if (node.type === 'visualize' && kind !== 'visualize_generation') throw Error(translate('Visualization nodes can only submit page generation tasks.'));
+    if (kind === 'visualize_generation' && node.type !== 'visualize') throw Error(translate('Page generation requires a visualization node.'));
+    if (g.serviceId === 'browser-local' && kind === 'visualize_generation') throw Object.assign(Error(translate('Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.')), { code: 'TEMPORARY_SERVICE_REQUIRED' });
     const preview = await this.request<{
       canSubmit: boolean;
       issues: { reason: string }[];

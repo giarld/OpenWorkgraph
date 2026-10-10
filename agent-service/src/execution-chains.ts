@@ -6,6 +6,7 @@ import { Resources } from './resources.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
+import { readVisualizeBusinessForm } from './visualize-content.js';
 
 /** Accepted runs are durable submissions. Only confirmed, dependency-ready runs enter the queue. */
 export class ExecutionChains {
@@ -127,14 +128,43 @@ export class ExecutionChains {
         if(dependencies.some(r=>r.status!=='succeeded'))continue;
         try {
           const snapshot=structuredClone(this.runs.snapshot(run.id));
+          const visualizeVersions = new Map<string, number>();
+          const hiddenVisualizeOutputs = new Map<string, { executionNodeId: string; x: number; y: number }>();
           for(const predecessor of dependencies) {
             const manifestRow=this.db.prepare('SELECT manifest FROM publication_manifests WHERE run_id=?').get(predecessor.id);
             let structuredKeys:Set<string>|undefined;
-            if(manifestRow){try{const parsed=JSON.parse(String(manifestRow['manifest'])) as {outputs?:{outputKey?:unknown;role?:unknown}[]};const keys=(parsed.outputs??[]).filter(item=>item.role==='workgraph-node'&&typeof item.outputKey==='string').map(item=>String(item.outputKey));if(keys.length)structuredKeys=new Set(keys);}catch{/* Persisted publication validation owns corruption handling. */}}
+            const visualizeKeys = new Set<string>();
+            if(manifestRow){try{const parsed=JSON.parse(String(manifestRow['manifest'])) as {outputs?:{outputKey?:unknown;role?:unknown;nodeType?:unknown}[]};const nodes=(parsed.outputs??[]).filter(item=>item.role==='workgraph-node'&&typeof item.outputKey==='string');if(nodes.length)structuredKeys=new Set(nodes.map(item=>String(item.outputKey)));for(const item of nodes)if(item.nodeType==='visualize')visualizeKeys.add(String(item.outputKey));}catch{/* Persisted publication validation owns corruption handling. */}}
             const outputRows=this.db.prepare('SELECT o.output_key,o.resource_id,o.resource_version FROM canvas_outputs o WHERE o.run_id=? ORDER BY o.output_key').all(predecessor.id);
             const outputs=structuredKeys?outputRows.filter(output=>structuredKeys.has(String(output.output_key))):outputRows;
             if(!outputs.length)throw new ServiceError('INPUT_BLOCKED','前驱交付结果不可读取。');
             for(const output of outputs){
+              if (visualizeKeys.has(String(output.output_key))) {
+                // Ownership survives automatic hiding. Match the original published
+                // page identity through immutable node history, then read the current
+                // business form even after the user has replaced that page.
+                const nodes = this.db.prepare("SELECT n.id,n.current_version,n.deleted,n.x,n.y,v.content FROM execution_outputs o JOIN nodes n ON n.id=o.node_id JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE o.execution_node_id=? AND n.graph_id=? AND n.type='visualize' AND n.schema_version=1 AND EXISTS(SELECT 1 FROM node_versions published WHERE published.node_id=n.id AND json_extract(published.content,'$.page.resource.resourceId')=? AND json_extract(published.content,'$.page.resource.resourceVersion')=?)").all(predecessor.nodeId,run.graphId,String(output.resource_id),Number(output.resource_version));
+                if (nodes.length !== 1) throw new ServiceError('INPUT_BLOCKED','可视化交付节点或页面来源不可读取。');
+                const node = nodes[0]!, nodeId = String(node.id);
+                if (visualizeVersions.has(nodeId)) continue;
+                // Preparation reads only business JSON. Page/schema integrity and
+                // required fields belong to the actual launch transaction.
+                const business = readVisualizeBusinessForm(this.db,run,JSON.parse(String(node.content)));
+                await this.resources.readContent(run,'canvas',business.resource.resourceId,business.resource.version);
+                if (this.stopped) return;
+                const index = snapshot.resources.length;
+                snapshot.resources.push({kind:'text',sourceNodeIds:[nodeId],text:canonicalJson(business.form.data),resource:business.resource});
+                visualizeVersions.set(nodeId,Number(node.current_version));
+                if (node.deleted) hiddenVisualizeOutputs.set(nodeId,{executionNodeId:predecessor.nodeId,x:Number(node.x),y:Number(node.y)});
+                snapshot.visualizeBindings ??= [];
+                const binding = snapshot.visualizeBindings.find(item => item.sourceNodeId === nodeId);
+                if (binding) binding.resourceIndexes.push(index);
+                else {
+                  const edges = this.db.prepare("SELECT id FROM edges WHERE graph_id=? AND source_id=? AND target_id=? AND kind='execution'").all(run.graphId,predecessor.nodeId,run.nodeId);
+                  snapshot.visualizeBindings.push({sourceNodeId:nodeId,edgeIds:edges.map(edge=>String(edge.id)),resourceIndexes:[index]});
+                }
+                continue;
+              }
               const resource={...this.resources.readCanvasVersion(run,String(output.resource_id),Number(output.resource_version)),resourceId:String(output.resource_id)};
               const bytes=await this.resources.readContent(run,'canvas',resource.resourceId,resource.version);
               if(this.stopped)return;
@@ -154,6 +184,15 @@ export class ExecutionChains {
             const current=this.runs.get(run.id);
             if(current.status!=='accepted'||this.runs.runtime(run.id).revision!==runtime.revision)return;
             this.graphs.scope(run);
+            for (const [nodeId, version] of visualizeVersions) if (this.db.prepare('SELECT current_version FROM nodes WHERE id=? AND graph_id=?').get(nodeId,run.graphId)?.current_version !== version) throw new ServiceError('REVISION_CONFLICT','可视化业务表单在串联准备期间已变化。');
+            // Interactive deliveries must remain available to the user and to
+            // freezeVisualizeRunInputs, including automatically hidden outputs.
+            // Restore through the existing graph operation, in the same commit.
+            const restores = [...hiddenVisualizeOutputs].filter(([nodeId]) => this.db.prepare('SELECT deleted FROM nodes WHERE id=? AND graph_id=?').get(nodeId,run.graphId)?.deleted).map(([nodeId, output]) => ({type:'execution.output.restore' as const,nodeId,...output}));
+            if (restores.length) {
+              const graph = this.graphs.snapshot(run);
+              this.graphs.command({serviceId:run.serviceId,projectId:run.projectId,graphId:run.graphId,idempotencyKey:randomUUID(),expectedExecutionRevision:graph.executionRevision,expectedLayoutRevision:graph.layoutRevision,operations:restores},'execution-chain');
+            }
             this.graphs.retireExecutionOutputs(run,run.nodeId);
             this.db.prepare('INSERT INTO execution_input_snapshots(run_id,payload) VALUES(?,?)').run(run.id,canonicalJson(snapshot as unknown as Json));
             this.db.prepare('UPDATE runs SET input_digest=? WHERE id=?').run(snapshot.inputDigest,run.id);

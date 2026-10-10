@@ -5,6 +5,7 @@ import type { PreparedBlob } from './blob-store.js';
 import { Graphs, resourceLinks } from './graphs.js';
 import { Resources } from './resources.js';
 import { ServiceError } from './errors.js';
+import { insertTransferredVisualizeNode, prepareVisualizeCopy } from './visualize-transfer.js';
 
 /** Keep history batches on one row, moving each group's members with its frame. */
 function arrangeHistoryGroups(graphs: Graphs, request: SubmitRun): void {
@@ -38,7 +39,12 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
   const owner = graph.nodes.find(node => node.id === request.nodeId)!;
   const anchor = outputs.find(node => visible.has(node.id)) ?? { x: owner.x + (owner.width ?? 300) + 80, y: owner.y };
   const files = new Map<string, PreparedBlob>();
+  const visualizations = new Map<string, () => Json>();
   for (const output of outputs) {
+    if (output.type === 'visualize') {
+      visualizations.set(output.id, await prepareVisualizeCopy(graphs, resources, request, output, cleanups));
+      continue;
+    }
     const content = output.content as Record<string, Json>;
     const source = content.source as Record<string, Json> | undefined;
     if (source?.kind === 'project-file') {
@@ -52,7 +58,7 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
     current.assertOutputPreservation(request, request.nodeId, outputs);
     const nodeCopies = new Map<string, string>();
     outputs.forEach((output, index) => {
-      const content = structuredClone(output.content) as Record<string, Json>;
+      let content = structuredClone(output.content) as Record<string, Json>;
       let type = output.type;
       const file = files.get(output.id);
       if (file) {
@@ -61,8 +67,10 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
         content.resourceId = created.resource.id; content.resourceVersion = created.resource.current.version;
         content.mime = file.mime; content.bytes = file.bytes;
         if (type === 'text') type = 'document';
+      } else if (output.type === 'visualize') {
+        content = visualizations.get(output.id)!() as Record<string, Json>;
       } else {
-        const copies = new Map(resourceLinks(content).map(link => {
+        const copies = new Map(resourceLinks(content,type).map(link => {
           const created = resources.copyCanvasToCanvas(request, request.graphId, link.resourceId, link.version);
           return [link.resourceId + ':' + link.version, created.resource];
         }));
@@ -77,7 +85,12 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
         remap(content);
       }
       const id = randomUUID();
-      current.insertNode(request, { ...output, id, type, contentVersion: 1, content, x: anchor.x + index * 22, y: anchor.y + index * 22, readOnly: true }, true);
+      // History stacks use the same default dimensions as Web node creation.
+      const width = type === 'visualize' ? output.width ?? 480 : type === 'preview' ? 480 : 300;
+      const height = type === 'visualize' ? output.height ?? 360 : type === 'preview' ? 360 : 220;
+      const copy = { ...output, id, type, contentVersion: 1, content, x: anchor.x + index * 22, y: anchor.y + index * 22, width, height, readOnly: true };
+      if (type === 'visualize') insertTransferredVisualizeNode(current, request, copy);
+      else current.insertNode(request, copy, true);
       nodeCopies.set(output.id, id);
     });
     const allCopies = sharedCopies ?? new Map<string, string>();
@@ -103,15 +116,18 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
       }
     }
     if (outputs.length) {
-      const execution = current.snapshot(request).nodes.find(node => node.id === request.nodeId)!;
+      const nodes = current.snapshot(request).nodes;
+      const execution = nodes.find(node => node.id === request.nodeId)!;
       const executionContent = execution.content as Record<string, Json>;
       const name = typeof executionContent.title === 'string' && executionContent.title.trim() ? executionContent.title.trim() : execution.id;
       const suffix = `-历史输出-${Date.now()}`;
       // Reserve space within the node title limit for the complete batch suffix.
       const title = limitNodeTitle(name, NODE_TITLE_MAX_LENGTH - Array.from(suffix).length);
       const x = anchor.x - 24, y = anchor.y - 48;
-      const right = Math.max(...outputs.map((output, index) => anchor.x + index * 22 + (output.width ?? (output.type === 'preview' ? 480 : 300))));
-      const bottom = Math.max(...outputs.map((output, index) => anchor.y + index * 22 + (output.height ?? (output.type === 'preview' ? 360 : 220))));
+      const copyIds = new Set(nodeCopies.values());
+      const copies = nodes.filter(node => copyIds.has(node.id));
+      const right = Math.max(...copies.map(copy => copy.x + copy.width!));
+      const bottom = Math.max(...copies.map(copy => copy.y + copy.height!));
       current.insertNode(request, {
         id: randomUUID(), type: 'group', schemaVersion: 1, contentVersion: 1,
         content: { title: title + suffix }, x, y, width: right - x + 24, height: bottom - y + 24,

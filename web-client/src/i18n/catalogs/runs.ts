@@ -86,6 +86,7 @@ export const runsZhCN = {
   'A scheduling error occurred. Check the run status.': '调度发生异常，请检查运行状态', 'Execution result verification failed. The result is still pending confirmation.': '执行结果核实失败，结果仍待确认',
   'Failure reason: {reason}': '失败原因：{reason}', 'Progress could not be read. Waiting to reconnect.': '进展读取失败，等待重新连接',
   'Earlier progress or full messages are available in run details.': '更早的进展或完整消息请在运行详情中查看。',
+  'Form field {path}: {message}': '表单字段 {path}：{message}',
 } satisfies Record<string, string>;
 
 Object.assign(zhCN, runsZhCN);

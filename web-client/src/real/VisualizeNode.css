@@ -1,0 +1,30 @@
+.ow-visualize-node { width:100%; height:100%; min-height:0; display:flex; flex-direction:column; background:var(--panel); color:var(--text); overflow:hidden; }
+/* CSS zoom raises the iframe's rendering density. The inverse transform and
+   compensated dimensions preserve its logical viewport and work graph bounds. */
+.owg-world .ow-visualize-node {
+  zoom:var(--owg-visualize-scale, 1);
+  width:calc(100% * var(--owg-visualize-scale, 1));
+  height:calc(100% * var(--owg-visualize-scale, 1));
+  transform:scale(calc(1 / var(--owg-visualize-scale, 1)));
+  transform-origin:0 0;
+}
+.ow-visualize-node iframe { width:100%; min-height:0; flex:1; border:0; background:var(--panel); }
+.ow-visualize-node iframe:focus-visible { outline:2px solid var(--link); outline-offset:-2px; }
+.ow-visualize-status { display:flex; align-items:stretch; min-height:52px; font-size:12px; line-height:1.5; border-bottom:1px solid var(--stroke); max-height:100px; overflow:auto; flex-shrink:0; }
+.ow-visualize-status-message { flex:1; min-width:0; display:flex; flex-wrap:wrap; gap:4px 10px; align-items:center; padding:8px 12px; overflow-wrap:anywhere; }
+[data-node-id] .ow-visualize-status-message[data-canvas-draggable] { cursor:grab; user-select:none; }
+.ow-visualize-status button.ow-visualize-refresh-page { align-self:center; display:inline-flex; align-items:center; justify-content:center; flex:0 0 44px; width:44px; height:44px; margin:4px 8px 4px 0; padding:0; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--text); cursor:pointer; transition:background 150ms, border-color 150ms; }
+.ow-visualize-status button.ow-visualize-refresh-page:hover:not(:disabled) { background:var(--fill); border-color:var(--stroke); }
+.ow-visualize-status button.ow-visualize-refresh-page:focus-visible { outline:2px solid var(--link); outline-offset:-2px; }
+.ow-visualize-status button.ow-visualize-refresh-page:disabled { opacity:.55; cursor:default; }
+.ow-visualize-refresh-page .is-spinning { animation:ow-visualize-refresh-spin 1s linear infinite; }
+@keyframes ow-visualize-refresh-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ow-visualize-refresh-page .is-spinning { animation:none; }
+  .ow-visualize-status button.ow-visualize-refresh-page { transition:none; }
+}
+.ow-visualize-node > button { margin:auto; padding:12px; }
+.ow-visualize-node > [role=alert], .ow-visualize-node > p { padding:12px; overflow:auto; }
+.ow-visualize-expanded { min-height:360px; }
+.reference-preview-backdrop > dialog.reference-preview { margin: auto; color: var(--text); border: 1px solid var(--stroke); }
+dialog.reference-preview::backdrop { background: transparent; }

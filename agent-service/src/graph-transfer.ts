@@ -8,8 +8,9 @@ import type { PreparedBlob } from './blob-store.js';
 import { mimeMatchesBytes, sniffMime } from './blob-store.js';
 import { checkedJson, PluginRegistry, portableSkillContent } from './plugins.js';
 import { atomic } from './persistence/database.js';
-import { canonicalJsonHash } from './persistence/repositories.js';
+import { canonicalJson, canonicalJsonHash } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
+import { commitTransferResource, insertTransferredVisualizeNode, remapVisualizeAssetData, remapVisualizeContent, remapVisualizePage, validateVisualizeBundle, type VisualizeResourceMap } from './visualize-transfer.js';
 import { ProjectFiles, classifyProjectFile } from './project-files.js';
 
 import type { BundleResource, BundlePluginRequirement, CopiedProvenance, ImportedGraphSnapshot, GraphBundle } from '@openworkgraph/protocol';
@@ -17,14 +18,21 @@ export type { BundleResource, BundlePluginRequirement, CopiedProvenance, Importe
 /** Opaque instance-bound token. Contains no filesystem paths or mutable payload. */
 export interface PreparedGraphImport { readonly digest: string; readonly projectId: string; readonly serviceId: string }
 export interface DisposedGraphImport { retired: number; retained: number; removed: number; failed: number }
-interface ImportData {bundle: GraphBundle; blobs: PreparedBlob[]; trustedTopology: boolean; disposed: boolean; disposal: Promise<DisposedGraphImport> | null}
+interface ImportData {bundle: GraphBundle; blobs: PreparedBlob[]; resourceMap: VisualizeResourceMap; trustedTopology: boolean; disposed: boolean; disposal: Promise<DisposedGraphImport> | null}
 export interface GraphTransferLimits { maxBundleBytes: number; maxResourceBytes: number; maxTotalResourceBytes: number; maxNodes: number; maxResources: number }
 const DEFAULT_LIMITS: GraphTransferLimits = {maxBundleBytes:WORKGRAPH_BUNDLE_MAX_BYTES,maxResourceBytes:WORKGRAPH_UPLOAD_MAX_BYTES,maxTotalResourceBytes:WORKGRAPH_TRANSFER_TOTAL_BYTES,maxNodes:2000,maxResources:256};
-const core = new Set(['text','image','document','video','file','preview','execution','group']);
+const core = new Set(['text','image','document','video','file','preview','execution','group','visualize']);
 const key = (id: string, version: number) => JSON.stringify([id,version]);
 function portableNode(node: Node): Node {
   const result = structuredClone(node);
   if (core.has(node.type)) result.content = portableSkillContent(result.content);
+  // Visualize exports already own an immutable graph resource. Library IDs in
+  // their provenance are local metadata, not dependencies of the portable copy.
+  if (['image','file'].includes(node.type) && record(result.content) &&
+      typeof result.content.resourceId === 'string' && record(result.content.visualizeSource)) {
+    delete result.content.visualizeSource.assetId;
+    delete result.content.visualizeSource.assetVersion;
+  }
   return result;
 }
 function invalid(message: string): never {throw new ServiceError('INVALID_REQUEST',message);}
@@ -32,7 +40,7 @@ function record(value: unknown): value is Record<string,unknown> {return value !
 function id(value: unknown): asserts value is string {if(typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(value)) invalid('Invalid bundle identity');}
 function positive(value: unknown): asserts value is number {if(typeof value !== 'number' || !Number.isSafeInteger(value) || value<1) invalid('Invalid bundle version');}
 function keys(value: object, allowed: string[]): void {if(Object.keys(value).some(k=>!allowed.includes(k))) invalid('Unsupported bundle field');}
-function text(value: unknown, max: number): asserts value is string {if(typeof value !== 'string' || !value.trim() || value.length>max || [...value].some(character => character.charCodeAt(0) < 32)) invalid('Invalid bundle title/name');}
+function text(value: unknown, max: number, allowEmpty = false): asserts value is string {if(typeof value !== 'string' || (!allowEmpty && !value.trim()) || value.length>max || [...value].some(character => character.charCodeAt(0) < 32)) invalid('Invalid bundle title/name');}
 function hash(bytes: Uint8Array): string {return createHash('sha256').update(bytes).digest('hex');}
 /** Portable graph data only: no Run records, thread identities, filesystem paths or executable plugin activation. */
 export class GraphTransfer {
@@ -60,7 +68,7 @@ export class GraphTransfer {
       const snapshot=this.graphs.snapshot(scope);
       const portableNodes=snapshot.nodes.map(portableNode);
       const links=new Map<string,{resourceId:string;version:number}>();
-      for(const node of snapshot.nodes) for(const link of resourceLinks(node.content)) links.set(key(link.resourceId,link.version),link);
+      for(const node of snapshot.nodes) for(const link of resourceLinks(node.content,node.type)) links.set(key(link.resourceId,link.version),link);
       // Include explicit unplaced graph resources, not unrelated Run/history versions.
       for(const row of this.graphs.db.prepare("SELECT resource_id,resource_version FROM canvas_resource_references WHERE graph_id=? AND owner_kind='graph' ORDER BY resource_id,resource_version").all(scope.graphId)) {
         const link={resourceId:String(row['resource_id']),version:Number(row['resource_version'])};links.set(key(link.resourceId,link.version),link);
@@ -154,7 +162,7 @@ export class GraphTransfer {
       if(n.type!=='group'&&n.memberIds!==undefined)invalid('Only layout groups have members');
       if(n.type==='group'){
         if(n.readOnly||new PluginRegistry(this.graphs.db).inspect(n.type,n.schemaVersion,n.content).state!=='available')invalid('Invalid layout group');
-        if(record(n.content)&&n.content['title']!==undefined)text(n.content['title'],1024);
+        if(record(n.content)&&n.content['title']!==undefined)text(n.content['title'],1024,true);
         if(n.memberIds!==undefined&&(!Array.isArray(n.memberIds)||n.memberIds.some(value=>typeof value!=='string')||new Set(n.memberIds).size!==n.memberIds.length))invalid('Invalid group members');
       }
       let values=0;const count=(v:Json):void=>{if(++values>100000)invalid('Node content has too many values');if(v&&typeof v==='object')for(const item of Object.values(v))count(item);};count(n.content);
@@ -174,7 +182,7 @@ export class GraphTransfer {
       if(source.type==='group'||target.type==='group')throw new ServiceError('INVALID_EDGE','Layout groups cannot be edge endpoints');
       edges.add(edge.id);pairs.add(pair);
       if(edge.kind==='delivery') {
-        if(source.type!=='execution'||['execution','group','preview'].includes(target.type)||!target.readOnly||deliveryTargets.has(target.id)) throw new ServiceError('INVALID_EDGE','Delivery topology requires one execution source to a readonly output');
+        if(source.type!=='execution'||['execution','group','preview'].includes(target.type)||(!target.readOnly&&target.type!=='visualize')||deliveryTargets.has(target.id)) throw new ServiceError('INVALID_EDGE','Delivery topology requires one execution source to a readonly output or editable visualize');
         deliveryTargets.add(target.id);
       } else if(edge.kind==='execution') {
         if(source.type!=='execution'||target.type!=='execution') throw new ServiceError('INVALID_EDGE','Execution chain edges require execution endpoints');
@@ -219,8 +227,13 @@ export class GraphTransfer {
       buffers.push(bytes);
     }
     for(const n of nodes.values()) {
-      for(const link of resourceLinks(n.content)) if(!resources.has(key(link.resourceId,link.version))) invalid('Referenced canvas resource/version is missing from bundle');
-      const rejectAssets=(value:Json):void=>{if(!value||typeof value!=='object')return;if(!Array.isArray(value)&&Object.hasOwn(value,'assetId')) invalid('Legacy/remote asset references are not portable canvas resources');for(const v of Object.values(value))rejectAssets(v);};rejectAssets(n.content);
+      for(const link of resourceLinks(n.content,n.type)) if(!resources.has(key(link.resourceId,link.version))) invalid('Referenced canvas resource/version is missing from bundle');
+      const rejectAssets=(value:Json):void=>{if(!value||typeof value!=='object')return;if(!Array.isArray(value)&&Object.hasOwn(value,'assetId')) invalid('Legacy/remote asset references are not portable canvas resources');for(const v of Object.values(value))rejectAssets(v);};if(n.type!=='visualize')rejectAssets(n.content);
+    }
+    validateVisualizeBundle(bundle.graph.nodes, bundle.resources, buffers);
+    for (const node of nodes.values()) if(node.type==='visualize') {
+      const content=node.content as Record<string,Json>;
+      for(const binding of content['inputBindings'] as {edgeId:string}[]) if(!bundle.graph.edges.some(edge=>edge.id===binding.edgeId&&edge.targetId===node.id&&edge.kind==='reference')) invalid('Visualize input binding must name an incoming reference edge');
     }
     return {bundle,bytes:buffers};
   }
@@ -229,8 +242,24 @@ export class GraphTransfer {
     this.outside();this.target(scope);const stableScope={serviceId:scope.serviceId,projectId:scope.projectId};
     const trustedTopology=options.trustedTopology===true;const {bundle,bytes}=this.validate(input,trustedTopology);
     const digest=canonicalJsonHash(bundle as unknown as Json);const blobs:PreparedBlob[]=[];
+    const resourceMap: VisualizeResourceMap = new Map(bundle.resources.map(r => [key(r.resourceId,r.version),{resourceId:randomUUID(),resourceVersion:1}]));
+    const pages=validateVisualizeBundle(bundle.graph.nodes,bundle.resources,bytes);
+    const forms = new Set(bundle.graph.nodes.filter(node => node.type === 'visualize').flatMap(node => {
+      const form = (node.content as Record<string, Json>).form as Record<string, Json> | undefined;
+      const ref = form?.resource as Record<string, Json> | undefined;
+      return ref ? [key(String(ref.resourceId), Number(ref.resourceVersion))] : [];
+    }));
+    const transferredBytes=bundle.resources.map((r,index)=>{
+      const page=pages.get(key(r.resourceId,r.version));
+      return page ? Buffer.from(canonicalJson(remapVisualizePage(page,resourceMap) as unknown as Json)) : forms.has(key(r.resourceId,r.version)) ? Buffer.from(canonicalJson(remapVisualizeAssetData(JSON.parse(bytes[index]!.toString('utf8')), resourceMap))) : bytes[index]!;
+    });
+    if(transferredBytes.some(content=>content.length>Math.min(this.limits.maxResourceBytes,this.resources.blobs.maxBytes)) || transferredBytes.reduce((total,content)=>total+content.length,0)>this.limits.maxTotalResourceBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','Remapped visualize resources exceed transfer budget');
     try {
-      for(let i=0;i<bundle.resources.length;i++) {const r=bundle.resources[i]!;blobs.push(await this.resources.prepareBytes(bytes[i]!,r.mime,r.sha256));}
+      for(let i=0;i<bundle.resources.length;i++) {
+        const r=bundle.resources[i]!,page=pages.get(key(r.resourceId,r.version));
+        const content=transferredBytes[i]!;
+        blobs.push(await this.resources.prepareBytes(content,r.mime,page || forms.has(key(r.resourceId,r.version)) ? undefined : r.sha256));
+      }
     } catch(error) {
       // A token cannot be returned on partial preparation failure. Retire the
       // already prepared generations durably before attempting physical cleanup.
@@ -243,7 +272,7 @@ export class GraphTransfer {
       }
       throw error;
     }
-    const token=Object.freeze({digest,...stableScope});this.prepared.set(token,{bundle,blobs,trustedTopology,disposed:false,disposal:null});return token;
+    const token=Object.freeze({digest,...stableScope});this.prepared.set(token,{bundle,blobs,resourceMap,trustedTopology,disposed:false,disposal:null});return token;
   }
   /** Call from API finally AFTER the surrounding authorization transaction settles,
    * on success, failure and replay. No active session/project access is needed to
@@ -290,8 +319,8 @@ export class GraphTransfer {
         const ids=new Map<string,string>(),resourceIds=new Map<string,{id:string;bytes:number;mime:string}>();
         for(const n of data.bundle.graph.nodes) ids.set(n.id,randomUUID());
         for(let i=0;i<data.bundle.resources.length;i++) {
-          const r=data.bundle.resources[i]!;const created=this.resources.createCanvasFromPrepared(target,data.blobs[i]!,r.name);
-          resourceIds.set(key(r.resourceId,r.version),{id:created.resource.id,bytes:created.resource.current.bytes,mime:created.resource.current.mime});
+          const r=data.bundle.resources[i]!;const resource=commitTransferResource(this.resources,target,data.blobs[i]!,r.name,data.resourceMap.get(key(r.resourceId,r.version))!.resourceId);
+          resourceIds.set(key(r.resourceId,r.version),{id:resource.id,bytes:resource.current.bytes,mime:resource.current.mime});
         }
         const remap=(value:Json):Json=>{
           if(Array.isArray(value)) return value.map(remap);
@@ -304,8 +333,12 @@ export class GraphTransfer {
           return result;
         };
         const copiedProvenance:CopiedProvenance[]=(data.bundle.copiedProvenance??[]).map(p=>p.kind==='copied-delivery'?{...p,sourceId:ids.get(p.sourceId)!,targetId:ids.get(p.targetId)!}:{...p,nodeId:ids.get(p.nodeId)!});
+        const edgeIds=new Map(data.bundle.graph.edges.map(edge=>[edge.id,randomUUID()]));
         for(const n of data.bundle.graph.nodes) {
-          const nodeId=ids.get(n.id)!,content=remap(n.content);
+          const nodeId=ids.get(n.id)!,content=n.type==='visualize' ? remapVisualizeContent(n.content,data.resourceMap,edgeIds) : remap(n.content);
+          if (core.has(n.type) && record(content) && record(content.visualizeSource) &&
+              typeof content.visualizeSource.nodeId === 'string' && ids.has(content.visualizeSource.nodeId))
+            content.visualizeSource.nodeId = ids.get(content.visualizeSource.nodeId)!;
           // Public import copies content, not publication privileges. Preserve
           // source runtime identifiers only as explicitly non-authoritative data.
           if(!data.trustedTopology&&core.has(n.type)&&content!==null&&typeof content==='object'&&!Array.isArray(content)) {
@@ -314,14 +347,16 @@ export class GraphTransfer {
             if(n.readOnly)metadata['sourceReadOnly']=true;
             if(Object.keys(metadata).length)copiedProvenance.push({kind:'copied-node',nodeId,metadata,verified:false});
           }
-          this.graphs.insertNode(target,{...n,...(n.type==='group'?{memberIds:[]}:{}),id:nodeId,contentVersion:1,content,readOnly:!data.trustedTopology&&core.has(n.type)?false:n.readOnly},true);
+          const node={...n,...(n.type==='group'?{memberIds:[]}:{}),id:nodeId,contentVersion:1,content,readOnly:!data.trustedTopology&&core.has(n.type)?false:n.readOnly};
+          if(n.type==='visualize')insertTransferredVisualizeNode(this.graphs,target,node);
+          else this.graphs.insertNode(target,node,true);
         }
         for(const n of data.bundle.graph.nodes)if(n.type==='group')this.graphs.setGroupMembers(target,ids.get(n.id)!, (n.memberIds??[]).map(id=>ids.get(id)!));
         for(const e of data.bundle.graph.edges) {
           if(e.kind==='delivery'&&!data.trustedTopology) {
             copiedProvenance.push({kind:'copied-delivery',sourceId:ids.get(e.sourceId)!,targetId:ids.get(e.targetId)!,verified:false});continue;
           }
-          const edge={...e,id:randomUUID(),sourceId:ids.get(e.sourceId)!,targetId:ids.get(e.targetId)!};this.graphs.validateEdge(target,edge,data.trustedTopology);
+          const edge={...e,id:edgeIds.get(e.id)!,sourceId:ids.get(e.sourceId)!,targetId:ids.get(e.targetId)!};this.graphs.validateEdge(target,edge,data.trustedTopology);
           this.graphs.db.prepare('INSERT INTO edges(id,graph_id,source_id,target_id,kind) VALUES(?,?,?,?,?)').run(edge.id,graphId,edge.sourceId,edge.targetId,edge.kind);
         }
         this.graphs.db.prepare('INSERT INTO settings(key,value) VALUES(?,?)').run('graph-import-requirements:'+graphId,JSON.stringify(data.bundle.pluginRequirements));

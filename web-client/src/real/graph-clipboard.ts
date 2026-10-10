@@ -15,10 +15,35 @@ import { emptyProjectFileContent } from './project-file-reference';
 import { FILE_NODE_MAX_BYTES, importedNodeType } from '../domain/file-types';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
+import { validateVisualizeNodeContent } from '../../../packages/protocol/src/visualize-validation';
+import { isVisualizeFeatureSelection, VISUALIZE_DEFAULT_SIZE } from '../../../packages/protocol/src/visualize';
+import type { VisualizeNodeContent, VisualizePagePackage, VisualizeResourceReference, VisualizeStoredNode } from '../../../packages/protocol/src/visualize';
+import { remapTemporaryVisualizeAssetData, remapTemporaryVisualizePage, validateTemporaryVisualizeResources, visualizeResourceReferences } from './temporary-store';
+import { WORKGRAPH_TRANSFER_TOTAL_BYTES } from '../../../packages/protocol/src/index';
 
 export const REAL_NODE_CLIPBOARD = "application/x-openworkgraph-real-nodes";
 export const LEGACY_NODE_CLIPBOARD = "application/x-openworkgraph-nodes";
 const trustedPayloads = new Set<string>();
+const scopeReaders = new Map<string, Request>();
+const clipboardReaders = new Map<string, Request>();
+const scopeKey = (scope: ClipboardScope) => JSON.stringify([scope.serviceId, scope.projectId, scope.graphId]);
+/** Host-only readers are never serialized into the system clipboard. */
+export function registerClipboardRequest(scope: ClipboardScope, request: Request): void {
+  scopeReaders.set(scopeKey(scope), request);
+  if (scopeReaders.size > 32) scopeReaders.delete(scopeReaders.keys().next().value!);
+}
+export interface VisualizePasteIntent { node: Node; source: ClipboardScope; target: ClipboardScope; reader?: Request }
+const visualizePasteIntents = new Map<string, VisualizePasteIntent>();
+/** Node IDs survive the history controller's structuredClone; authority does not. */
+export function takeVisualizePasteIntents(operations: GraphOperation[], target: ClipboardScope): VisualizePasteIntent[] {
+  return operations.flatMap(operation => {
+    if (operation.type !== 'node.create' || operation.node.type !== 'visualize' || !validateVisualizeNodeContent(operation.node.content).page) return [];
+    const intent = visualizePasteIntents.get(operation.node.id);
+    if (!intent || scopeKey(intent.target) !== scopeKey(target) || JSON.stringify(intent.node) !== JSON.stringify(operation.node)) throw Error(translate('The visualization paste intent expired. Copy and paste the nodes again.'));
+    visualizePasteIntents.delete(operation.node.id);
+    return [intent];
+  });
+}
 const kinds = new Set([
   "text",
   "document",
@@ -28,6 +53,7 @@ const kinds = new Set([
   "video",
   "file",
   "preview",
+  "visualize",
 ]);
 const object = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== "object" || Array.isArray(v))
@@ -60,13 +86,19 @@ export function clipboardContent(
   const skillReferences = raw.skillReferences === undefined ? undefined : validSkillReferences(typeof raw.prompt === 'string' ? raw.prompt : '', raw.skillReferences);
   if (skillReferences && (!Array.isArray(raw.skillReferences) || skillReferences.length !== raw.skillReferences.length)) throw Error(translate("Invalid skill references."));
   const skillContent: Record<string, Json> = skillReferences ? { skillReferences: skillReferences.map(ref => ({ ...ref })) } : {};
+  if (node.type === 'visualize') {
+    const content = validateVisualizeNodeContent(raw);
+    return { ...content, ...skillContent } as unknown as Record<string, Json>;
+  }
   // Execution copies start fresh, including when reading an older clipboard.
   // Never carry run history, outputs, resource identities or model overrides.
   if (node.type === "execution") {
-    if (raw.prompt === undefined) return {};
+    if (raw.features !== undefined && (!Array.isArray(raw.features) || raw.features.length > 1 || raw.features.some(feature => !isVisualizeFeatureSelection(feature)))) throw Error(translate('Invalid clipboard feature identity.'));
+    const features: Record<string, Json> = raw.features === undefined ? {} : { features: structuredClone(raw.features) as Json };
+    if (raw.prompt === undefined) return features;
     if (typeof raw.prompt !== "string")
       throw Error(translate("Clipboard text fields must be strings."));
-    return { prompt: raw.prompt, ...skillContent };
+    return { prompt: raw.prompt, ...skillContent, ...features };
   }
   // A generated text node may retain its immutable Markdown output. Clipboard
   // copies are editable text copies, so leave that graph-scoped resource behind.
@@ -176,6 +208,7 @@ export function contentWithResource(
   node: Pick<Node, "type" | "schemaVersion" | "content">,
   strict = false,
 ): Record<string, Json> {
+  if (node.type === 'visualize') return clipboardContent(node, strict);
   if (node.type === "execution") return clipboardContent(node, strict);
   const c = object(node.content);
   const source = c.source === undefined ? undefined : object(c.source);
@@ -266,6 +299,11 @@ export function encodeNodeClipboard(
         (e.kind === "reference" || e.kind === "execution") && ids.has(e.sourceId) && ids.has(e.targetId),
     )
     .map((e) => ({ ...e }));
+  for (const node of nodes) if (node.type === 'visualize') {
+    const content = validateVisualizeNodeContent(node.content);
+    content.inputBindings = content.inputBindings.filter(binding => edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === node.id));
+    node.content = content as unknown as Record<string, Json>;
+  }
   const source = {
     serviceId: graph.serviceId,
     projectId: graph.projectId,
@@ -280,7 +318,9 @@ export function encodeNodeClipboard(
   });
   parseNodeClipboard(raw); // Validate group and edge topology before writing.
   trustedPayloads.add(raw);
-  if (trustedPayloads.size > 32) trustedPayloads.delete(trustedPayloads.values().next().value!);
+  const reader = scopeReaders.get(scopeKey(source));
+  if (reader) clipboardReaders.set(raw, reader);
+  if (trustedPayloads.size > 32) { const expired = trustedPayloads.values().next().value!; trustedPayloads.delete(expired); clipboardReaders.delete(expired); }
   return raw;
 }
 
@@ -378,18 +418,20 @@ export function parseNodeClipboard(raw: string): Payload {
       !target ||
       source.type === "group" ||
       (edge.kind === "execution" ? source.type !== "execution" || target.type !== "execution" : source.type === "execution") ||
-      !["text", "image", "execution", "file", "preview"].includes(target.type)
+      !["text", "image", "execution", "file", "preview", "visualize"].includes(target.type)
     )
       throw Error(translate("Unsupported connection or provenance. No delivery relationship will be created."));
     if (edge.kind === "reference") {
       const previewError = previewEdgeError(source.type, target.type, incoming.get(target.id) ?? 0);
       if (previewError) throw Error(previewError);
       incoming.set(target.id, (incoming.get(target.id) ?? 0) + 1);
+      if (incoming.get(target.id)! > 8) throw Error(translate('A node can have at most 8 direct predecessors.'));
     }
     edgeIds.add(edge.id);
     return edge;
   });
   if (!executionOrder(edges)) throw Error(translate("Sequence connections cannot form a cycle."));
+  for (const node of nodes) if (node.type === 'visualize' && validateVisualizeNodeContent(node.content).inputBindings.some(binding => !edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === node.id))) throw Error(translate('Visualization bindings must name incoming reference edges of the node.'));
   return {
     format: "openworkgraph-real-nodes",
     version: 1,
@@ -409,6 +451,7 @@ export function planNodePaste(
 ): { operations: GraphOperation[]; nodeIds: string[] } {
   const payload = parseNodeClipboard(raw);
   const ids = new Map(payload.nodes.map((n) => [n.id, newId()]));
+  const edgeIds = new Map(payload.edges.map(edge => [edge.id, newId()]));
   const left = Math.min(...payload.nodes.map((n) => n.x)),
     top = Math.min(...payload.nodes.map((n) => n.y));
   const nodes: Node[] = payload.nodes.map((n) => {
@@ -429,6 +472,11 @@ export function planNodePaste(
       };
     } else if (source?.kind === 'project-file' && (!target || payload.source.serviceId !== target.serviceId || payload.source.projectId !== target.projectId || !validTrustedProjectSource(raw, payload, source))) content = emptyProjectFileContent(content);
     if (!target || payload.source.serviceId !== target.serviceId) content = portableSkillContent(content);
+    if (n.type === 'visualize') {
+      const visualize = validateVisualizeNodeContent(content);
+      visualize.inputBindings = visualize.inputBindings.map(binding => ({ ...binding, edgeId: edgeIds.get(binding.edgeId)! }));
+      content = visualize as unknown as Record<string, Json>;
+    }
     if (!projectCopy && typeof content.resourceId === "string") {
       const created = copies?.get(n.id);
       if (!created)
@@ -465,12 +513,20 @@ export function planNodePaste(
       type: "edge.create" as const,
       edge: {
         ...edge,
-        id: newId(),
+        id: edgeIds.get(edge.id)!,
         sourceId: ids.get(edge.sourceId)!,
         targetId: ids.get(edge.targetId)!,
       },
     })),
   );
+  for (const node of nodes) if (node.type === 'visualize' && validateVisualizeNodeContent(node.content).page) {
+    if (!target) throw Error(translate('Pasting a visualization page requires a target Work Graph.'));
+    const sameWorkspace = payload.source.serviceId === target.serviceId && payload.source.projectId === target.projectId;
+    const reader = clipboardReaders.get(raw);
+    if (!sameWorkspace && !reader) throw Error(translate('The source Workspace connection for the visualization copy is unavailable.'));
+    visualizePasteIntents.set(node.id, { node: structuredClone(node), source: payload.source, target: { ...target }, ...(reader ? { reader } : {}) });
+    if (visualizePasteIntents.size > 256) visualizePasteIntents.delete(visualizePasteIntents.keys().next().value!);
+  }
   return { operations, nodeIds: [...ids.values()] };
 }
 
@@ -493,7 +549,7 @@ export function createResourcePasteJob(
     const source = n.content.source;
     return source && typeof source === 'object' && !Array.isArray(source) && source.kind === 'project-file';
   });
-  if (!resources.length && !projectFiles.length) throw Error(translate("This clipboard does not require the resource copy flow."));
+  if (!resources.length && !projectFiles.length && !payload.nodes.some(node => node.type === 'visualize' && validateVisualizeNodeContent(node.content).page)) throw Error(translate("This clipboard does not require the resource copy flow."));
   if (resources.length) assertResourcePasteTarget(raw, target);
   if (projectFiles.some(n => {
     const source = n.content.source;
@@ -608,4 +664,254 @@ export function createResourcePasteJob(
       }));
     },
   };
+}
+
+/** Uses public page writes for Workspace copies and an atomic local snapshot
+ * transaction for temporary copies. No source delivery authority is replayed. */
+export function createVisualizePasteWorkflow(
+  intents: VisualizePasteIntent[], operations: GraphOperation[], target: ClipboardScope, request: Request,
+  place: () => Promise<GraphSnapshot>, readGraph: () => GraphSnapshot, accept: (graph: GraphSnapshot) => void,
+) {
+  type DependencyCopy = { reference: VisualizeResourceReference; blob: Blob; key: string; created?: CanvasCreated; upload?: string };
+  const plans = intents.map(intent => ({ intent, content: validateVisualizeNodeContent(intent.node.content), page: undefined as VisualizePagePackage | undefined, dependencies: [] as DependencyCopy[], bytes: 0, ready: false, phases: new Map<string, { body?: Record<string, unknown>; result?: VisualizeStoredNode; key: string }>() }));
+  const localKey = randomId();
+  let localBody: unknown;
+  let localResult: GraphSnapshot | undefined;
+  let placed: GraphSnapshot | undefined;
+  let resized: GraphSnapshot | undefined;
+  let ownAcceptedGraph: GraphSnapshot | undefined;
+  let recoveryError: unknown;
+  let rollbackBody: Record<string, unknown> | undefined;
+  let rolledBack = false;
+  let placementAttempted = false;
+  const definiteLocalErrors = new WeakSet<object>();
+  const retry = async <T>(work: () => Promise<T>, guard: () => void): Promise<T> => {
+    for (let attempt = 0; ; attempt++) {
+      guard();
+      try { return await work(); } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+        const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;
+        if (attempt >= 2 || (code && !['NETWORK_ERROR', 'TIMEOUT', 'INTERNAL_ERROR', 'SERVICE_UNAVAILABLE'].includes(code) && status < 500)) throw error;
+      }
+    }
+  };
+  const refresh = async (guard: () => void) => {
+    guard();
+    const graph = await request<GraphSnapshot>(graphPath(target.projectId, target.graphId));
+    guard(); accept(graph); return graph;
+  };
+  let resize: (() => Promise<GraphSnapshot>) | undefined;
+  const releasePrepared = async (guard: () => void) => {
+    for (const plan of plans) for (const copy of plan.dependencies) {
+      if (copy.created) {
+        try {
+          await retry(() => request(graphPath(target.projectId, target.graphId) + '/resources/release', { referenceId: copy.created!.referenceId, idempotencyKey: copy.key + '-release' }), guard);
+        } catch (error) {
+          // Only graph holds can be released, never node/history ownership.
+          if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'NOT_FOUND') throw error;
+        }
+      } else if (copy.upload) {
+        await retry(() => request('/v1/projects/' + encodeURIComponent(target.projectId) + '/uploads/' + encodeURIComponent(copy.upload!) + '/cancel', { idempotencyKey: copy.key + '-cancel' }), guard);
+      }
+    }
+  };
+  const rollback = async (guard: () => void) => {
+    if (!placed) {
+      if (placementAttempted) {
+        // An unacknowledged creation must not be mistaken for an empty graph.
+        // Do not derive ownership from a fresh snapshot and delete user data.
+        const current = await refresh(guard);
+        const ids = new Set(operations.flatMap(operation => operation.type === 'node.create' ? [operation.node.id] : []));
+        if (current.nodes.some(node => ids.has(node.id))) throw recoveryError;
+      }
+      await releasePrepared(guard);
+      rolledBack = true;
+      return;
+    }
+    // Never rebase a compensating delete: a concurrent edit must prevent it.
+    // Keep the exact body after a lost response so cleanup itself is replayable.
+    if (!rollbackBody) {
+      const current = await refresh(guard);
+      const ids = new Set(operations.flatMap(operation => operation.type === 'node.create' ? [operation.node.id] : []));
+      const baseline = ownAcceptedGraph!;
+      for (const id of ids) {
+        const before = baseline.nodes.find(node => node.id === id);
+        const now = current.nodes.find(node => node.id === id);
+        if (!now || JSON.stringify(now) !== JSON.stringify(before)) throw recoveryError;
+      }
+      const touching = (graph: GraphSnapshot) => graph.edges.filter(edge => ids.has(edge.sourceId) || ids.has(edge.targetId));
+      if (JSON.stringify(touching(current)) !== JSON.stringify(touching(baseline))) throw recoveryError;
+      const groups = (graph: GraphSnapshot) => graph.nodes.filter(node => node.memberIds?.some(id => ids.has(id)));
+      if (JSON.stringify(groups(current)) !== JSON.stringify(groups(baseline))) throw recoveryError;
+      rollbackBody = { idempotencyKey: randomId(), expectedExecutionRevision: current.executionRevision, expectedLayoutRevision: current.layoutRevision, operations: [...ids].map(nodeId => ({ type: 'node.delete', nodeId })) };
+    }
+    const result = await retry(() => request<GraphSnapshot>(graphPath(target.projectId, target.graphId) + '/commands', rollbackBody), guard);
+    guard(); accept(result);
+    await releasePrepared(guard);
+    await refresh(guard);
+    rolledBack = true;
+  };
+  const run = async (guard: () => void, prepareResize: (operations: GraphOperation[]) => () => Promise<GraphSnapshot>): Promise<GraphSnapshot> => {
+    // Check every source snapshot before preparing any target resource or node.
+    let sourceBytes = plans.filter(plan => plan.ready).reduce((total, plan) => total + plan.bytes, 0);
+    for (const plan of plans) if (!plan.ready) {
+      let bytes = 0;
+      const reader = plan.intent.source.serviceId === target.serviceId && plan.intent.source.projectId === target.projectId ? request : plan.intent.reader;
+      if (!reader) throw Error(translate('The source Workspace connection for the visualization copy is unavailable.'));
+      const resources = new Map<string, { name: string; blob: Blob }>();
+      for (const reference of visualizeResourceReferences(plan.content)) {
+        guard();
+        const blob = await reader<Blob>(graphPath(plan.intent.source.projectId, plan.intent.source.graphId) + '/resources/' + encodeURIComponent(reference.resourceId) + '/versions/' + reference.resourceVersion + '/content', undefined, 'BLOB');
+        guard();
+        if (!(blob instanceof Blob) || blob.size > FILE_NODE_MAX_BYTES) throw Error(translate('The visualization copy resource is invalid or exceeds the size limit.'));
+        bytes += blob.size; sourceBytes += blob.size;
+        if (sourceBytes > WORKGRAPH_TRANSFER_TOTAL_BYTES) throw Error(translate('The Work Graph resources exceed the export limit.'));
+        resources.set(JSON.stringify([reference.resourceId, reference.resourceVersion]), { name: reference.resourceId, blob });
+      }
+      const pages = await validateTemporaryVisualizeResources([plan.intent.node], resources);
+      guard();
+      plan.page = pages.get(JSON.stringify([plan.content.page!.resource.resourceId, plan.content.page!.resource.resourceVersion]))!;
+      const fixedJson = new Set([plan.content.page!.resource, plan.content.form!.resource].map(reference => JSON.stringify([reference.resourceId, reference.resourceVersion])));
+      plan.dependencies = visualizeResourceReferences(plan.content).filter(reference => !fixedJson.has(JSON.stringify([reference.resourceId, reference.resourceVersion])))
+        .map(reference => ({ reference, blob: resources.get(JSON.stringify([reference.resourceId, reference.resourceVersion]))!.blob, key: randomId() }));
+      plan.bytes = bytes;
+      plan.ready = true;
+    }
+    if (plans.reduce((total, plan) => total + plan.dependencies.reduce((size, dependency) => size + dependency.blob.size, 0), 0) > WORKGRAPH_TRANSFER_TOTAL_BYTES) throw Error(translate('The Work Graph resources exceed the export limit.'));
+    for (const plan of plans) for (const copy of plan.dependencies) if (!copy.created) {
+      guard();
+      if (target.serviceId === 'browser-local') {
+        // Stage local dependencies in memory; commit them with nodes/pages.
+        const id = randomId();
+        copy.created = { resource: { id, name: copy.reference.resourceId, current: { version: 1, mime: copy.blob.type, bytes: copy.blob.size } }, referenceId: id };
+      } else if (plan.intent.source.serviceId === target.serviceId && plan.intent.source.projectId === target.projectId) {
+        copy.created = await retry(() => request<CanvasCreated>(graphPath(target.projectId, target.graphId) + '/resources/copy-resource', { sourceGraphId: plan.intent.source.graphId, resourceId: copy.reference.resourceId, version: copy.reference.resourceVersion, idempotencyKey: copy.key }), guard);
+      } else {
+        const base = '/v1/projects/' + encodeURIComponent(target.projectId) + '/uploads';
+        if (!copy.upload) {
+          const upload = await retry(() => request<{ uploadId: string }>(base, { name: copy.reference.resourceId, mime: copy.blob.type, bytes: copy.blob.size, idempotencyKey: copy.key + '-start' }), guard);
+          copy.upload = upload.uploadId;
+        }
+        const path = base + '/' + encodeURIComponent(copy.upload);
+        guard();
+        const status = await request<{ received: number; bytes: number; state: string }>(path);
+        guard();
+        if (status.bytes !== copy.blob.size || !Number.isSafeInteger(status.received) || status.received < 0 || status.received > status.bytes || !['uploading', 'finished'].includes(status.state)) {
+          const error = Error(translate('The visualization upload state changed. Verify the copy before retrying.'));
+          definiteLocalErrors.add(error); throw error;
+        }
+        for (let offset = status.received; offset < copy.blob.size; offset += 1024 * 1024) {
+          const bytes = new Uint8Array(await copy.blob.slice(offset, offset + 1024 * 1024).arrayBuffer());
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+          await retry(() => request(path + '/chunks', { offset, data: btoa(binary), idempotencyKey: copy.key + '-chunk-' + offset }), guard);
+        }
+        copy.created = await retry(() => request<CanvasCreated>(path + '/finish', { mode: 'canvas', name: copy.reference.resourceId, graphId: target.graphId, idempotencyKey: copy.key + '-finish' }), guard);
+      }
+      guard();
+    }
+    const pages = plans.map(plan => {
+      const mapping = new Map(plan.dependencies.map(copy => [JSON.stringify([copy.reference.resourceId, copy.reference.resourceVersion]), { resourceId: copy.created!.resource.id, resourceVersion: copy.created!.resource.current.version }]));
+      return { nodeId: plan.intent.node.id, page: remapTemporaryVisualizePage(plan.page, mapping),
+        form: remapTemporaryVisualizeAssetData(plan.content.form!.data, mapping),
+        dependencies: plan.content.page!.dependencies.map(reference => mapping.get(JSON.stringify([reference.resourceId, reference.resourceVersion]))!) };
+    });
+    if (target.serviceId === 'browser-local') {
+      if (!localResult) {
+        localBody ??= { operations: operations.map(operation => {
+          if (operation.type !== 'node.create' || operation.node.type !== 'visualize') return operation;
+          const plan = plans.find(value => value.intent.node.id === operation.node.id);
+          if (!plan) return operation;
+          const content = structuredClone(plan.content);
+          const copied = pages.find(value => value.nodeId === operation.node.id)!;
+          content.page!.dependencies = copied.dependencies;
+          content.form!.data = copied.form as { [key: string]: Json };
+          return { ...operation, node: { ...operation.node, content: content as unknown as Json } };
+        }), pages: pages.map(({ nodeId, page }) => ({ nodeId, page })), resources: plans.flatMap(plan => plan.dependencies.map(copy => ({ resourceId: copy.created!.resource.id, name: copy.reference.resourceId, blob: copy.blob }))), idempotencyKey: localKey, expectedExecutionRevision: readGraph().executionRevision, expectedLayoutRevision: readGraph().layoutRevision };
+        try { localResult = await retry(() => request<GraphSnapshot>(graphPath(target.projectId, target.graphId) + '/visualize-paste', localBody), guard); }
+        catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'REVISION_CONFLICT') localBody = undefined;
+          throw error;
+        }
+      }
+      guard(); accept(localResult); return localResult;
+    }
+    guard(); placementAttempted = true; placed ??= await place();
+    ownAcceptedGraph ??= structuredClone(placed);
+    guard();
+    for (const plan of plans) {
+      const path = graphPath(target.projectId, target.graphId) + '/visualize/' + encodeURIComponent(plan.intent.node.id);
+      for (const [action, extra] of [
+        ['install-page', { page: pages.find(value => value.nodeId === plan.intent.node.id)!.page }],
+        ['update-form', { form: pages.find(value => value.nodeId === plan.intent.node.id)!.form }],
+        ['save-state', { state: plan.content.state!.data }],
+      ] as const) {
+        let phase = plan.phases.get(action);
+        if (!phase) { phase = { key: randomId() }; plan.phases.set(action, phase); }
+        if (phase.result) continue;
+        if (!phase.body) {
+          guard();
+          const current = await request<VisualizeStoredNode>(path);
+          guard();
+          const previous = [...plan.phases.values()].filter(value => value.result).at(-1)?.result;
+          const expected = previous ?? placed.nodes.find(node => node.id === plan.intent.node.id)!;
+          if (current.contentVersion !== expected.contentVersion || JSON.stringify(current.content) !== JSON.stringify(expected.content)) throw Object.assign(Error(translate('The visualization copy changed before completion. Review the copy before retrying.')), { code: 'REVISION_CONFLICT' });
+          phase.body = { action, ...extra, idempotencyKey: phase.key, expectedContentVersion: current.contentVersion, expectedExecutionRevision: current.executionRevision, expectedLayoutRevision: current.layoutRevision, expectedPageRevision: current.content.page?.revision ?? 0,
+            ...(action === 'update-form' ? { expectedFormVersion: current.content.form!.version } : action === 'save-state' ? { expectedStateVersion: current.content.state!.version } : {}) };
+        }
+        try { phase.result = await retry(() => request<VisualizeStoredNode>(path, phase!.body), guard); }
+        catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'REVISION_CONFLICT') phase.body = undefined;
+          throw error;
+        }
+        // Track only this write's accepted effects, never adopt a later GET as
+        // ownership evidence: it could already include another user's layout.
+        const owned = ownAcceptedGraph.nodes.find(node => node.id === plan.intent.node.id)!;
+        owned.content = structuredClone(phase.result.content) as unknown as Json;
+        owned.contentVersion = phase.result.contentVersion;
+        if (action === 'install-page') Object.assign(owned, phase.result.page?.layout ?? VISUALIZE_DEFAULT_SIZE);
+        ownAcceptedGraph.executionRevision = phase.result.executionRevision;
+        ownAcceptedGraph.layoutRevision = phase.result.layoutRevision;
+        guard(); await refresh(guard);
+      }
+    }
+    if (!resized) {
+      resize ??= prepareResize([{ type: 'layout.resize', sizes: intents.map(intent => ({ nodeId: intent.node.id, width: intent.node.width ?? null, height: intent.node.height ?? null })) }]);
+      guard(); resized = await resize();
+      for (const intent of intents) {
+        const owned = ownAcceptedGraph.nodes.find(node => node.id === intent.node.id)!;
+        const accepted = resized.nodes.find(node => node.id === intent.node.id)!;
+        // Preserve independently tracked content/position; accept our sizes.
+        owned.width = accepted.width; owned.height = accepted.height;
+      }
+      ownAcceptedGraph.executionRevision = resized.executionRevision;
+      ownAcceptedGraph.layoutRevision = resized.layoutRevision;
+    }
+    guard(); return await refresh(guard);
+  };
+  const recoveryMessage = () => Object.assign(Error(rolledBack
+    ? translate('The failed visualization copy was removed. Copy and paste the nodes again.')
+    : translate('The visualization copy could not be removed safely. Reconnect and retry cleanup, or review copies changed by another user.')), { cause: recoveryError, ...((recoveryError && typeof recoveryError === 'object' && 'code' in recoveryError) ? { code: recoveryError.code } : {}) });
+  return { async run(guard: () => void, prepareResize: (operations: GraphOperation[]) => () => Promise<GraphSnapshot>): Promise<GraphSnapshot> {
+    if (rolledBack) throw recoveryMessage();
+    if (recoveryError) {
+      try { await rollback(guard); } catch { /* Keep recovery pending with the original code. */ }
+      throw recoveryMessage();
+    }
+    try { return await run(guard, prepareResize); }
+    catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+      const status = error && typeof error === 'object' && 'status' in error ? Number(error.status) : 0;
+      // An uncertain write may have committed; resume its original phase/key.
+      // Definite failures compensate only copies still owned by this operation.
+      const definite = (code && status < 500 && !['NETWORK_ERROR', 'TIMEOUT', 'INTERNAL_ERROR', 'SERVICE_UNAVAILABLE'].includes(code)) || (error instanceof Error && definiteLocalErrors.has(error));
+      const prepared = plans.some(plan => plan.dependencies.some(copy => copy.created || copy.upload));
+      if (target.serviceId !== 'browser-local' && (placed || prepared) && definite) {
+        recoveryError = error;
+        try { await rollback(guard); } catch { /* Retry cleanup before any further page writes. */ }
+        throw recoveryMessage();
+      }
+      throw error;
+    }
+  } };
 }

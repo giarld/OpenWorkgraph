@@ -1,3 +1,10 @@
+const sniffedMediaMimes = new Set(['image/png','image/jpeg','image/gif','image/webp','application/pdf','video/mp4','video/webm']);
+const textResourceMimes = new Set(['text/plain','text/markdown','text/csv','application/json','application/xml','text/xml','text/yaml','text/x-yaml','application/yaml','application/x-yaml']);
+/** Formats without a byte detector retain their declared MIME across storage and transfer. */
+export function isOpaqueResourceMime(mime: string): boolean {
+  return /^[a-zA-Z0-9.+-]+[/][a-zA-Z0-9.+-]+$/.test(mime) && mime !== 'application/octet-stream' && !textResourceMimes.has(mime) && !sniffedMediaMimes.has(mime);
+}
+
 /** Byte-based MIME detection shared by browser graph bundles and service storage. */
 export function sniffResourceMime(bytes: Uint8Array): string {
   const text = (start: number, end: number) => new TextDecoder().decode(bytes.subarray(start, end));

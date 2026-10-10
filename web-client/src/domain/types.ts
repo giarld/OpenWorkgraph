@@ -7,6 +7,7 @@ export type NodeKind =
   | "document"
   | "video"
   | "execution"
+  | "visualize"
   | (string & {});
 export type RunStatus =
   | "queued"

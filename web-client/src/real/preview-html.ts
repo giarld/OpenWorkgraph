@@ -1,3 +1,5 @@
+import { installVisualizeActivityController } from './visualize-activity';
+
 /** Keep scripts in an opaque origin: never add allow-same-origin here. */
 export const HTML_PREVIEW_SANDBOX = 'allow-scripts';
 export const HTML_PREVIEW_PERMISSIONS = [
@@ -16,7 +18,7 @@ export const HTML_PREVIEW_CSP = [
  * This is not a CPU quota or a general network firewall (self-navigation is a
  * browser limitation). No postMessage bridge grants runtime or storage access.
  */
-export function buildHtmlPreviewDocument(text: string): string {
+export function buildHtmlPreviewDocument(text: string, activity?: { hostOrigin: string; sessionId: string; nodeId: string }): string {
   const doc = new DOMParser().parseFromString(text, 'text/html');
   doc.querySelectorAll('iframe,frame,object,embed,base,meta,link').forEach(node => node.remove());
   doc.querySelectorAll('*').forEach(node => {
@@ -29,6 +31,11 @@ export function buildHtmlPreviewDocument(text: string): string {
   const policy = doc.createElement('meta');
   policy.httpEquiv = 'Content-Security-Policy';
   policy.content = HTML_PREVIEW_CSP;
+  if (activity) {
+    const controller = doc.createElement('script');
+    controller.textContent = '(' + installVisualizeActivityController.toString() + ')(' + JSON.stringify(activity).replaceAll('<', '\\u003c') + ');';
+    doc.head.prepend(controller);
+  }
   doc.head.prepend(policy);
   return '<!doctype html>' + doc.documentElement.outerHTML;
 }

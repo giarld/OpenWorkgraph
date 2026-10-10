@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
-import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus } from '@openworkgraph/protocol';
+import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
 import type { Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
@@ -36,6 +36,13 @@ import { planOpenAiImage, discoverOpenAiModels } from './openai-image-driver.js'
 import { BuiltinSkills, type BuiltinSkillsOptions } from './builtin-skills.js';
 import { SkillConfigs } from './skill-configs.js';
 import { SkillSessions } from './skill-sessions.js';
+import { VisualizePages } from './visualize-pages.js';
+import { VisualizeInputs } from './visualize-inputs.js';
+import { VisualizeBridge } from './visualize-bridge.js';
+import { VisualizeAssetExport } from './visualize-asset-export.js';
+import { VisualizeSuccessors } from './visualize-successors.js';
+import { discoverCodexSkills } from './skills-api.js';
+import { freezeVisualizeFeatures } from './visualize-features.js';
 
 export interface WorkflowRuntimeOptions {
   backend?: SchedulerBackend; models?: BackendModel[];
@@ -65,6 +72,9 @@ export class WorkflowRuntime {
   readonly skills: BuiltinSkills;
   readonly skillConfigs: SkillConfigs;
   readonly skillSessions: SkillSessions;
+  readonly visualize: VisualizePages;
+  readonly visualizeInputs: VisualizeInputs;
+  readonly visualizeBridge: VisualizeBridge;
   private readonly probe = new ProjectProbe();
   private readonly adapter: CodexBackendAdapter | undefined;
   private availableModels: BackendModel[];
@@ -78,6 +88,17 @@ export class WorkflowRuntime {
     this.availableModels = structuredClone(options.models ?? []);
     this.blobs = new BlobStore(directories.blobs); this.resources = new Resources(db, this.blobs);
     this.graphs = new Graphs(db, serviceId); this.plugins = new PluginRegistry(db);
+    this.visualize = new VisualizePages(this.graphs, this.resources);
+    this.visualizeInputs = new VisualizeInputs(this.graphs, this.resources);
+    const successors = new VisualizeSuccessors(this.visualize, async (prompt, projectId) => {
+      if (!prompt.skillReferences.length) return;
+      const installed = await this.skills.installed();
+      const project = this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(projectId);
+      const codex = prompt.skillReferences.some(ref => ref.source === 'codex') ? await discoverCodexSkills(String(project?.canonical_path), this.options.backendOptions) : [];
+      for (const ref of prompt.skillReferences) if (!(ref.source === 'codex' ? codex : installed).some(item => item.skillId === ref.skillId && item.name === ref.name)) throw new ServiceError('INPUT_BLOCKED', '技能身份不可用，请重新选择：' + ref.name);
+    });
+    const assetExport = new VisualizeAssetExport(this.visualize);
+    this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args) });
     this.graphs.history.backfillActiveGates();
     this.graphFiles = new GraphFiles(db,directories.runs);
     this.executionSettings = new ExecutionSettingsStore(db);
@@ -271,7 +292,18 @@ export class WorkflowRuntime {
     const scopedInputs = new InputPreparation(this.db, { plugins: this.plugins, readRepresentation: resource => prepared.get(resourceKey(resource)) ?? null });
     const scopedPreview = scopedInputs.inputPreview(request.graphId,request.nodeId,!!apiRoute);
     const targetContent = this.db.prepare('SELECT v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?').get(request.nodeId, request.graphId);
-    const skillReferences = targetContent ? (JSON.parse(String(targetContent.content)) as Record<string,unknown>).skillReferences : undefined;
+    const nodeContent = targetContent ? JSON.parse(String(targetContent.content)) as Record<string, unknown> : {};
+    const skillReferences = nodeContent.skillReferences;
+    const features = freezeVisualizeFeatures(nodeContent.features, request.kind === 'visualize_generation');
+    if (features.length && !['execution', 'visualize_generation'].includes(request.kind)) throw new ServiceError('INPUT_BLOCKED', '可视化功能仅用于执行交付或可视化节点生成。');
+    let visualizeGeneration: import('@openworkgraph/protocol').VisualizeGenerationContext | undefined;
+    if (request.kind === 'visualize_generation') {
+      const stored = await this.visualize.read(request, request.nodeId);
+      const inputs = await this.visualizeInputs.capture(request, request.nodeId);
+      const node = this.graphs.snapshot(request).nodes.find(item => item.id === request.nodeId)!;
+      const current = { width: node.width ?? VISUALIZE_DEFAULT_SIZE.width, height: node.height ?? VISUALIZE_DEFAULT_SIZE.height };
+      visualizeGeneration = { version: 1, feature: { kind: 'builtin-feature', featureId: VISUALIZE_FEATURE_ID, version: 1 }, inputs, layout: { default: { ...VISUALIZE_DEFAULT_SIZE }, current, maximum: { ...VISUALIZE_GENERATION_MAX_SIZE }, contentViewport: { width: current.width, height: Math.max(1, current.height - 48) } }, replacementPolicy: 'new-initial-form', ...(stored.page && stored.content.form ? { previous: { page: stored.page, formFormatReference: stored.content.form } } : {}) };
+    }
     if (apiRoute && Array.isArray(skillReferences) && skillReferences.length) throw new ServiceError('INPUT_BLOCKED', '独立图片 API 不支持技能引用，请切换到 Codex 或移除技能引用。');
     const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path);
     if(apiRoute){
@@ -302,7 +334,7 @@ export class WorkflowRuntime {
       },
       freeze: () => scopedInputs.build(request.graphId, request.nodeId, apiRoute
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
-        : {expectedExecutionRevision:request.expectedExecutionRevision,model:this.models.freeze(request.modelOverride,this.availableModels),skills:frozenSkills,...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}),
+        : {expectedExecutionRevision:request.expectedExecutionRevision,model:this.models.freeze(request.modelOverride,this.availableModels),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}),
     });
     return principal => scoped.submit(request, principal, request.kind==='execution' && holdExecution);
   }
@@ -419,6 +451,7 @@ export class WorkflowRuntime {
     await this.scheduler.settled();
   }
   private finishClose(): void {
+    this.visualizeBridge.dispose();
     if (this.closed) return; this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; this.probe.close();
     this.catalogRpc?.close();
     // No adapter.close(): disconnecting unresolved child processes is not cancellation.

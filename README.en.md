@@ -8,6 +8,10 @@ OpenWorkgraph is a software development workflow product built around the infini
 
 Open the [official OpenWorkgraph editor](https://workgraph.giarld.com/) and follow the on-screen setup guide to get started.
 
+## Design Philosophy: First Principles
+
+![Input is transformed by a system into output](assets/readme/first-principles.png)
+
 ## Build and Run Locally
 
 ### Agent Service

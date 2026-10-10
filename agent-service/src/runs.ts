@@ -7,6 +7,7 @@ import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
 import { DEFAULT_EXECUTION_TITLES, promptRunTitle } from './run-title.js';
+import { freezeVisualizeRunInputs } from './visualize-run-inputs.js';
 
 export interface RunContext { runId: string; projectId: string; graphId: string; nodeId: string; kind: SubmitRun['kind']; baseVersion: number; canonicalPath: string; publicationVersion: 1 | 2; sandboxMode?: SandboxMode }
 export interface RunsDependencies {
@@ -52,7 +53,7 @@ export class Runs {
     this.repo = new Repositories(db); this.now = dependencies.now ?? Date.now;
   }
   get(id: string): Run {
-    const row = this.db.prepare('SELECT * FROM runs WHERE id=?').get(id);
+    const row = this.db.prepare("SELECT r.*, EXISTS(SELECT 1 FROM generation_candidates c WHERE c.run_id=r.id AND c.state='pending') AS pending_generation_candidate FROM runs r WHERE r.id=?").get(id);
     if (!row) throw new ServiceError('NOT_FOUND', 'Run not found');
     const details = this.db.prepare('SELECT details FROM run_runtime WHERE run_id=?').get(id);
     const executionDetails = details ? JSON.parse(String(details.details)) : {};
@@ -61,7 +62,7 @@ export class Runs {
     const chainMembers = chainBatch === id ? this.db.prepare("SELECT r.status FROM runs r JOIN run_runtime rt ON rt.run_id=r.id WHERE r.project_id=? AND r.graph_id=? AND json_extract(rt.details,'$.chainBatch')=?").all(row.project_id!,row.graph_id!,id) : [];
     const chainActive = chainMembers.some(member => !isTerminalRunStatus(member.status as RunStatus));
     const chainControl: Run['chainControl'] = chainMembers.length ? executionDetails.chainStopRequested ? chainActive ? 'stopping' : 'stopped' : chainActive ? 'active' : undefined : undefined;
-    return { serviceId: this.serviceId, projectId: String(row.project_id), graphId: String(row.graph_id), id: String(row.id), nodeId: String(row.node_id), status: row.status as RunStatus, submissionSequence: String(row.sequence), inputDigest: String(row.input_digest), createdAt: String(row.created_at), historyState: row.history_state as Run['historyState'], ...(row.status === 'accepted' && executionStart ? { executionStart } : {}), ...(chainBatch ? {chainBatch} : {}), ...(chainControl ? {chainControl} : {}) };
+    return { serviceId: this.serviceId, projectId: String(row.project_id), graphId: String(row.graph_id), id: String(row.id), nodeId: String(row.node_id), status: row.status as RunStatus, submissionSequence: String(row.sequence), inputDigest: String(row.input_digest), createdAt: String(row.created_at), historyState: row.history_state as Run['historyState'], ...(row.status === 'accepted' && executionStart ? { executionStart } : {}), ...(chainBatch ? {chainBatch} : {}), ...(row.pending_generation_candidate ? {hasPendingGenerationCandidate: true} : {}), ...(chainControl ? {chainControl} : {}) };
   }
   list(projectId?: string): Run[] {
     const rows = projectId === undefined ? this.db.prepare('SELECT id FROM runs ORDER BY sequence').all() : this.db.prepare('SELECT id FROM runs WHERE project_id=? ORDER BY sequence').all(projectId);
@@ -102,6 +103,8 @@ export class Runs {
     return { epoch: String(row.epoch), revision: Number(row.revision), details: JSON.parse(String(row.details)) as RunRuntime['details'] };
   }
   snapshot(id: string): InputSnapshot {
+    const launched = this.db.prepare('SELECT payload FROM launch_input_snapshots WHERE run_id=?').get(id);
+    if (launched) return JSON.parse(String(launched.payload)) as InputSnapshot;
     const effective = this.db.prepare('SELECT payload FROM execution_input_snapshots WHERE run_id=?').get(id);
     if (effective) return JSON.parse(String(effective.payload)) as InputSnapshot;
     const row = this.db.prepare('SELECT payload FROM snapshots WHERE run_id=?').get(id);
@@ -131,7 +134,7 @@ export class Runs {
       if (!row) throw new ServiceError('NOT_FOUND', 'Run target not found');
       if (row.state !== 'active') throw new ServiceError('PROJECT_INACTIVE', 'Project is inactive');
       if (row.archived || row.trashed || row.deleted || row.read_only) throw new ServiceError('NODE_LOCKED', 'Run target is archived, deleted or read-only');
-      const expectedType = { execution: 'execution', text_generation: 'text', image_generation: 'image' }[request.kind];
+      const expectedType = { execution: 'execution', text_generation: 'text', image_generation: 'image', visualize_generation: 'visualize' }[request.kind];
       if (!expectedType || row.type !== expectedType) throw new ServiceError('INVALID_REQUEST', 'Run kind does not match node type');
       if (!Number.isSafeInteger(request.expectedExecutionRevision) || row.execution_revision !== request.expectedExecutionRevision) throw new ServiceError('REVISION_CONFLICT', 'Graph execution revision changed');
       if (this.db.prepare(`SELECT 1 FROM runs WHERE node_id=? AND status NOT IN (${terminalSql})`).get(request.nodeId)) throw new ServiceError('ACTIVE_RUN', 'Node already has an unfinished run');
@@ -214,12 +217,24 @@ export class Runs {
       const runtime = this.runtime(id);
       if (runtime.epoch !== token.epoch || runtime.revision !== token.revision) throw new ServiceError('REVISION_CONFLICT', 'Stale launch attempt');
       if (this.get(id).status !== 'preparing' || runtime.details.backendLaunchAttempted === true) throw new ServiceError('CONFLICT', 'Run is not eligible to launch');
+      freezeVisualizeRunInputs(this.db, this.get(id), this.snapshot(id));
       this.db.prepare('UPDATE run_runtime SET revision=revision+1,details=? WHERE run_id=?').run(canonicalJson({ ...runtime.details, backendLaunchAttempted: true }), id);
       this.event(this.get(id), runtime.revision + 1);
       const title = promptRunTitle(this.snapshot(id).prompt);
       if (title) this.updateNodeTitle(id, this.runtime(id), title, false);
       return this.runtime(id);
     });
+  }
+  /** A prompt-derived title created by this Run may still receive its agent title. */
+  shouldGenerateNodeTitle(id: string): boolean {
+    const run = this.get(id), runtime = this.runtime(id);
+    if (runtime.details.kind !== 'execution') return true;
+    const node = this.db.prepare('SELECT n.current_version,n.read_only,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=? AND n.deleted=0').get(run.nodeId, run.graphId);
+    if (!node || node.read_only || node.current_version !== (runtime.details.titleVersion ?? runtime.details.baseVersion)) return false;
+    const content = JSON.parse(String(node.content)) as Json;
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return false;
+    const title = typeof content.title === 'string' ? content.title.trim() : '';
+    return runtime.details.generatedTitle !== true && (runtime.details.titleVersion !== undefined || !title || DEFAULT_EXECUTION_TITLES.has(title));
   }
   /** Title-only versions must not look like user edits when publishing generation. */
   updateNodeTitle(id: string, token: RunToken, value: string, generated = true): boolean {
@@ -234,7 +249,7 @@ export class Runs {
       if (!node || node.read_only || node.current_version !== (runtime.details.titleVersion ?? runtime.details.baseVersion)) return false;
       const content = JSON.parse(String(node.content)) as Json;
       if (!content || typeof content !== 'object' || Array.isArray(content)) return false;
-      if (runtime.details.kind === 'execution' && runtime.details.titleVersion === undefined && content.title && !DEFAULT_EXECUTION_TITLES.has(String(content.title))) return false;
+      if (!this.shouldGenerateNodeTitle(id)) return false;
       const graphs = new Graphs(this.db, this.serviceId);
       graphs.writable(run);
       const changed = content.title !== title;
@@ -287,7 +302,7 @@ export class Runs {
         this.repo.appendEvent({ eventId:randomUUID(), type:'project.files.changed', projectId:changed.projectId, graphId:null, entityId:changed.projectId, revision:runtime.revision + 1, occurredAt:new Date(this.now()).toISOString(), payload:{ runId:id, paths, fullRecheck:true } });
       }
       const reason = next === 'failed' ? recordedFailureReason(details) : undefined;
-      this.record(id, 'state', { from: run.status, to: next, ...(reason ? { reason } : {}) });
+      this.record(id, 'state', { from: run.status, to: next, ...(reason ? { reason } : {}), ...(next === 'failed' && details.errorDetails ? { errorCode: details.errorCode ?? null, errorDetails: details.errorDetails } : {}) });
       return changed;
     });
   }

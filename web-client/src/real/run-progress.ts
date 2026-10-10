@@ -68,6 +68,17 @@ function parseProgressEntries(history: RunProgressHistory | null | undefined, ma
       const to = payload?.to;
       if (typeof to === 'string' && Object.hasOwn(runStates, to)) pushState(translate(runStates[to]));
       if (to === 'failed' && typeof payload?.reason === 'string' && payload.reason.trim()) push('message', translate('Failure reason: {reason}', { reason: displayTerminology(payload.reason.trim()) }));
+      const details = object(payload?.errorDetails);
+      if (to === 'failed' && payload?.errorCode === 'INPUT_BLOCKED' &&
+        ['FORM_REQUIRED', 'FORM_INVALID'].includes(String(details?.visualizeCode)) && Array.isArray(details?.fields)) {
+        for (const [index, value] of details.fields.entries()) {
+          const field = object(value);
+          if (!field || typeof field.path !== 'string' || typeof field.message !== 'string') continue;
+          // Each field needs its own React key; only public validation data is shown.
+          push('message', translate('Form field {path}: {message}', { path: field.path || '/', message: field.message }));
+          result[result.length - 1]!.key = `${record.id}:field:${index}`;
+        }
+      }
       continue;
     }
     if (record.kind !== 'backend.progress') continue;

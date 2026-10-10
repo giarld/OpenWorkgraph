@@ -6,6 +6,7 @@ import {
   Image,
   Music,
   Play,
+  PanelsTopLeft,
   StickyNote,
   Type,
   Video,
@@ -53,6 +54,7 @@ const builtInDefinitions: NodeDefinition[] = [
   { type: "preview", title: "Preview", icon: Eye },
   { type: "file", title: "File", icon: File },
   { type: "execution", title: "Execution", icon: Play },
+  { type: "visualize", title: "Visualize", icon: PanelsTopLeft },
   { type: "demo:note", title: "Example note", icon: StickyNote, Content: DemoNote },
 ];
 

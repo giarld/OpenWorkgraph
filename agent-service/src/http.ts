@@ -1,5 +1,17 @@
 import type { IncomingMessage } from 'node:http';
 import { ServiceError } from './errors.js';
+/** Bounded binary request body; compression is never accepted. */
+export async function readBinary(request: IncomingMessage, limit: number): Promise<Buffer> {
+  if (request.headers['content-encoding']) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', '不接受压缩的资产请求。');
+  if (Number(request.headers['content-length'] ?? 0) > limit) throw new ServiceError('PAYLOAD_TOO_LARGE', '资产请求过大。');
+  const parts: Buffer[] = []; let size = 0;
+  for await (const part of request) {
+    size += part.length;
+    if (size > limit) throw new ServiceError('PAYLOAD_TOO_LARGE', '资产请求过大。');
+    parts.push(part);
+  }
+  return Buffer.concat(parts, size);
+}
 export function readJson(request: IncomingMessage, limit = 16 * 1024): Promise<Record<string, unknown>> {
   if (!/^application[/]json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers['content-type'] ?? '')) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','请求须使用 application/json。');
   if (request.headers['content-encoding']) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','暂不接受压缩的 JSON 请求。');

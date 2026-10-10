@@ -319,6 +319,11 @@
   left: 0;
   z-index: 5;
   cursor: default;
+  /* The layout wrapper can be wider than the visible prompt panel. */
+  pointer-events: none;
+}
+.owg-node-panel > * {
+  pointer-events: auto;
 }
 .owg-node-panel:empty {
   display: none;
@@ -769,3 +774,8 @@
 .owg-node.owg-group {
   z-index: -1;
 }
+.owg-node-viewport { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.owg-node-viewport[data-node-viewport-active="false"] { content-visibility: hidden; }
+.owg-node-viewport[data-node-viewport-active="false"] *,
+.owg-node-viewport[data-node-viewport-active="false"] *::before,
+.owg-node-viewport[data-node-viewport-active="false"] *::after { animation-play-state: paused !important; }

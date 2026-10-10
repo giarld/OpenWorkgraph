@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useNodeViewport } from '../canvas/NodeViewport';
 import { createPortal } from 'react-dom';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -31,6 +32,8 @@ export function MarkdownPreviewProvider({ children, ...options }: MarkdownPrevie
 
 /** Shared by the preview registry, reference dialogs and document nodes. */
 export function MarkdownPreview({ text, className = '', ...options }: MarkdownPreviewContext & { text: string; className?: string }) {
+  const visible = useNodeViewport();
+  const retained = useRef<ReactNode>(null);
   const context = useContext(MarkdownContext);
   const { onOpenLink = context.onOpenLink, imageRequest = context.imageRequest, projectId = context.projectId,
     imageRevision = context.imageRevision ?? 0, expandableImages = context.expandableImages ?? false, sourcePath = context.sourcePath } = options;
@@ -42,11 +45,15 @@ export function MarkdownPreview({ text, className = '', ...options }: MarkdownPr
         }}>{children}</a> : <span>{children}</span>,
         img: ({ src, alt }) => imageRequest && projectId ? <MarkdownFileImage sourcePath={sourcePath} src={src ?? ''} alt={alt} request={imageRequest} projectId={projectId} revision={imageRevision} onOpenLink={onOpenLink} expandable={expandableImages}/> : <span>{alt}</span>,
   }), [onOpenLink, imageRequest, projectId, imageRevision, expandableImages, sourcePath]);
-  return <article className={('markdown-body ' + className).trim()}>
+  // Shared provider updates (e.g. project file revisions) must not restart
+  // Markdown parsing or image reads in retained, offscreen nodes.
+  const content = useMemo(() => visible ? <article className={('markdown-body ' + className).trim()}>
     <ReactMarkdown skipHtml remarkPlugins={[remarkGfm, ...markdownRemarkPlugins]}
       urlTransform={url => /^file:/i.test(url) || (/^[a-z]:/i.test(url) && (url[2] === '/' || url.charCodeAt(2) === 92)) ? url : defaultUrlTransform(url)}
       components={components}>{text}</ReactMarkdown>
-  </article>;
+  </article> : retained.current, [visible, className, components, text]);
+  useLayoutEffect(() => { if (visible) retained.current = content; }, [visible, content]);
+  return content;
 }
 
 function MarkdownFileImage({ sourcePath, src, alt, request, projectId, revision, onOpenLink, expandable }: { sourcePath?: string; src: string; alt?: string; request: Request; projectId: string; revision: number; onOpenLink?: (href: string, sourcePath?: string) => void; expandable: boolean }) {
@@ -105,4 +112,3 @@ function MarkdownFileImage({ sourcePath, src, alt, request, projectId, revision,
     return <span className="markdown-file-image-fallback" role="status">{t('Loading preview…')}</span>;
   return <span className="markdown-file-image-fallback" role={target.kind === 'file' ? 'status' : undefined}>{target.kind === 'file' ? t('Unable to view this file.') + ' ' : ''}{onOpenLink && target.kind !== 'invalid' ? <a href={src} data-canvas-interactive data-canvas-link onPointerDown={event => event.stopPropagation()} onClick={event => { event.preventDefault(); event.stopPropagation(); onOpenLink(src, sourcePath); }}>{label}</a> : label}</span>;
 }
-

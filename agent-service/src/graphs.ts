@@ -9,21 +9,24 @@ import { canonicalJson, Repositories } from './persistence/repositories.js';
 import { previewEdgeError } from '@openworkgraph/protocol';
 import { PluginRegistry } from './plugins.js';
 import type { Resources } from './resources.js';
-const BUILTINS=new Set(['text','image','document','video','file','preview','execution','group']);
+import { validateStoredVisualizeContent, validateVisualizeTransition, visualizeChecked, visualizeResourceLinks } from './visualize-content.js';
+import { validateVisualizeNodeContent, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
+const BUILTINS=new Set(['text','image','document','video','file','preview','execution','group','visualize']);
 export function assertProjectWritable(db:DatabaseSync,id:string):void {
   const row=db.prepare('SELECT state FROM projects WHERE id=?').get(id);
   if (!row) throw new ServiceError('NOT_FOUND','项目不存在。');
   if (row['state']!=='active') throw new ServiceError('PROJECT_INACTIVE','停用项目只读。');
 }
 function identifier(value:unknown):asserts value is string { if (typeof value!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(value)) throw new ServiceError('INVALID_REQUEST','无效的标识。'); }
-function title(value:unknown):asserts value is string { if(typeof value!=='string'||!value.trim()||value.length>1024) throw new ServiceError('INVALID_REQUEST','名称必须非空且不超过 1024 字符。'); }
+function title(value:unknown,allowEmpty=false):asserts value is string { if(typeof value!=='string'||(!allowEmpty&&!value.trim())||value.length>1024) throw new ServiceError('INVALID_REQUEST','名称必须非空且不超过 1024 字符。'); }
 function position(value:unknown):asserts value is number { if(typeof value!=='number'||!Number.isFinite(value)||Math.abs(value)>1e9) throw new ServiceError('INVALID_REQUEST','无效的位置。'); }
 export function nodeDimension(value:unknown):asserts value is number {if(typeof value!=='number'||!Number.isFinite(value)||value<=0||value>1e9)throw new ServiceError('INVALID_REQUEST','节点尺寸必须为正有限数且不超过 1e9。');}
 function boundedContent(value:Json):void {
   let count=0; const visit=(v:Json,depth:number):void=>{if(depth>32||++count>100000) throw new ServiceError('INVALID_REQUEST','节点内容过深或过大。');if(v&&typeof v==='object')for(const item of Object.values(v))visit(item,depth+1);};visit(value,0);
   if(Buffer.byteLength(canonicalJson(value))>2*1024*1024)throw new ServiceError('PAYLOAD_TOO_LARGE','单节点内容不能超过 2 MiB。');
 }
-export function resourceLinks(content:Json):{resourceId:string;version:number}[] {
+export function resourceLinks(content:Json,nodeType?:string):{resourceId:string;version:number}[] {
+  if(nodeType==='visualize')return visualizeResourceLinks(visualizeChecked(()=>validateVisualizeNodeContent(content))).map(ref=>({resourceId:ref.resourceId,version:ref.resourceVersion}));
   const result=new Map<string,{resourceId:string;version:number}>();
   const visit=(value:Json):void=>{if(!value||typeof value!=='object')return;
     if(!Array.isArray(value)&&typeof value['resourceId']==='string') {const version=value['resourceVersion']??value['version'];if(typeof version!=='number'||!Number.isSafeInteger(version)||version<1)throw new ServiceError('INVALID_REQUEST','画布资源必须固定版本。');result.set(value['resourceId']+':'+version,{resourceId:value['resourceId'],version});}
@@ -200,7 +203,7 @@ export class Graphs {
       this.db.prepare('DELETE FROM node_resource_history WHERE node_id IN (SELECT id FROM nodes WHERE graph_id=?)').run(id);
       this.db.prepare('DELETE FROM group_members WHERE group_id IN (SELECT id FROM graph_groups WHERE graph_id=?) OR node_id IN (SELECT id FROM nodes WHERE graph_id=?)').run(id,id);
       this.db.prepare('DELETE FROM graph_groups WHERE graph_id=?').run(id);
-      for(const table of ['outputs','canvas_outputs','interactions','occupancy','execution_input_snapshots','snapshots','run_runtime','run_process_records','generation_candidates','publication_manifests'])
+      for(const table of ['outputs','canvas_outputs','interactions','occupancy','launch_input_snapshots','execution_input_snapshots','snapshots','run_runtime','run_process_records','generation_candidates','publication_manifests'])
         this.db.prepare(`DELETE FROM ${table} WHERE run_id IN (SELECT id FROM runs WHERE graph_id=?)`).run(id);
       this.db.prepare('DELETE FROM runs WHERE graph_id=?').run(id);
       this.db.prepare('DELETE FROM edges WHERE graph_id=?').run(id);
@@ -269,7 +272,7 @@ export class Graphs {
     const old=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(String(node['id']),Number(node['current_version']))!['content'])) as Json;
     if(node['type']==='execution'){
       if(!old||typeof old!=='object'||Array.isArray(old)||!content||typeof content!=='object'||Array.isArray(content)||!Object.hasOwn(content,'title'))throw new ServiceError('NODE_LOCKED','执行期间仅可修改节点名称。');
-      title(content['title']);
+      title(content['title'],true);
       const withoutTitle=(value:Record<string,Json>):Json=>Object.fromEntries(Object.entries(value).filter(([key])=>key!=='title')) as Json;
       if(canonicalJson(withoutTitle(old))!==canonicalJson(withoutTitle(content)))throw new ServiceError('NODE_LOCKED','执行期间仅可修改节点名称。');
       return;
@@ -290,6 +293,12 @@ export class Graphs {
     }
     const state=new PluginRegistry(this.db).inspect(String(node['type']),Number(node['schema_version']),content).state;
     if(state!=='available')throw new ServiceError(state==='invalid'?'INVALID_REQUEST':'PLUGIN_UNAVAILABLE','节点正文或插件资源契约不可用。');
+    if(node['type']==='visualize'){
+      const scope=this.db.prepare('SELECT graph_id,project_id FROM graphs g JOIN nodes n ON n.graph_id=g.id WHERE n.id=?').get(String(node['id']))!;
+      const stored=validateStoredVisualizeContent(this.db,{serviceId:this.serviceId,projectId:String(scope['project_id']),graphId:String(scope['graph_id'])},content);
+      const previous=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(String(node['id']),Number(node['current_version']))!['content']));
+      validateVisualizeTransition(visualizeChecked(()=>validateVisualizeNodeContent(previous)),stored.content,stored.page);
+    }
   }
   private node(scope:GraphScope,id:string):Record<string,unknown>{const row=this.db.prepare('SELECT * FROM nodes WHERE id=? AND graph_id=? AND deleted=0').get(id,scope.graphId);if(!row)throw new ServiceError('NOT_FOUND','节点不存在。');return row;}
   private group(scope:GraphScope,id:string):Record<string,unknown>{
@@ -353,7 +362,8 @@ export class Graphs {
   /** All retained node content versions protect resources independently of live node references. */
   retainResources(scope:GraphScope,nodeId:string,version:number,content:Json):void {
     this.db.prepare("DELETE FROM canvas_resource_references WHERE owner_kind='node' AND node_id=?").run(nodeId);
-    for(const link of resourceLinks(content)){
+    const nodeType=String(this.db.prepare('SELECT type FROM nodes WHERE id=?').get(nodeId)?.['type']);
+    for(const link of resourceLinks(content,nodeType)){
       if(!this.db.prepare('SELECT 1 FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id WHERE r.id=? AND r.graph_id=? AND v.version=?').get(link.resourceId,scope.graphId,link.version))throw new ServiceError('INPUT_BLOCKED','资源不属于本图或版本不存在。');
       this.db.prepare('INSERT OR IGNORE INTO node_resource_history(node_id,node_version,resource_id,resource_version) VALUES(?,?,?,?)').run(nodeId,version,link.resourceId,link.version);
       this.db.prepare("INSERT INTO canvas_resource_references(id,resource_id,resource_version,graph_id,owner_kind,node_id) VALUES(?,?,?,?,'node',?)").run(randomUUID(),link.resourceId,link.version,scope.graphId,nodeId);
@@ -380,7 +390,8 @@ export class Graphs {
     if(data.bytes!==undefined&&(!Number.isSafeInteger(data.bytes)||Number(data.bytes)<0||Number(data.bytes)!==bytes))throw new ServiceError('INVALID_REQUEST','文件节点资源大小无效。');
   }
   /** Trusted publication/import only. Public commands cannot create delivery edges/read-only nodes. */
-  insertNode(scope:GraphScope,node:Node,trusted=false):void {
+  insertNode(scope:GraphScope,node:Node,trusted=false,options:{visualizeSnapshot?:boolean}={}):void {
+    if(options.visualizeSnapshot&&!trusted)throw new ServiceError('INVALID_REQUEST','保存快照仅允许可信迁移入口。');
     node={...node,content:limitNodeContentTitle(node.content)};
     identifier(node.id);if(typeof node.type!=='string'||!node.type||node.type.length>128||!Number.isSafeInteger(node.schemaVersion)||node.schemaVersion<1||node.contentVersion!==1)throw new ServiceError('INVALID_REQUEST','节点类型或版本无效。');
     if(node.readOnly&&!trusted)throw new ServiceError('INVALID_REQUEST','客户端不能伪造服务只读产出。');position(node.x);position(node.y);boundedContent(node.content);
@@ -394,12 +405,17 @@ export class Graphs {
     if(node.type==='group'&&(plugin.state!=='available'||node.readOnly))throw new ServiceError('INVALID_REQUEST','分组必须使用内置 schema 1，仅允许标题和布局。');
     if(plugin.state==='invalid'&&!trusted)throw new ServiceError('INVALID_REQUEST','节点正文不符合资源契约。');
     const known=plugin.state==='available';
+    if(node.type==='visualize'&&node.schemaVersion===1){
+      const stored=validateStoredVisualizeContent(this.db,scope,node.content);
+      if(!options.visualizeSnapshot)validateVisualizeTransition(null,stored.content,stored.page);
+      node={...node,width:node.width??VISUALIZE_DEFAULT_SIZE.width,height:node.height??VISUALIZE_DEFAULT_SIZE.height};
+    }
     const reason=node.readOnly?'original':!known?'missing_plugin':'none';
     this.db.prepare('INSERT INTO nodes(id,graph_id,type,schema_version,current_version,x,y,read_only,read_only_reason,created_at,creation_order) VALUES(?,?,?,?,1,?,?,?,?,?,(SELECT COALESCE(MAX(creation_order),0)+1 FROM nodes))').run(node.id,scope.graphId,node.type,node.schemaVersion,node.x,node.y,Number(node.readOnly||!known),reason,Date.now());
     this.db.prepare('UPDATE nodes SET width=?,height=? WHERE id=?').run(node.width??null,node.height??null,node.id);
     this.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,1,?)').run(node.id,canonicalJson(node.content));this.retainResources(scope,node.id,1,node.content);
     if(node.type==='group'){
-      const name=(node.content as Record<string,Json>)['title']??'分组';title(name);
+      const name=(node.content as Record<string,Json>)['title']??'分组';title(name,true);
       this.db.prepare('INSERT INTO graph_groups(id,graph_id,run_id,title) VALUES(?,?,NULL,?)').run(node.id,scope.graphId,name);
       this.setGroupMembers(scope,node.id,node.memberIds??[]);
     }
@@ -410,7 +426,7 @@ export class Graphs {
     if(this.db.prepare('SELECT 1 FROM edges WHERE id=? OR (graph_id=? AND source_id=? AND target_id=?)').get(edge.id,scope.graphId,edge.sourceId,edge.targetId))throw new ServiceError('CONFLICT','连线已存在。');
     const source=this.node(scope,edge.sourceId),target=this.node(scope,edge.targetId);
     if(source['type']==='group'||target['type']==='group')throw new ServiceError('INVALID_EDGE','纯布局分组不能作为依赖边端点。');
-    if(edge.kind==='delivery'){if(!trusted||source['type']!=='execution'||!target['read_only']||['execution','group','preview'].includes(String(target['type'])))throw new ServiceError('INVALID_EDGE','交付边只能由服务发布。');return;}
+    if(edge.kind==='delivery'){if(!trusted||source['type']!=='execution'||(!target['read_only']&&target['type']!=='visualize')||['execution','group','preview'].includes(String(target['type'])))throw new ServiceError('INVALID_EDGE','交付边只能由服务发布。');return;}
     if(edge.kind==='execution'){
       if(source['type']!=='execution'||target['type']!=='execution')throw new ServiceError('INVALID_EDGE','串联边只能连接执行节点。');
       const dependencies=this.db.prepare("SELECT source_id,target_id FROM edges WHERE graph_id=? AND kind='execution'").all(scope.graphId).map(row=>({sourceId:String(row['source_id']),targetId:String(row['target_id']),kind:'execution'}));
@@ -420,7 +436,7 @@ export class Graphs {
     const previewError=previewEdgeError(String(source['type']),String(target['type']),Number(this.db.prepare('SELECT COUNT(*) AS n FROM edges WHERE target_id=?').get(edge.targetId)!['n']));
     if(previewError)throw new ServiceError('INVALID_EDGE',previewError);
     if(source['type']==='execution')throw new ServiceError('INVALID_EDGE','执行节点不能作为内容前驱，请连接输出产物。');
-    if(['execution','text','image','document','video','file'].includes(String(target['type']))||!BUILTINS.has(String(target['type']))){const count=Number(this.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE target_id=? AND kind='reference'").get(edge.targetId)!['n']);if(count>=8)throw new ServiceError('INVALID_EDGE','直接前驱最多 8 个。');}
+    if(['execution','text','image','document','video','file','visualize'].includes(String(target['type']))||!BUILTINS.has(String(target['type']))){const count=Number(this.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE target_id=? AND kind='reference'").get(edge.targetId)!['n']);if(count>=8)throw new ServiceError('INVALID_EDGE','直接前驱最多 8 个。');}
     // Input topology is frozen for both execution and generation. Generation
     // body edits remain allowed and publish through the candidate CAS mechanism.
     this.assertNodeEditable(edge.targetId);
@@ -487,7 +503,7 @@ export class Graphs {
         case 'layout.move':this.move(command,op.positions);break;
         case 'layout.resize':this.resize(command,op.sizes);break;
         case 'group.members':this.setGroupMembers(command,op.groupId,op.memberIds);break;
-        case 'group.rename':title(op.title);this.group(command,op.groupId);this.db.prepare('UPDATE graph_groups SET title=? WHERE id=? AND graph_id=? AND run_id IS NULL').run(op.title,op.groupId,command.graphId);break;
+        case 'group.rename':title(op.title,true);this.group(command,op.groupId);this.db.prepare('UPDATE graph_groups SET title=? WHERE id=? AND graph_id=? AND run_id IS NULL').run(op.title,op.groupId,command.graphId);break;
         case 'graph.rename':title(op.title);this.db.prepare('UPDATE graphs SET title=? WHERE id=?').run(op.title,command.graphId);break;
         case 'graph.archive':case 'graph.trash':this.lifecycle(command,op);break;
         default:throw new ServiceError('INVALID_REQUEST','不支持的图命令。');

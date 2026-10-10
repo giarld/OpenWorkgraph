@@ -232,5 +232,22 @@ CREATE TABLE graph_document_run_gates (
   cursor INTEGER NOT NULL REFERENCES graph_document_versions(id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX graph_document_run_gates_cursor ON graph_document_run_gates(graph_id,cursor);
+` }, { version: 25, sql: `
+CREATE TABLE launch_input_snapshots (run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,payload TEXT NOT NULL CHECK(json_valid(payload))) STRICT;
+CREATE TRIGGER launch_input_snapshot_immutable BEFORE UPDATE ON launch_input_snapshots BEGIN SELECT RAISE(ABORT,'immutable launch input snapshot'); END;
+` }, { version: 26, sql: `
+CREATE TEMP TABLE visualize_run_sequence AS SELECT seq FROM sqlite_sequence WHERE name='runs';
+CREATE TABLE runs_visualize (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, graph_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('execution','text_generation','image_generation','visualize_generation')), status TEXT NOT NULL CHECK(status IN ('accepted','queued','preparing','running','waiting_answer','waiting_approval','agent_completed','finalizing','cancelling','reconciling','paused_restore','succeeded','failed','cancelled','interrupted')), input_digest TEXT NOT NULL, created_at TEXT NOT NULL, history_state TEXT NOT NULL DEFAULT 'retained' CHECK(history_state IN ('retained','cleared')), FOREIGN KEY(graph_id,project_id) REFERENCES graphs(id,project_id), FOREIGN KEY(node_id,graph_id) REFERENCES nodes(id,graph_id)) STRICT;
+INSERT INTO runs_visualize SELECT * FROM runs;
+PRAGMA legacy_alter_table=ON;
+DROP TABLE runs;
+ALTER TABLE runs_visualize RENAME TO runs;
+UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE((SELECT MAX(seq) FROM visualize_run_sequence),0)) WHERE name='runs';
+INSERT INTO sqlite_sequence(name,seq) SELECT 'runs',seq FROM visualize_run_sequence WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='runs');
+DROP TABLE visualize_run_sequence;
+PRAGMA legacy_alter_table=OFF;
+CREATE UNIQUE INDEX one_active_run_per_node ON runs(node_id) WHERE status NOT IN ('succeeded','failed','cancelled','interrupted');
+CREATE INDEX runs_project_sequence ON runs(project_id,sequence);
+CREATE UNIQUE INDEX runs_id_graph ON runs(id,graph_id);
 ` }];
-export const SCHEMA_VERSION = 24;
+export const SCHEMA_VERSION = 26;

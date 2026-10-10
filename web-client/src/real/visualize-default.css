@@ -1,0 +1,71 @@
+/* Host-injected defaults. Author styles load afterwards for explicitly requested designs. */
+:root {
+  color-scheme: light;
+  --canvas: #f4f2ed;
+  --panel: #fbfaf7;
+  --fill: #e7e5df;
+  --text: #292524;
+  --muted: #78716c;
+  --stroke: #d6d3ca;
+  --active: #1c1917;
+  --link: #2563eb;
+  --danger: #b42318;
+}
+:root[data-theme=dark] {
+  color-scheme: dark;
+  --canvas: #181715;
+  --panel: #1f1d1a;
+  --fill: #292524;
+  --text: #f5f5f4;
+  --muted: #d6d3d1;
+  --stroke: #44403c;
+  --active: #fafaf9;
+  --link: #60a5fa;
+  --danger: #ffb4ab;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; padding: 12px; background: var(--canvas); color: var(--text); font: 14px/1.6 system-ui, sans-serif; overflow-wrap: anywhere; }
+h1, h2, h3 { margin: 0 0 12px; line-height: 1.3; }
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 16px; }
+p { margin: 0 0 12px; }
+a { color: var(--link); }
+button, input, select, textarea { font: inherit; color: var(--text); max-width: 100%; accent-color: var(--active); }
+button, input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); padding: 9px 12px; min-height: 44px; }
+button { cursor: pointer; background: var(--fill); font-weight: 600; }
+button:hover:not(:disabled), .visualize-secondary:hover:not(:disabled) { background: var(--panel); border-color: var(--active); }
+.visualize-primary { background: var(--text); color: var(--panel); border-color: var(--text); }
+.visualize-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 90%, var(--panel)); color: var(--panel); border-color: var(--text); }
+.visualize-secondary { background: var(--panel); color: var(--text); }
+button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: default; background: var(--fill); color: var(--text); border-color: var(--stroke); opacity: 1; }
+:is(button, input, select, textarea, a, summary):focus-visible { outline: 2px solid var(--active); outline-offset: 3px; }
+label { display: block; font-weight: 600; }
+input[type=checkbox], input[type=radio] { width: 18px; height: 18px; vertical-align: middle; }
+textarea { min-height: 100px; resize: vertical; }
+fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--stroke); border-radius: 8px; }
+legend { padding: 0 6px; font-weight: 600; }
+summary { cursor: pointer; }
+img, video { max-width: 100%; height: auto; }
+pre { max-width: 100%; overflow: auto; padding: 12px; background: var(--fill); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px; border-bottom: 1px solid var(--stroke); text-align: start; }
+.visualize-page { width: 100%; max-width: 1180px; margin-inline: auto; min-width: 0; }
+.visualize-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.visualize-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 16px; }
+.visualize-card { min-width: 0; padding: 16px; background: var(--panel); color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; }
+.visualize-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.visualize-field :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { width: 100%; }
+.visualize-help { margin: 0; color: color-mix(in srgb, var(--muted) 85%, var(--text)); font-size: 13px; }
+.visualize-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.visualize-notice, .visualize-error, [data-visualize-errors] { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); color: var(--text); }
+.visualize-error, [data-visualize-errors] { border-color: var(--danger); color: var(--danger); }
+.visualize-badge { display: inline-block; padding: 2px 8px; border: 1px solid var(--stroke); border-radius: 999px; background: var(--fill); color: var(--text); font-size: 12px; }
+@media (max-width: 400px) {
+  .visualize-card { padding: 12px; }
+  .visualize-actions > button { flex: 1 1 auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

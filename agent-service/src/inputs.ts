@@ -4,15 +4,18 @@ import type { CanvasResourceVersion, FrozenApiImageRoute, ImageInputMode, ImageR
 import { ServiceError } from './errors.js';
 import { PluginRegistry, readField } from './plugins.js';
 import type { PluginInformation } from './plugins.js';
-import { normalizeProjectPath } from './project-files.js';
+import { normalizeProjectPath, classifyProjectFile } from './project-files.js';
+import { readVisualizeBusinessForm, resolveVisualizeFormAssets } from './visualize-content.js';
+import { canonicalJson } from './persistence/repositories.js';
+import type { VisualizeFormSnapshot, VisualizeInputSnapshot, VisualizeNodeContent } from '@openworkgraph/protocol';
 
 export interface InputBudget { maxItemBytes: number; maxTotalBytes: number; maxResourceItemBytes: number; maxResourceTotalBytes: number; maxResources: number }
 export interface PreparedRepresentation { state: 'processing' | 'ready' | 'failed'; resourceSha256: string; representationVersion: number | null; text: string | null; contentHash: string | null }
 export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<InputBudget>; readRepresentation?: (resource: CanvasResourceVersion) => PreparedRepresentation | null }
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
-export interface InputSource { edgeId: string; sourceNodeId: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
+export interface InputSource { edgeId: string; sourceNodeId: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; form?: VisualizeFormSnapshot; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
 export interface InputPreview { graphId: string; nodeId: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles: ProjectFileInput[]; sources: InputSource[]; issues: InputIssue[]; canSubmit: boolean; predecessorCount: number; totalBytes: number }
-export type BuildInputOptions = { expectedExecutionRevision?: number; skills?: import('@openworkgraph/protocol').FrozenSkill[] } & (
+export type BuildInputOptions = { expectedExecutionRevision?: number; skills?: import('@openworkgraph/protocol').FrozenSkill[]; features?: import('@openworkgraph/protocol').VisualizeFeatureSelection[]; visualizeGeneration?: import('@openworkgraph/protocol').VisualizeGenerationContext } & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute,{type:'codex'}> }
   | { imageRoute: FrozenApiImageRoute; model?: never }
 );
@@ -35,13 +38,38 @@ export class InputPreparation {
     try { const result = this.collect(graphId,nodeId,excludeFiles); this.db.exec('RELEASE input_preparation_read'); return result; }
     catch (error) { this.db.exec('ROLLBACK TO input_preparation_read; RELEASE input_preparation_read'); throw error; }
   }
+  /** Shared source/version selection for generation and interactive host sessions. */
+  visualizeInputs(graphId: string, nodeId: string): VisualizeInputSnapshot {
+    this.db.exec('SAVEPOINT visualize_input_read');
+    try {
+      const target = this.db.prepare('SELECT n.type,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=? AND n.deleted=0').get(nodeId, graphId);
+      if (!target || target['type'] !== 'visualize') throw new ServiceError('NOT_FOUND', '可视化节点不存在。');
+      const content = JSON.parse(String(target['content'])) as VisualizeNodeContent;
+      const preview = this.collect(graphId, nodeId, false, true);
+      if (preview.issues.length) throw new ServiceError(preview.issues[0]!.code, preview.issues.map(issue => issue.nodeId + ': ' + issue.reason).join('; '));
+      const bindings = new Map(content.inputBindings.map(binding => [binding.edgeId, binding.name]));
+      const edges = new Set(preview.sources.map(source => source.edgeId));
+      if (content.inputBindings.some(binding => !edges.has(binding.edgeId))) throw new ServiceError('INPUT_BLOCKED', '输入绑定必须指向当前节点的参考连线。');
+      const inputs = preview.sources.map(source => ({ name: bindings.get(source.edgeId) ?? source.edgeId, edgeId: source.edgeId, sourceNodeId: source.sourceNodeId, contentVersion: source.contentVersion, resources: source.resourceIndexes.map(index => preview.resources[index]!), ...(source.projectFileIndexes.length ? { projectFiles: source.projectFileIndexes.map(index => preview.projectFiles[index]!) } : {}), ...(source.form ? { form: source.form } : {}), ...(source.preview ? { preview: source.preview } : {}) }));
+      if (new Set(inputs.map(input => input.name)).size !== inputs.length) throw new ServiceError('INPUT_BLOCKED', '输入绑定名称与未命名参考连线标识冲突。');
+      const digest = createHash('sha256').update(canonicalJson({ graphId, nodeId, inputs } as unknown as Json)).digest('hex');
+      this.db.exec('RELEASE visualize_input_read');
+      return freeze({ version: 1, digest, inputs });
+    } catch (error) { this.db.exec('ROLLBACK TO visualize_input_read; RELEASE visualize_input_read'); throw error; }
+  }
   build(graphId: string, nodeId: string, options: BuildInputOptions): InputSnapshot {
     const preview = this.inputPreview(graphId,nodeId,options.imageRoute?.type === 'api');
     if (options.expectedExecutionRevision !== undefined && options.expectedExecutionRevision !== preview.executionRevision) throw new ServiceError('REVISION_CONFLICT','Graph execution revision changed');
     if (preview.issues.length) throw new ServiceError(preview.issues[0]!.code,preview.issues.map(i => `${i.nodeId}: ${i.reason}`).join('; '));
     const image = preview.resources.some(item=>item.kind==='image' && item.resource);
     const inputMode: ImageInputMode = image ? (preview.prompt.trim() ? 'text_image' : 'image') : 'text';
-    const base = {executionRevision:preview.executionRevision,prompt:preview.prompt,resources:preview.resources,projectFiles:preview.projectFiles};
+    const visualizeBindings: import('@openworkgraph/protocol').VisualizeRunInputBinding[] = [];
+    for (const source of preview.sources.filter(source => source.form)) {
+      const existing = visualizeBindings.find(binding => binding.sourceNodeId === source.sourceNodeId);
+      if (existing) { existing.edgeIds.push(source.edgeId); existing.resourceIndexes = [...new Set([...existing.resourceIndexes, ...source.resourceIndexes])]; existing.projectFileIndexes = [...new Set([...(existing.projectFileIndexes ?? []), ...source.projectFileIndexes])]; }
+      else visualizeBindings.push({ sourceNodeId: source.sourceNodeId, edgeIds: [source.edgeId], resourceIndexes: [...source.resourceIndexes], projectFileIndexes: [...source.projectFileIndexes] });
+    }
+    const base = {executionRevision:preview.executionRevision,prompt:preview.prompt,resources:preview.resources,projectFiles:preview.projectFiles,...(visualizeBindings.length ? {visualizeBindings} : {}), ...(options.features?.length ? { features: structuredClone(options.features) } : {}), ...(options.visualizeGeneration ? { visualizeGeneration: structuredClone(options.visualizeGeneration) } : {})};
     let payload: Omit<InputSnapshot,'inputDigest'>;
     if (options.imageRoute?.type === 'api') {
       const route = options.imageRoute;
@@ -55,7 +83,7 @@ export class InputPreparation {
     const inputDigest = createHash('sha256').update(JSON.stringify({graphId,nodeId,...payload,sources:preview.sources})).digest('hex');
     return freeze({inputDigest,...payload} as InputSnapshot);
   }
-  private collect(graphId: string, nodeId: string, excludeFiles: boolean): InputPreview {
+  private collect(graphId: string, nodeId: string, excludeFiles: boolean, visualize = false): InputPreview {
     const graph = this.db.prepare('SELECT execution_revision,archived,trashed,project_id FROM graphs WHERE id=?').get(graphId);
     if (!graph) throw new ServiceError('NOT_FOUND','Graph not found');
     // Schema 4 compatibility for resource fixtures; schema 5 and later filter tombstones.
@@ -69,7 +97,7 @@ export class InputPreparation {
     let textBudgetBytes=result.totalBytes,resourceBudgetBytes=0;
     const issue = (id: string, reason: string, code: InputIssue['code'] = 'INPUT_BLOCKED') => result.issues.push({code,nodeId:id,reason});
     if (graph['archived']||graph['trashed']) issue(nodeId,'Graph is archived or trashed');
-    if (!['text','image','execution'].includes(String(target['type']))) issue(nodeId,'Target is not generatable');
+    if (!(visualize ? ['visualize'] : ['text','image','execution','visualize']).includes(String(target['type']))) issue(nodeId,'Target is not generatable');
     if (this.plugins.inspect(String(target['type']),Number(target['schema_version']),content).state !== 'available') issue(nodeId,'Target contract is unavailable','PLUGIN_UNAVAILABLE');
     if (Buffer.byteLength(prompt) > this.budget.maxItemBytes) issue(nodeId,'提示词超过单项文本预算。','INPUT_BUDGET_EXCEEDED');
     const edgeColumns = this.db.prepare('PRAGMA table_info(edges)').all();
@@ -101,6 +129,47 @@ export class InputPreparation {
       if (info.state !== 'available' || !info.contract) { issue(id,info.reason ?? 'Missing contract','PLUGIN_UNAVAILABLE'); continue; }
       const audit: InputSource = {edgeId:String(source['edge_id']),sourceNodeId:id,contentVersion:Number(source['current_version']),resourceIndexes:[],projectFileIndexes:[],...(preview ? {preview} : {})};
       result.sources.push(audit);
+      if (source['type'] === 'visualize') {
+        try {
+          const business = readVisualizeBusinessForm(this.db, { projectId: String(graph['project_id']), graphId }, info.content);
+          // Also register this immutable resource in submission preflight discovery.
+          const representation = this.options.readRepresentation?.(business.resource);
+          if (this.options.readRepresentation && (!representation || representation.state !== 'ready' || representation.resourceSha256 !== business.resource.sha256 || representation.representationVersion !== business.resource.representationVersion)) { issue(id, '业务表单资源尚未就绪或固定版本不匹配。'); continue; }
+          const text = canonicalJson(business.form.data), textBytes = Buffer.byteLength(text), resourceBytes = business.resource.bytes;
+          if (textBytes > this.budget.maxItemBytes || resourceBytes > this.budget.maxResourceItemBytes) { issue(id, '业务表单超过单项输入预算。', 'INPUT_BUDGET_EXCEEDED'); continue; }
+          audit.form = business.form;
+          const assets = resolveVisualizeFormAssets(this.db, { projectId: String(graph['project_id']), graphId }, business.form.data);
+          for (const asset of assets.resources) {
+            const resourceBytes = asset.resource!.bytes;
+            if (resourceBytes > this.budget.maxResourceItemBytes) { issue(id, '表单引用资产超过单项文件预算。', 'INPUT_BUDGET_EXCEEDED'); continue; }
+            const key = JSON.stringify([asset.kind, asset.text, asset.resource]);
+            let index = dedup.get(key);
+            if (index === undefined) { index = result.resources.length; dedup.set(key, index); result.resources.push({ ...asset, sourceNodeIds: [id] }); result.totalBytes += resourceBytes; resourceBudgetBytes += resourceBytes; }
+            else if (!result.resources[index]!.sourceNodeIds.includes(id)) result.resources[index]!.sourceNodeIds.push(id);
+            audit.resourceIndexes.push(index);
+          }
+          for (const asset of assets.projectFiles) {
+            if (excludeFiles) { issue(id, 'API 生图不能读取项目文件引用，请使用 Codex。'); continue; }
+            const key = JSON.stringify([asset.kind, asset.relativePath]);
+            let index = projectFileDedup.get(key);
+            if (index === undefined) { index = result.projectFiles.length; projectFileDedup.set(key, index); result.projectFiles.push({ ...asset, sourceNodeIds: [id], edgeIds: [audit.edgeId] }); }
+            else { const file = result.projectFiles[index]!; if (!file.sourceNodeIds.includes(id)) file.sourceNodeIds.push(id); if (!file.edgeIds.includes(audit.edgeId)) file.edgeIds.push(audit.edgeId); }
+            audit.projectFileIndexes.push(index);
+          }
+          const key = JSON.stringify(['text', text, business.resource]);
+          const existing = dedup.get(key);
+          if (existing !== undefined) {
+            const envelope = result.resources[existing]!;
+            if (!envelope.sourceNodeIds.includes(id)) envelope.sourceNodeIds.push(id);
+            audit.resourceIndexes.push(existing);
+          } else {
+            const index = result.resources.length; dedup.set(key, index); audit.resourceIndexes.push(index);
+            result.resources.push({ kind: 'text', sourceNodeIds: [id], text, resource: business.resource });
+            result.totalBytes += textBytes + resourceBytes; textBudgetBytes += textBytes; resourceBudgetBytes += resourceBytes;
+          }
+        } catch (error) { issue(id, error instanceof Error ? error.message : '业务表单不可读'); }
+        continue;
+      }
       const sourceDescriptor = info.content && typeof info.content === 'object' && !Array.isArray(info.content) && info.content.source && typeof info.content.source === 'object' && !Array.isArray(info.content.source) ? info.content.source : null;
       if (sourceDescriptor?.kind === 'project-file-empty') { issue(id,'空引用节点尚未关联项目文件。'); continue; }
       if (sourceDescriptor?.kind === 'project-file') {
@@ -170,11 +239,25 @@ export class InputPreparation {
         }
       }
     }
-    if (result.resources.length > this.budget.maxResources) issue(nodeId,'参考资源数量超过限制。','INPUT_BUDGET_EXCEEDED');
+    const ownFiles = readField(content, 'projectFileReferences');
+    if (ownFiles !== undefined) {
+      if (!Array.isArray(ownFiles) || ownFiles.length > 64) issue(nodeId, '项目文件引用无效。');
+      else for (const value of ownFiles) {
+        try {
+          const relativePath = normalizeProjectPath(readField(value, 'relativePath'));
+          const kind = classifyProjectFile(relativePath).type;
+          if (excludeFiles && kind === 'file') { issue(nodeId, '当前生成路径不支持此项目文件。'); continue; }
+          const existing = result.projectFiles.find(item => item.relativePath === relativePath && item.kind === kind);
+          if (existing) { if (!existing.sourceNodeIds.includes(nodeId)) existing.sourceNodeIds.push(nodeId); }
+          else result.projectFiles.push({ kind, relativePath, sourceNodeIds: [nodeId], edgeIds: [] });
+        } catch { issue(nodeId, '项目相对文件身份无效。'); }
+      }
+    }
+    if (result.resources.length + result.projectFiles.length > this.budget.maxResources) issue(nodeId,'参考资源数量超过限制。','INPUT_BUDGET_EXCEEDED');
     if (textBudgetBytes > this.budget.maxTotalBytes) issue(nodeId,'文本内容总量超过预算。','INPUT_BUDGET_EXCEEDED');
     if (resourceBudgetBytes > this.budget.maxResourceTotalBytes) issue(nodeId,'参考文件总量超过预算。','INPUT_BUDGET_EXCEEDED');
     // Image-only generation needs an actual frozen direct-predecessor image, not merely an edge or text.
-    if (!prompt.trim() && !(target['type']==='image' && (result.resources.some(item=>item.kind==='image' && item.resource) || result.projectFiles.some(item=>item.kind==='image')))) issue(nodeId,'Own prompt must be nonempty unless an image node has a reference image');
+    if (!visualize && !prompt.trim() && !(target['type']==='image' && (result.resources.some(item=>item.kind==='image' && item.resource) || result.projectFiles.some(item=>item.kind==='image')))) issue(nodeId,'Own prompt must be nonempty unless an image node has a reference image');
     result.canSubmit = result.issues.length === 0; return result;
   }
 }

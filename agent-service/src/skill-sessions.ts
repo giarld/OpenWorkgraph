@@ -1,16 +1,24 @@
 import { promises as fs } from 'node:fs';
 import { isSkillName, legacySkillMentions } from '@openworkgraph/protocol';
 import { isAbsolute, basename } from 'node:path';
-import type { FrozenSkill, SkillReference } from '@openworkgraph/protocol';
+import type { FrozenPromptSelection, FrozenSkill, SkillReference } from '@openworkgraph/protocol';
 import type { BuiltinSkills } from './builtin-skills.js';
 import type { SkillConfigs, SkillConfigRevisionRequest } from './skill-configs.js';
 import type { AdapterOptions } from './backend/adapter.js';
 import { discoverCodexSkills } from './skills-api.js';
 import { ServiceError } from './errors.js';
+import { freezeVisualizeFeatures } from './visualize-features.js';
 
 /** Values live only in private configuration files and an individual session's memory. */
 export class SkillSessions {
   constructor(readonly packages: BuiltinSkills, readonly configs: SkillConfigs, readonly backendOptions: AdapterOptions = {}) {}
+  /** Feature selection never becomes a skill reference or a package/configuration request.
+   * Call during Run preflight; persist both fields in the same submitted snapshot. */
+  async freezeSelection(prompt: string, references: unknown, features: unknown, cwd: string, visualizeGeneration = false): Promise<FrozenPromptSelection> {
+    const frozenFeatures = freezeVisualizeFeatures(features, visualizeGeneration);
+    const skills = await this.freeze(prompt, references, cwd);
+    return { skills, features: frozenFeatures };
+  }
   async freeze(prompt: string, raw: unknown, cwd: string): Promise<FrozenSkill[]> {
     const references = this.references(prompt, raw);
     const names = legacySkillMentions(prompt);

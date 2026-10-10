@@ -4,6 +4,7 @@ import type { Graphs } from './graphs.js';
 import { resourceLinks } from './graphs.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
+import { restoreVisualizeContent } from './visualize-transfer.js';
 
 type Row = Record<string, SQLInputValue>;
 interface Document { title: string; nodes: Row[]; edges: Row[]; groups: Row[]; members: Row[]; outputs: Row[] }
@@ -57,7 +58,7 @@ export class GraphDocumentVersions {
   }
   private append(scope: GraphScope, document: Document): number {
     const id = Number(this.db.prepare('INSERT INTO graph_document_versions(graph_id,document) VALUES(?,?)').run(scope.graphId, canonicalJson(document as unknown as Json)).lastInsertRowid);
-    for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json)) {
+    for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json,String(node['type']))) {
       this.db.prepare('INSERT OR IGNORE INTO graph_document_resources(version_id,resource_id,resource_version) VALUES(?,?,?)').run(id, link.resourceId, link.version);
     }
     return id;
@@ -151,7 +152,7 @@ export class GraphDocumentVersions {
       }
       this.db.prepare('UPDATE graph_document_versions SET document=? WHERE id=?').run(canonicalJson(document as unknown as Json),version['id']!);
       this.db.prepare('DELETE FROM graph_document_resources WHERE version_id=?').run(version['id']!);
-      for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json))
+      for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json,String(node['type'])))
         this.db.prepare('INSERT OR IGNORE INTO graph_document_resources(version_id,resource_id,resource_version) VALUES(?,?,?)').run(version['id']!,link.resourceId,link.version);
     }
     this.db.prepare('UPDATE graph_document_heads SET execution_revision=?,layout_revision=?,run_sequence=? WHERE graph_id=?').run(current.execution,current.layout,current.run,scope.graphId);
@@ -216,9 +217,12 @@ export class GraphDocumentVersions {
       this.db.prepare('UPDATE nodes SET deleted=1,undo_expires_at=NULL WHERE id=?').run(n['id']!);
       this.db.prepare('DELETE FROM node_resource_history WHERE node_id=?').run(n['id']!);
     }
-    for (const n of doc.nodes) {
+    for (let n of doc.nodes) {
       const current = this.db.prepare('SELECT n.*,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?').get(n['id']!, id);
       if (!current) throw new ServiceError('CONFLICT', '历史节点已不存在，无法恢复。');
+      if (n['type'] === 'visualize' && current['type'] === 'visualize' && current['content'] !== n['content']) {
+        n = { ...n, content: canonicalJson(restoreVisualizeContent(this.db, scope, String(n['id']), JSON.parse(String(n['content'])) as Json, JSON.parse(String(current['content'])) as Json)) };
+      }
       let version = Number(current['current_version']);
       if (current['content'] !== n['content'] || current['type'] !== n['type'] || current['deleted'] !== n['deleted']) {
         version = Number(this.db.prepare('SELECT max(version)+1 AS n FROM node_versions WHERE node_id=?').get(n['id']!)!['n']);

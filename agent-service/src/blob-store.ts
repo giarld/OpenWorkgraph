@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { WORKGRAPH_UPLOAD_MAX_BYTES } from '@openworkgraph/protocol';
+import { WORKGRAPH_UPLOAD_MAX_BYTES, isOpaqueResourceMime } from '@openworkgraph/protocol';
 import { mkdir, open, realpath, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { constants, lstatSync, realpathSync } from 'node:fs';
@@ -8,9 +8,8 @@ import { ServiceError } from './errors.js';
 
 export interface PreparedBlob { readonly sha256: string; readonly bytes: number; readonly mime: string; readonly path: string; readonly text: string | null }
 export const supportsText = (mime: string): boolean => ['text/plain','text/markdown','text/csv','application/json','application/xml','text/xml','text/yaml','text/x-yaml','application/yaml','application/x-yaml'].includes(mime);
-const SNIFFED_MEDIA = new Set(['image/png','image/jpeg','image/gif','image/webp','application/pdf','video/mp4','video/webm']);
 export const validMime = (mime: string): boolean => /^[a-zA-Z0-9.+-]+[/][a-zA-Z0-9.+-]+$/.test(mime);
-export const opaqueFileMime = (mime: string): boolean => validMime(mime) && mime !== 'application/octet-stream' && !supportsText(mime) && !SNIFFED_MEDIA.has(mime);
+export const opaqueFileMime = isOpaqueResourceMime;
 export const mimeMatchesBytes = (declared: string, sniffed: string, allowGenericOctet = false): boolean =>
  declared === sniffed ||
  (allowGenericOctet && declared === 'application/octet-stream') ||

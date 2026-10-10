@@ -13,6 +13,8 @@ import { sandboxMode } from './execution-settings.js';
 import { ProjectFiles } from './project-files.js';
 import { RunContexts, type RunLineage } from './run-context.js';
 import type { SkillSessions } from './skill-sessions.js';
+import { hasVisualizeFeature } from './visualize-features.js';
+import { validateVisualizeOutput } from './visualize-output-validation.js';
 
 export function backendReply(interaction: Interaction, answer: Json): BackendReply {
   const payload = interaction.payload as unknown as BackendInteraction;
@@ -105,13 +107,13 @@ export class RuntimeBackend implements SchedulerBackend {
     }
     if (this.runs.runtime(run.id).epoch !== context.epoch) return;
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
-    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, skills: snapshot.skills ?? [], ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
+    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
       onSnapshot: value => this.snapshot(value, context, run.id),
-      setNodeTitle: title => {
+      ...(this.runs.shouldGenerateNodeTitle(run.id) ? { setNodeTitle: (title: string) => {
         const token = this.runs.runtime(run.id);
         if (token.epoch !== context.epoch) return false;
         return this.runs.updateNodeTitle(run.id, token, title);
-      },
+      } } : {}),
       onInteraction: value => {
         if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(run.id)) return;
         const token = this.runs.runtime(run.id);
@@ -122,6 +124,14 @@ export class RuntimeBackend implements SchedulerBackend {
       },
       queryHistory: async query => this.queryHistory(run.id, query),
       readRunContext: async request => this.runContexts.read(run.id, request),
+      ...(runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features) ? { validateVisualizeOutput: async (pagePath: string) => {
+        const current = this.runs.runtime(run.id);
+        if (current.epoch !== context.epoch || current.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(run.id).status)) throw new ServiceError('CONFLICT', 'Run is no longer available for output validation.');
+        const result = await validateVisualizeOutput(directories.output, pagePath, runtime.details.kind as 'execution' | 'visualize_generation');
+        const after = this.runs.runtime(run.id);
+        if (after.epoch !== context.epoch || after.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(run.id).status)) throw new ServiceError('CONFLICT', 'Run changed during output validation.');
+        return result;
+      } } : {}),
       ...(this.skillSessions ? { skillEnvironment: async (skillId: string) => this.skillSessions!.forSkill(snapshot.skills ?? [], skillId) } : {}),
       ...(this.skillSessions ? { withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.skillSessions!.withEnvironment(snapshot.skills ?? [], skillId, dispatch) } : {}),
     });

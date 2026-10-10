@@ -588,14 +588,13 @@ pre {
 .create-option:hover {
   background: var(--fill);
 }
+.create-option > svg {
+  flex: none;
+}
 .create-option > span {
-  width: 44px;
-  height: 44px;
-  background: var(--fill);
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .create-option strong {
   font-size: 16px;
@@ -669,7 +668,8 @@ pre {
   text-transform: uppercase;
   color: var(--muted);
 }
-.prompt-mention-empty {
+.prompt-mention-empty,
+.prompt-mention-error {
   padding: 8px;
   font-size: 12px;
   color: var(--muted);

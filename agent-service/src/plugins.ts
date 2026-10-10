@@ -1,4 +1,4 @@
-import { isSkillName } from '@openworkgraph/protocol';
+import { isSkillName, validateVisualizeNodeContent } from '@openworkgraph/protocol';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Json, ResourceEnvelope, SkillReference } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
@@ -9,7 +9,7 @@ export interface ResourceMapping { kind: ResourceEnvelope['kind']; textField?: s
 export interface DeclarativeMigration { fromSchemaVersion: number; rename?: Record<string, string>; defaults?: ObjectJson }
 export interface PluginContract { typeId: string; pluginId: string; version: string; apiVersion: string; schemaVersion: number; contentSchema: ContentSchema; resources: ResourceMapping[]; migrations?: DeclarativeMigration[] }
 const forbidden = new Set(['__proto__', 'prototype', 'constructor']);
-const builtins = new Set(['text', 'image', 'document', 'video', 'file', 'preview', 'execution', 'group']);
+const builtins = new Set(['text', 'image', 'document', 'video', 'file', 'preview', 'execution', 'group', 'visualize']);
 function invalid(message: string): never { throw new ServiceError('INVALID_REQUEST', message); }
 /** Bounded pure JSON only: no getters, functions, cycles or exotic prototypes. */
 export function checkedJson(value: unknown, maxBytes = 16_777_216, maxDepth = 32): Json {
@@ -159,6 +159,7 @@ export class PluginRegistry {
     if (builtins.has(type)) {
       if (schemaVersion !== 1) return null;
       if(type==='group')return {typeId:type,pluginId:'core',version:'1.0.0',apiVersion:'1.0',schemaVersion:1,contentSchema:{type:'object',properties:{title:{type:'string'}},additionalProperties:false},resources:[]};
+      if(type==='visualize')return {typeId:type,pluginId:'core',version:'1.0.0',apiVersion:'1.0',schemaVersion:1,contentSchema:{type:'object'},resources:[]};
       const resources: ResourceMapping[] = ['execution','preview'].includes(type) ? [] : [{kind: type as ResourceEnvelope['kind'], ...(type === 'text' ? {textField:'text'} : type === 'file' ? {resourceIdField:'resourceId',resourceVersionField:'resourceVersion'} : {textField: 'text',resourceIdField:'resourceId',resourceVersionField:'resourceVersion'})}];
       return {typeId:type,pluginId:'core',version:'1.0.0',apiVersion:'1.0',schemaVersion:1,contentSchema:{type:'object'},resources};
     }
@@ -170,7 +171,9 @@ export class PluginRegistry {
     let contract: PluginContract | null;
     try { contract = this.get(type,schemaVersion); } catch { return {state:'incompatible',typeId:type,schemaVersion,content,reason:'Stored contract is incompatible',contract:null}; }
     if (!contract) return {state:'missing',typeId:type,schemaVersion,content,reason:'Resource contract is unavailable',contract:null};
-    const valid = matches(contract.contentSchema,content) && (!builtins.has(type) || validSkillContent(content));
+    let visualizeValid = true;
+    if (type === 'visualize') { try { validateVisualizeNodeContent(content); } catch { visualizeValid = false; } }
+    const valid = matches(contract.contentSchema,content) && (!builtins.has(type) || validSkillContent(content)) && visualizeValid;
     return {state:valid ? 'available' : 'invalid',typeId:type,schemaVersion,content,reason:valid ? null : 'Content does not match schema',contract};
   }
   /** Pure copy-on-success migration. Caller persists new node version atomically; old version is never changed. */

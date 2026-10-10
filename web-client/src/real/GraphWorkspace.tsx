@@ -1,3 +1,5 @@
+import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
+import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
 import { NodeTitleInput } from '../components/NodeTitleInput';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
 import { MarkdownPreview, MarkdownPreviewProvider } from './MarkdownPreview';
@@ -7,6 +9,7 @@ import { NodeRunInteractions } from './NodeRunInteractions';
 import { PromptEditor } from "../components/RunPanels";
 import { syncSkillReferences } from "./project-file-mentions";
 import type { SkillReference } from "../../../packages/protocol/src/skills";
+import { isVisualizeFeatureSelection } from "../../../packages/protocol/src/visualize";
 import { DocumentDialog } from "../components/DocumentDialog";
 import { LinkedVideoPreview, LinkedFilePreview, PreviewNode, ProjectFilePreview, ResourceFilePreview } from "./PreviewNode";
 import { previewFormat, previewMode, type PreviewMode } from './preview-formats';
@@ -14,6 +17,8 @@ import { VideoNodeSummary } from './VideoNodeSummary';
 import { ExecutionOutputList } from "./ExecutionOutputList";
 import { Toast } from './Toast';
 import { WorkspaceRestartHint } from './WorkspaceRestartHint';
+import { WorkspaceUpgradeHint, type WorkspaceUpgradeHintProps } from './WorkspaceUpgradeHint';
+import { SaveStatusMenu } from './SaveStatusMenu';
 import { WifiOff } from 'lucide-react';
 import { createPortal } from "react-dom";
 import { getNodeDefinition } from "../components/node-registry";
@@ -25,7 +30,7 @@ import { canDropAsset, dropAsset } from './asset-drag';
 import { canDropProjectFile, dropProjectFile } from './project-file-drag';
 import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFileReference, projectFileSource } from './project-file-reference';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Eye, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
+import { Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
 import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, formatFileSize, importedNodeType } from '../domain/file-types';
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
@@ -207,6 +212,7 @@ export interface GraphWorkspaceProps {
   graph: GraphSnapshot;
   online: boolean;
   runtimeUnavailable?: boolean;
+  workspaceUpgrade?: WorkspaceUpgradeHintProps;
   projectActive: boolean;
   runs: Run[];
   refreshToken: number;
@@ -222,7 +228,10 @@ export interface GraphWorkspaceProps {
   editExecutionNode?: {nodeId:string;graphId:string;projectId:string;nonce:number};
 }
 export function GraphWorkspace(props: GraphWorkspaceProps) {
-  const {t} = useI18n();
+  const {t, locale} = useI18n();
+  const visualizeSessions = useMemo(() => new VisualizeSessions(props.request, {serviceId:props.graph.serviceId, projectId:props.graph.projectId, graphId:props.graph.graphId}), [props.request, props.graph.serviceId, props.graph.projectId, props.graph.graphId]);
+  useEffect(() => () => visualizeSessions.dispose(), [visualizeSessions]);
+  useEffect(() => visualizeSessions.retain(props.graph.nodes.map(n => n.id)), [visualizeSessions, props.graph.nodes]);
   useEffect(() => {
     const preventBrowserZoom = (event: WheelEvent) => {
       if (event.ctrlKey || event.metaKey) event.preventDefault();
@@ -420,6 +429,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const overlaps = left < controls.right + 12 && left + width > controls.left - 12;
       dock.style.setProperty('--dock-center', (center - parent.left) + 'px');
       dock.style.setProperty('--dock-bottom', (overlaps ? parent.bottom - controls.top + 12 : parent.bottom - area.bottom + 20) + 'px');
+      workspace.style.setProperty('--workspace-hints-bottom', (parent.bottom - dock.getBoundingClientRect().top + 12) + 'px');
     };
     position();
     const observer = new ResizeObserver(position);
@@ -664,6 +674,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       if (mounted.current) setTitleSaving(false);
     }
   };
+  const defaultNodeTitle = (type: string) => type === 'execution' ? t('Execution task') : type === 'group' ? t('Group') : t('New {type}', { type: t(getNodeDefinition(type).title) });
   const toWorkNode = (n: GraphSnapshot["nodes"][number]): WorkNode => {
     const d = state.drafts.find((d) => d.nodeId === n.id);
     const c = object(d?.content ?? n.content);
@@ -674,7 +685,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       projectId: g.projectId,
       graphId: g.graphId,
       type: n.type,
-      title: String(c.title ?? (n.type === "execution" ? t('Execution task') : n.type)),
+      title: typeof c.title === 'string' && c.title.trim() ? c.title : defaultNodeTitle(n.type),
       x: n.x,
       y: n.y,
       width: nodeBounds(n).width,
@@ -721,6 +732,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   );
   const activeChainBatches = new Set(graphRuns.filter(run => run.chainBatch && !["succeeded", "failed", "cancelled", "interrupted"].includes(run.status)).map(run => run.chainBatch!));
   const activeChainNodeIds = new Set(graphRuns.filter(run => run.chainBatch && activeChainBatches.has(run.chainBatch)).map(run => run.nodeId));
+  const pendingVisualizeCandidateNodeIds = new Set(graphRuns.filter(run => run.hasPendingGenerationCandidate && g.nodes.some(node => node.id === run.nodeId && node.type === 'visualize')).map(run => run.nodeId));
   const chainTopologyError = t('Running chain members and their execution connections cannot be deleted or changed. Stop the full schedule and let it finish first.');
   const activeChainExecutionEdge = (edge: { sourceId: string; targetId: string; kind?: string }) => edge.kind === "execution" && (activeChainNodeIds.has(edge.sourceId) || activeChainNodeIds.has(edge.targetId));
   const [acknowledgedFailures, setAcknowledgedFailures] = useState<ReadonlySet<string>>(() => new Set());
@@ -748,6 +760,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const selectedNode = g.nodes.find(item => item.id === ids[0]);
       if (selectedNode?.type === "execution") {
         setDetailsOpen(true);
+      } else if (selectedNode?.type === "visualize") {
+        setDetailsOpen(!object(selectedNode.content).page);
       }
     }
   };
@@ -764,6 +778,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const legacySize = legacyFileSizes[wire.id];
     return [wire.id, JSON.stringify([
       wire.contentVersion,
+      wire.type === "visualize" ? [referenceId, props.theme, props.online] : null,
       readOnly,
       wire.readOnly,
       projectFilesRevision,
@@ -775,7 +790,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       runProgress?.error,
       run ? submittedPrompts[run.id] : undefined,
     ])] as const;
-  })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly]);
+  })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
   const selectedRun = graphRuns.filter(r => r.nodeId === node?.id).at(-1);
   const inputChanged = useInputChanges(props.request, selectedRun, props.online, g.executionRevision);
   const draft = state.drafts.find((d) => d.nodeId === node?.id);
@@ -790,7 +805,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const selectedRoute:ImageRoute=savedRoute.type==='api' && typeof savedRoute.providerId==='string' && typeof savedRoute.modelId==='string'
     ? {type:'api',providerId:savedRoute.providerId,modelId:savedRoute.modelId,options:imageOptions}:{type:'codex',options:imageOptions};
   useEffect(() => {
-    setGroupTitle(String(content.title ?? t('Group')));
+    setGroupTitle(String(content.title ?? ''));
   }, [node?.id, node?.content]);
   const overrideJson = JSON.stringify(content.modelOverride ?? null);
   useEffect(() => {
@@ -1053,7 +1068,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   };
   const renameGroup = async () => {
     if (!node || node.type !== "group" || node.schemaVersion !== 1) return;
-    if (groupTitle === String(object(node.content).title ?? t('Group'))) return;
+    if (groupTitle === String(object(node.content).title ?? '')) return;
     guardGeometry([node.id]);
     await command([groupRenameOperation(node.id, groupTitle)]);
   };
@@ -1117,11 +1132,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           contentVersion: 1,
           content: {
             title: type === "execution" ? t('Execution task') : t('New {type}', {type:getNodeDefinition(type).title}),
-            text,
+            ...(type === "visualize" ? { inputBindings: [] } : { text }),
             prompt: "",
             ...extra,
           },
-          ...(["preview", "execution"].includes(type) ? size : {}),
+          ...(["preview", "execution", "visualize"].includes(type) ? size : {}),
           ...placement,
           readOnly: false,
         },
@@ -1421,7 +1436,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (!node || runDisabled) return;
     setRunning(true);
     try {
-      const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined, preserveHistoricalOutputs);
+      const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : node.type === "visualize" ? "visualize_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined, preserveHistoricalOutputs);
       submittedNodeKeys.current.add(JSON.stringify([g.serviceId, g.projectId, g.graphId, node.id]));
       props.onRunSubmitted?.(submitted);
       if (node.type === "execution") setDetailsOpen(false);
@@ -1498,9 +1513,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }));
   const previewNavigation: PreviewDialogNavigation = { layers: linkedPreviewLayers, pending: markdownLinkPending, onBack: backMarkdownPreview };
   const hasPreviewRoot = !!(reference || documentNode || promptProjectFile || generatedOutputNode);
+  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly} temporary={props.temporary} expanded={expanded} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setDetailsOpen(true); }}/>;
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);
+    if (wire.schemaVersion === 1 && wire.type === "visualize") return referenceId === wire.id ? <div className="node-content">{t("Interactive page opened in dialog")}</div> : renderVisualize(wire);
     const resourceImport = object(c.resourceImport);
     if (resourceImport.state === 'loading' || resourceImport.state === 'failed') return <div className="node-content ow-resource-import-state">{resourceImport.state === 'loading' ? <LoaderCircle size={28} className="ow-resource-import-spinner" aria-hidden="true"/> : <CircleAlert size={28} aria-hidden="true"/>}<strong>{n.title}</strong><span>{resourceImport.state === 'loading' ? t('Copying resource…') : t('Resource copy failed. Retry from the asset library.')}</span></div>;
     const projectFileImport = object(c.projectFileImport);
@@ -1613,11 +1630,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   return (
     <MarkdownPreviewProvider onOpenLink={openMarkdownLink} imageRequest={props.serviceRequest ?? props.request} projectId={g.projectId} imageRevision={projectFilesRevision}>
     <section ref={workspaceElement} className="real-workspace" aria-label={t('Work Graph editor')}>
+      <div className="workspace-status-hints">
       {props.runtimeUnavailable === true && !props.online && <section className="workspace-disconnected panel" role="status">
         <WifiOff size={40} aria-hidden="true" />
         <h2>{t('Workspace connection disconnected')}</h2>
         <WorkspaceRestartHint />
       </section>}
+      {!props.temporary && props.workspaceUpgrade && <WorkspaceUpgradeHint key={props.workspaceUpgrade.serviceId + ':' + props.workspaceUpgrade.runtimeVersion} {...props.workspaceUpgrade}/>}
+      </div>
       <div className="real-toolbar topbar-left panel">
         <button className="icon-button" ref={mainMenuTrigger} aria-label={t('Work Graph main menu')} aria-expanded={mainMenu} onClick={() => setMainMenu(v => !v)}><Menu size={18}/></button>
         {props.projectName && <span className="workgraph-project-prefix" title={props.projectName}>
@@ -1634,7 +1654,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           : <strong className="workgraph-title" role="button" tabIndex={readOnly ? -1 : 0} aria-disabled={readOnly}
             title={readOnly ? g.title : t('Double-click to rename the Work Graph')} onDoubleClick={beginTitleEdit}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); beginTitleEdit(); } }}>{g.title}</strong>}
-        <span role="status">{titleSaving ? t('Saving') : saveLabel}{readOnly ? t(' · Read-only') : ""}</span>
+        <SaveStatusMenu label={(titleSaving ? t('Saving') : saveLabel) + (readOnly ? t(' · Read-only') : '')}
+          drafts={state.drafts} graph={g} disabled={readOnly || titleSaving} locked={locked}
+          resolve={(draft, content) => editor.resolve(draft.nodeId, content, draft.draftId)} onError={props.onError}/>
       </div>
       {mainMenu && <>
         <button className="graph-menu-dismiss" aria-label={t('Close Work Graph main menu')} onClick={() => { setRecentMenu(undefined); setMainMenu(false); }}/>
@@ -1701,13 +1723,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <button className="icon-button" aria-label={t("Undo")} title={historyState.reason || t("Undo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canUndo} onClick={() => act(() => travelHistory(false))}><Undo2 size={18}/></button>
         <button className="icon-button" aria-label={t("Redo")} title={t("Redo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo} onClick={() => act(() => travelHistory(true))}><Redo2 size={18}/></button>
         <span className="topbar-divider"/>
+        <button className="icon-button" aria-label={t("Add execution")} title={t("Add execution")} disabled={readOnly} onClick={() => act(() => create("execution"))}><Play size={18}/></button>
         <button className="icon-button" aria-label={t("Add text")} title={t("Add text")} disabled={readOnly} onClick={() => act(() => create("text"))}><Type size={18}/></button>
-        <button className="icon-button" aria-label={t("Add execution")} title={t("Add execution")} disabled={readOnly} onClick={() => act(() => create("execution"))}><Settings2 size={18}/></button>
         <button className="icon-button" aria-label={t("Add image")} title={t("Add image")} disabled={readOnly} onClick={() => act(() => create("image"))}><Image size={18}/></button>
-        <button className="icon-button" aria-label={t("Upload to Work Graph")} title={t("Upload to Work Graph")} disabled={readOnly} onClick={() => { replacement.current = undefined; file.current?.click(); }}><Upload size={18}/></button>
+        <button className="icon-button" aria-label={t("Add Visualize")} title={t("Add Visualize")} disabled={readOnly} onClick={() => act(() => create("visualize"))}><PanelsTopLeft size={18}/></button>
         <button className="icon-button" aria-label={t("Add document")} title={t("Add document")} disabled={readOnly} onClick={() => act(() => create("document"))}><FileText size={18}/></button>
-        <button className="icon-button" aria-label={t("Add preview")} title={t("Add preview")} disabled={readOnly} onClick={() => act(() => create("preview"))}><Eye size={18}/></button>
         <button className="icon-button" aria-label={t("Add file")} title={t("Add file")} disabled={readOnly} onClick={() => act(() => create("file"))}><FileIcon size={18}/></button>
+        <button className="icon-button" aria-label={t("Add preview")} title={t("Add preview")} disabled={readOnly} onClick={() => act(() => create("preview"))}><Eye size={18}/></button>
+        <button className="icon-button" aria-label={t("Upload to Work Graph")} title={t("Upload to Work Graph")} disabled={readOnly} onClick={() => { replacement.current = undefined; file.current?.click(); }}><Upload size={18}/></button>
         <button className="icon-button" aria-label={t("Add node")} title={t("Add node")} disabled={readOnly} onClick={e => { const r = e.currentTarget.getBoundingClientRect(); const dock = dockElement.current?.getBoundingClientRect(); const v = canvas.current?.getViewport(); if (v) setCreateMenu({ world: { x: (300 - v.x) / v.k, y: (250 - v.y) / v.k }, screen: { x: r.left, y: dock?.top ?? r.top }, preferAbove: true }); }}><Plus size={18}/></button>
         <span className="topbar-divider"/>
         <button className="icon-button" aria-label={t("Group")} title={t("Group")} disabled={!canGroup} onClick={() => act(groupSelection)}><Group size={18}/></button>
@@ -1754,7 +1777,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <button className="dismiss-layer" aria-label={t("Close add node menu")} onClick={() => setCreateMenu(undefined)} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCreateMenu(undefined); }}/>
         <div ref={createMenuElement} className="create-menu node-create-menu panel" role="dialog" aria-label={t("Add node")} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }} style={{ position: "fixed", left: createMenuPosition?.left ?? Math.max(12, createMenu.screen.x), top: createMenuPosition?.top ?? Math.max(12, createMenu.screen.y), visibility: createMenuPosition ? "visible" : "hidden" }}>
           <div className="panel-heading"><strong>{t("Add node")}</strong><button className="icon-button" aria-label={t("Close add node menu")} onClick={() => setCreateMenu(undefined)}><X size={16}/></button></div>
-          {["text", "execution", "image", "document", "file", "preview"].map(type => {
+          {["execution", "text", "image", "visualize", "document", "file", "preview"].map(type => {
             const definition = getNodeDefinition(type), Icon = definition.icon;
             return <button className="create-option" key={type} disabled={readOnly || (Boolean(createMenu.connection) && activeChainNodeIds.has(createMenu.connection!.nodeId)) || (!!createMenu.connection && ((type === "execution" && createMenu.connection.port === "input") || (type === "preview" && g.nodes.find(n => n.id === createMenu.connection!.nodeId)?.type === "preview")))} onClick={() => { const { world, connection } = createMenu; setCreateMenu(undefined); act(() => create(type, "", world, {}, connection)); }}><Icon size={18}/><span>{t(definition.title)}</span></button>;
           })}
@@ -1843,7 +1866,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           isNodeLocked={locked}
           isNodeRunning={id => latestNodeRuns.get(id)?.status === 'running'}
           isNodeWaiting={id => ['accepted', 'queued', 'preparing'].includes(latestNodeRuns.get(id)?.status ?? '')}
-          isNodeAwaitingApproval={id => latestNodeRuns.get(id)?.status === 'waiting_approval'}
+          isNodeAwaitingApproval={id => latestNodeRuns.get(id)?.status === 'waiting_approval' || pendingVisualizeCandidateNodeIds.has(id)}
           isNodeFailed={id => { const run = latestNodeRuns.get(id); return run?.status === 'failed' && !acknowledgedFailures.has(failureKey(run)); }}
           onNodePointerDown={(id) => {
             acknowledgeNodeFailure(id);
@@ -1863,7 +1886,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             if (n.type === 'preview' && openImageNodePreview(n.id)) return;
             if (n.type === 'image') { if (!openImageNodePreview(n.id)) setReferenceId(n.id); return; }
             if (n.type === 'document') { openDocument(n.id, true); return; }
-            if (n.type === 'text' || n.type === 'file' || n.type === 'video' || n.type === 'preview') setReferenceId(n.id);
+            if (n.type === 'text' || n.type === 'file' || n.type === 'video' || n.type === 'preview' || n.type === 'visualize') setReferenceId(n.id);
           }}
           onCreateMenu={readOnly ? undefined : (world, screen) => setCreateMenu({ world, screen })}
           onConnectCreate={readOnly ? undefined : (nodeId, world, screen, port) => { if (activeChainNodeIds.has(nodeId)) { props.onError(new Error(chainTopologyError)); return; } setCreateMenu({ world, screen, connection: { nodeId, port } }); }}
@@ -1873,7 +1896,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             return counts;
           }, {})}
           renderToolbar={n => <div className="node-toolbar" data-canvas-interactive>
-            <NodeTitleInput key={n.id} className="node-title-input" title={t("Node titles can contain up to 32 characters.")} aria-label={n.type === "group" ? t("Group name") : "Node name"} value={n.type === "group" ? groupTitle : n.title} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onValueChange={value => n.type === "group" ? setGroupTitle(value) : edit("title", value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
+            <NodeTitleInput key={n.id} className="node-title-input" title={t("Node titles can contain up to 32 characters.")} aria-label={n.type === "group" ? t("Group name") : "Node name"} value={n.type === "group" ? groupTitle : String(content.title ?? "")} placeholder={defaultNodeTitle(n.type)} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onValueChange={value => n.type === "group" ? setGroupTitle(value) : edit("title", value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
               onKeyDown={e => {
                 if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 e.preventDefault();
@@ -1883,8 +1906,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Replace media" title="Replace media" disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
             {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file'} title={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file (maximum 300 MB)'} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
             {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Edit node" title="Edit node" onClick={() => n.type === "document" ? openDocument(n.id) : setDetailsOpen(true)}><Settings2 size={16}/></button>}
+            {n.type === 'visualize' && latestNodeRuns.get(n.id) && <button className="icon-button" aria-label={t('View run details')} title={t('View run details')} disabled={!props.onOpenRun} onClick={() => props.onOpenRun?.(latestNodeRuns.get(n.id)!)}><FileText size={16}/></button>}
             {canCopyText && <button className="icon-button" aria-label="Create editable text copy" title="Create editable text copy" disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16}/></button>}
-            {n.type === "execution" && <button className="icon-button" aria-label="Copy execution task" title="Copy execution task (prompt only)" disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}) }))}><Copy size={16}/></button>}
+            {n.type === "execution" && <button className="icon-button" aria-label="Copy execution task" title="Copy execution task (prompt only)" disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16}/></button>}
             {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label="View generated file" title="View generated file" onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
             {hasProjectFileSource(content) && <button className="icon-button" aria-label="Copy as resource node" title={props.temporary ? 'Temporary Work Graphs do not support copying project file resources yet' : 'Copy as resource node'} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16}/></button>}
             {hasProjectFileSource(content) && <button className="icon-button" aria-label="Add to asset library (independent copy)" title="Add to asset library" disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16}/></button>}
@@ -1996,18 +2020,20 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }
           canDropData={(data, targetNodeId) => !readOnly && (canDropProjectFile(data, g.projectId) ? !targetNodeId || isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) : !targetNodeId && props.assetsAvailable !== false && canDropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }))}
           onDropData={(data, position, targetNodeId) => canDropProjectFile(data, g.projectId) ? dropProjectFile(data, g.projectId, position, targetNodeId && isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) ? targetNodeId : undefined, (id, path) => act(() => associateProjectFile(id, path))) : dropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }, position)}
-          renderPanel={panelNode => node && panelNode.id === node.id && selected.length === 1 && detailsOpen && !isProjectFileReference(node.content) && ["text", "image", "execution"].includes(node.type) && node.schemaVersion === 1 ? (
+          renderPanel={panelNode => node && panelNode.id === node.id && selected.length === 1 && detailsOpen && !isProjectFileReference(node.content) && ["text", "image", "execution", "visualize"].includes(node.type) && node.schemaVersion === 1 ? (
             <PromptEditor key={node.id} inputChanged={inputChanged} value={String(content.prompt ?? "")} disabled={promptDisabled} runDisabled={runDisabled}
               references={g.edges.filter(edge => edge.kind === "reference" && edge.targetId === node.id).map(edge => ({ id: edge.sourceId, title: work.nodes.find(n => n.id === edge.sourceId)?.title || "Reference node" }))}
-              onOpenReference={setReferenceId} onClose={() => setDetailsOpen(false)} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); editor.edit(node.id, { ...content, prompt: value, skillReferences: (references ?? syncSkillReferences(String(content.prompt ?? ""), value, (Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
+              onOpenReference={setReferenceId} onClose={() => setDetailsOpen(false)} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
               mentionEnabled={props.online && props.projectActive}
               skillEnabled={node.type !== "image" || selectedRoute.type === "codex"}
               skillReferences={(Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[]}
+              features={((Array.isArray(content.features) ? content.features : []) as unknown[]).filter(isVisualizeFeatureSelection)}
+              onFeaturesChange={node.type === 'execution' ? features => act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, features: features as unknown as Json }); }) : undefined}
               mentionRequest={props.serviceRequest ?? props.request}
               mentionProjectId={g.projectId}
               onOpenProjectFile={item => item.kind === 'directory' ? props.onOpenProjectDirectory?.(item.relativePath) : setPromptProjectFile({ path:item.relativePath, name:item.name })}
-              placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : node.type === "image" ? t("Describe the image you want to generate…") : t("Describe how you want to revise this text")}
-              status={running ? t("Saving and submitting…") : locked(node.id) ? t("Locked while running") : unavailableReason}
+              placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : node.type === "image" ? t("Describe the image you want to generate…") : node.type === "visualize" ? t("Describe the interactive page you want to create or revise…") : t("Describe how you want to revise this text")}
+              status={running ? t("Saving and submitting…") : node.type === 'visualize' && selectedRun ? runStatusLabels[selectedRun.status] : locked(node.id) ? t("Locked while running") : unavailableReason}
               submitting={running}
               runHint={unavailableReason}
               additionalWarnings={draft && ["conflict", "failed", "recovery"].includes(draft.state) ? [t(draftNoticeTitle(draft)), t(DRAFT_RECOVERY_NOTICE)] : []}
@@ -2029,6 +2055,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 {node.type === 'image' && <button type="button" className="image-settings-trigger" aria-label={t('Image settings')} aria-haspopup="dialog" aria-expanded={imageSettingsOpen} title={t('Image settings: quality, size, aspect ratio, and reasoning effort')} disabled={promptDisabled} onClick={()=>setImageSettingsOpen(true)}><Settings2 size={14}/><span>{imageOptions.quality==='auto'?t('Auto'):t({high:'High',medium:'Medium',low:'Low'}[imageOptions.quality!])} · {imageOptions.aspectRatio === 'auto' ? t('Auto ratio') : imageOptions.aspectRatio}</span></button>}
               </div>}
             >
+            {node.type === 'visualize' && selectedRun && progress[selectedRun.id]?.error && <p role="status">{progress[selectedRun.id]?.error}</p>}
             {draft &&
               ["conflict", "failed", "recovery"].includes(draft.state) && (
                 <Conflict
@@ -2058,8 +2085,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }}
         />
       </div>
-      {reference && <ReferenceDialog key={reference.id} title={reference.title} fitted={reference.type === 'file' || reference.type === 'preview'} navigation={previewNavigation} onClose={closePreviewDialogs}>
-        {object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onOpenLink={openMarkdownLink}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <MarkdownPreview text={reference.type === "execution" ? reference.prompt : reference.content} onOpenLink={openMarkdownLink}/>}
+      {reference && <ReferenceDialog key={reference.id} title={reference.title} nativeModal={reference.type === 'visualize'} fitted={reference.type === 'file' || reference.type === 'preview' || reference.type === 'visualize'} navigation={previewNavigation} onClose={closePreviewDialogs}>
+        {reference.type === 'visualize' && referenceWire ? renderVisualize(referenceWire, true) : object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onOpenLink={openMarkdownLink}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <MarkdownPreview text={reference.type === "execution" ? reference.prompt : reference.content} onOpenLink={openMarkdownLink}/>}
       </ReferenceDialog>}
       {generatedOutputNode && typeof generatedOutput.resourceId === "string" && <ReferenceDialog key={generatedOutputNode.id} title={String(generatedOutput.name ?? "Generated file")} navigation={previewNavigation} onClose={closePreviewDialogs}>
         <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={generatedOutput.resourceId} version={Number(generatedOutput.resourceVersion)} mime={typeof generatedOutput.mime === "string" ? generatedOutput.mime : undefined} name={String(generatedOutput.name ?? "Generated file")} onError={props.onError}/>
@@ -2144,14 +2171,17 @@ function RunResubmitDialog({ title, action, disabled, preserveOption, defaultPre
     <div className="button-row"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="button" className="primary-button" disabled={disabled} onClick={() => onConfirm(preserveOption && preserve)}>{t('Confirm {action}', { action })}</button></div>
   </section></div>;
 }
-function ReferenceDialog({ title, onClose, children, fitted=false, navigation }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean; navigation?: PreviewDialogNavigation }) {
+function ReferenceDialog({ title, onClose, children, fitted=false, nativeModal=false, navigation }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean; nativeModal?:boolean; navigation?: PreviewDialogNavigation }) {
   const dialog = useRef<HTMLElement>(null);
+  const Surface = nativeModal ? 'dialog' : 'section';
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const native = nativeModal ? dialog.current as HTMLDialogElement : null;
+    if (native && !native.open) native.showModal();
     dialog.current?.focus();
-    return () => { if (previous?.isConnected) previous.focus(); };
-  }, []);
-  return <div className="modal-backdrop reference-preview-backdrop" onClick={onClose}><section className={'reference-preview panel' + (fitted ? ' reference-preview-fitted' : '')} role="dialog" aria-modal="true" aria-label="Reference content preview" tabIndex={-1} ref={dialog} onClick={e => e.stopPropagation()} onKeyDown={e => {
+    return () => { native?.close(); if (previous?.isConnected) previous.focus(); };
+  }, [nativeModal]);
+  return <div className="modal-backdrop reference-preview-backdrop" onClick={onClose}><Surface className={'reference-preview panel' + (fitted ? ' reference-preview-fitted' : '')} role="dialog" aria-modal="true" aria-label="Reference content preview" tabIndex={-1} ref={element => { dialog.current = element; }} onCancel={e => { e.preventDefault(); onClose(); }} onClick={e => { e.stopPropagation(); if (nativeModal && e.target === e.currentTarget) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) onClose(); } }} onKeyDown={e => {
     e.stopPropagation();
     if (e.key === "Escape" || (e.code === "Space" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !(e.target as Element).closest('button,a[href],video,audio,input,textarea,select,[contenteditable="true"]'))) { e.preventDefault(); onClose(); }
     if (e.key === "Tab") {
@@ -2160,7 +2190,7 @@ function ReferenceDialog({ title, onClose, children, fitted=false, navigation }:
       if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
     }
-  }}><PreviewDialogHeading title={title} navigation={navigation} onClose={onClose} closeLabel="Close reference preview"/><MarkdownPreviewProvider expandableImages><PreviewDialogLayers navigation={navigation}>{fitted ? children : <div className="reference-preview-body">{children}</div>}</PreviewDialogLayers></MarkdownPreviewProvider></section></div>;
+  }}><PreviewDialogHeading title={title} navigation={navigation} onClose={onClose} closeLabel="Close reference preview"/><MarkdownPreviewProvider expandableImages><PreviewDialogLayers navigation={navigation}>{fitted ? children : <div className="reference-preview-body">{children}</div>}</PreviewDialogLayers></MarkdownPreviewProvider></Surface></div>;
 }
 function ExternalLinkConfirmDialog({url,onClose,onOpen}: {url:string;onClose():void;onOpen():void}) {
   const {t}=useI18n();

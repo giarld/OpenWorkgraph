@@ -2,6 +2,7 @@ import type { SkillReference } from "../../../packages/protocol/src/skills";
 import { legacySkillMentions } from "../../../packages/protocol/src/skills";
 import { useLayoutEffect, useRef, useImperativeHandle, type Ref, type KeyboardEvent, type DragEvent } from 'react';
 import { extractReferenceMention } from '../real/reference-mentions';
+import { extractBuiltinFeatureMention } from '../real/builtin-feature-mentions';
 import { extractProjectFileMarkdownLinks, syncSkillReferences, validSkillReferences, type PromptEdit, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
 
 export interface PromptTextInputHandle {
@@ -20,6 +21,8 @@ function tokens(value: string, skills: boolean, refs: readonly SkillReference[],
   const result: Token[] = [];
   const pattern = /\[((?:\\.|[^\]])*)\]\((?:<((?:\\.|[^>\r\n])*)>|([^)\s]+))\)/g;
   for (const match of value.matchAll(pattern)) {
+    const feature = extractBuiltinFeatureMention(match[0]);
+    if (feature) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...feature });
     const reference = extractReferenceMention(match[0]);
     if (reference) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...reference });
     const item = extractProjectFileMarkdownLinks(match[0])[0];
@@ -137,7 +140,7 @@ function render(root: HTMLElement, value: string, skills: boolean, skillReferenc
     icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('width', '14'); icon.setAttribute('height', '14');
     icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor'); icon.setAttribute('stroke-width', '1.8'); icon.setAttribute('aria-hidden', 'true');
     const path = document.createElementNS(icon.namespaceURI, 'path');
-    path.setAttribute('d', token.kind === 'skill' ? 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z' : token.kind === 'directory' ? 'M3 7V5h6l2 2h10v13H3Z' : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h6');
+    path.setAttribute('d', (token.kind === 'skill' || token.kind === 'builtin-feature') ? 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z' : token.kind === 'directory' ? 'M3 7V5h6l2 2h10v13H3Z' : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h6');
     icon.append(path); chip.append(icon, document.createTextNode(token.name)); fragment.append(chip); cursor = token.end;
   }
   fragment.append(document.createTextNode(value.slice(cursor)));

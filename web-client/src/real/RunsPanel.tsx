@@ -1,6 +1,6 @@
 import { runProgressEntries } from "./run-progress";
 import { randomId } from "../adapter/random";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { isTerminalRunStatus, type GraphSnapshot, type InputSnapshot, type Interaction, type Json, type Run } from '../../../packages/protocol/src/index';
 import type { RunStatus } from '../../../packages/protocol/src/index';
 import { RunProcessList } from '../components/NodeContent';
@@ -122,6 +122,28 @@ function JsonBlock({ value }: { value: unknown }) {
     return <dl className="run-value-list">{Object.entries(value).map(([key, item]) => <div key={key}><dt>{labels[key] ? t(labels[key]) : key}</dt><dd><JsonBlock value={item}/></dd></div>)}</dl>;
   }
   return <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' }}>{display(value)}</pre>;
+}
+function CollapsibleRunValue({ value }: { value: unknown }) {
+  const { t } = useI18n();
+  const contentId = useId();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const content = display(value);
+  useLayoutEffect(() => {
+    setExpanded(false);
+    const element = contentRef.current;
+    if (!element) return;
+    const measure = () => setOverflowing(element.scrollHeight > Number.parseFloat(getComputedStyle(element).lineHeight) * 3 + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [content]);
+  return <div className="run-candidate-value">
+    <div id={contentId} ref={contentRef} className="run-candidate-preview" data-collapsed={!expanded ? 'true' : undefined}><JsonBlock value={value} /></div>
+    {overflowing && <button type="button" className="run-process-toggle" aria-controls={contentId} aria-expanded={expanded} onClick={() => setExpanded(current => !current)}>{expanded ? t('Collapse') : t('Expand')}</button>}
+  </div>;
 }
 function RunSectionSummary({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
@@ -342,11 +364,11 @@ export function RunsPanel(props: RunsPanelProps) {
           {selected.chainControl === 'stopping' && <p className="run-detail-chain-control" role="status">{t('The entire schedule has stopped and is waiting for running nodes to confirm stopping…')}</p>}
           {selected.chainControl === 'stopped' && <p className="run-detail-chain-control" role="status">{t('This chain has stopped.')}</p>}
         </details>
-        {current.candidate && <section className="interaction-box" aria-label={t('Generated candidate')}><strong>{t('Generated candidate · {state}', { state: current.candidate.state })}</strong><p>{t('Generation baseline version {version}; the candidate did not automatically replace the current body.', { version: current.candidate.baseVersion })}</p><JsonBlock value={current.candidate.content} />{current.candidate.state === 'pending' && <>
-          {current.target ? <><p>{t('Current body version {version}', { version: current.target.contentVersion })}</p><JsonBlock value={current.target.content} /></> : <p role="status">{t('The current candidate cannot be handled yet. Check the notification.')}</p>}
+        {current.candidate?.state === 'pending' && <section key={selectedKey} className="interaction-box" aria-label={t('Generated candidate')}><strong>{t('Generated candidate · {state}', { state: current.candidate.state })}</strong><p>{t('Generation baseline version {version}; the candidate did not automatically replace the current body.', { version: current.candidate.baseVersion })}</p><CollapsibleRunValue value={current.candidate.content} />
+          {current.target ? <><p>{t('Current body version {version}', { version: current.target.contentVersion })}</p><CollapsibleRunValue value={current.target.content} /></> : <p role="status">{t('The current candidate cannot be handled yet. Check the notification.')}</p>}
           <div className="button-row"><button className="primary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('accept')}>{t('Accept candidate')}</button><button className="secondary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('discard')}>{t('Discard candidate')}</button></div>
           {confirmCandidate && current.target && <div role="group" aria-label={t('Confirm candidate action')}><p>{t('{action}, validating version {version}.', { action: confirmCandidate === 'accept' ? t('Replace the current body above with the candidate') : t('Discard this candidate and keep the current body'), version: current.target.contentVersion })}</p><button className="primary-button" disabled={disabled} onClick={() => void mutate(() => decideRunCandidate(request, selected, confirmCandidate, current.target!.contentVersion, randomId()))}>{confirmCandidate === 'accept' ? t('Confirm accept') : t('Confirm discard')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmCandidate(null)}>{t('Back')}</button></div>}
-        </>}</section>}
+        </section>}
         <details className="snapshot-details run-section"><RunSectionSummary>{t('Frozen input / model / resource versions for this run')}</RunSectionSummary>{current.snapshot ? <FrozenInputs snapshot={current.snapshot} /> : <p>{t('Frozen input could not be read. It will be retried automatically.')}</p>}</details>
       </>}
       </>}

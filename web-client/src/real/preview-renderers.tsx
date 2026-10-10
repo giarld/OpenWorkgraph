@@ -1,5 +1,6 @@
 import { MarkdownPreview } from './MarkdownPreview';
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useNodeViewport } from '../canvas/NodeViewport';
 import { VideoPreview } from './VideoPreview';
 import { codeMarkdown, parseCsv, previewFormat, previewImageMime } from './preview-formats';
 import { buildHtmlPreviewDocument, HTML_PREVIEW_SANDBOX, HTML_PREVIEW_PERMISSIONS } from './preview-html';
@@ -10,8 +11,13 @@ import { useI18n } from '../i18n/I18nProvider';
 const Pdf = lazy(() => import('./PreviewPdf'));
 function HtmlPreview({text}: PreviewRendererProps) {
   const {t} = useI18n();
-  const html = useMemo(() => buildHtmlPreviewDocument(text),[text]);
-  return <iframe title={t('Isolated web preview')} sandbox={HTML_PREVIEW_SANDBOX} allow={HTML_PREVIEW_PERMISSIONS} referrerPolicy="no-referrer" srcDoc={html}/>;
+  const active = useNodeViewport();
+  const id = useId();
+  const frame = useRef<HTMLIFrameElement>(null);
+  const html = useMemo(() => buildHtmlPreviewDocument(text, { hostOrigin: window.location.origin, sessionId: id, nodeId: id }),[text, id]);
+  const pushVisibility = () => frame.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.visibility', sessionId: id, nodeId: id, active }, '*');
+  useEffect(pushVisibility, [active, html]);
+  return <iframe ref={frame} onLoad={pushVisibility} title={t('Isolated web preview')} sandbox={HTML_PREVIEW_SANDBOX} allow={HTML_PREVIEW_PERMISSIONS} referrerPolicy="no-referrer" srcDoc={html}/>;
 }
 function SvgPreview({blob,name}: PreviewRendererProps) {
   const {t} = useI18n();

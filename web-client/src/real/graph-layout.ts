@@ -4,6 +4,7 @@ import type { Rect } from '../canvas/geometry';
 import { groupAtCenter, insetNodePosition } from '../canvas/group-drop';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
+import { defaultWorkgraphNodeSize } from '../../../packages/protocol/src/node-layout';
 
 export function moveWithMembershipOperations(graph: GraphSnapshot, moves: { id: string; x: number; y: number }[]): GraphOperation[] {
   const moving = new Set(moves.map(m => m.id));
@@ -35,8 +36,7 @@ export function moveWithMembershipOperations(graph: GraphSnapshot, moves: { id: 
 }
 
 export function defaultNodeSize(type: string): Pick<Rect, 'width' | 'height'> {
-  if (type === 'preview') return { width: 480, height: 360 };
-  return { width: 300, height: type === 'execution' ? 330 : 220 };
+  return defaultWorkgraphNodeSize(type);
 }
 
 export const nodeBounds = (node: Node): Rect => {
@@ -85,8 +85,9 @@ export function assertGeometryEditable(graph: GraphSnapshot, ids: string[], read
 
 /** Resizing only releases existing members; covering another node never adopts it. */
 export function resizeWithMembershipOperations(graph: GraphSnapshot, nodeId: string, bounds: Rect): GraphOperation[] {
-  const operations = [resizeOperation(nodeId, bounds)];
   const node = find(graph, nodeId);
+  if (node.type === 'visualize' && (bounds.width < 480 || bounds.height < 360)) throw Error(translate("Visualize nodes must be at least 480 × 360."));
+  const operations = [resizeOperation(nodeId, bounds)];
   if (!visualGroup(node)) return operations;
   const before = node.memberIds ?? [];
   const memberIds = before.filter(id => {
@@ -125,7 +126,7 @@ export function ungroupOperations(graph: GraphSnapshot, ids: string[]): GraphOpe
   return [...new Set(ids)].map(nodeId => ({ type: 'node.delete', nodeId }));
 }
 export function groupRenameOperation(groupId: string, title: string): GraphOperation {
-  if (!title.trim() || title.length > 1024) throw Error(translate("The group name must contain 1–1024 characters."));
+  if (title.length > 1024) throw Error(translate("The group name must contain 1–1024 characters."));
   return { type: 'group.rename', groupId, title };
 }
 

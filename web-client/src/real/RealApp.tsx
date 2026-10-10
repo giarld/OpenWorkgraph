@@ -1190,7 +1190,7 @@ export function RealApp() {
                 </select>
               </label>
               {!localMode && connection && <button type="button" className="library-link-project" disabled={busy || !online} onClick={openAddProject}>
-                <FolderPlus size={16} aria-hidden="true" />{t('Link new project workspace')}
+                <FolderPlus size={16} aria-hidden="true" />{t('Link new project')}
               </button>}
 </div>
             <div className="library-actions">
@@ -1416,6 +1416,13 @@ export function RealApp() {
                 graph={graph}
                 online={canvasOnline}
                 runtimeUnavailable={runtimeDisconnected}
+                workspaceUpgrade={!localMode && connection ? {
+                  serviceId: connection.serviceId, runtimeVersion: connection.info.version, clientVersion: webClientPackage.version,
+                  installation: connection.info.installation,
+                  updating: updatingRuntime?.serviceId === connection.serviceId, updateDisabled: !!updatingRuntime || !online,
+                  onUpdate: connection.info.installation === 'npm-global' && connection.status === 'paired' ? () => void updateRuntime(connection) : undefined,
+                  onManage: () => { setServicePage('list'); setServicePanelOpen(true); },
+                } : undefined}
                 projectActive={canvasProjectActive}
                 onOpenRun={run => { setDetailRun(run); setRightPanel(run ? 'details' : null); }}
                 onRunSubmitted={run => { setDetailRun(run); setRightPanel('details'); }}
@@ -1782,6 +1789,15 @@ function ServiceMonitor({
     let alive = true;
     let counter = 0;
     let eventStatus: ServiceData["eventStatus"] = "starting";
+    let refreshingInfo = false;
+    const refreshInfo = async () => {
+      if (!alive || refreshingInfo || eventStatus !== 'connected') return;
+      refreshingInfo = true;
+      try { await registry.refreshInfo(lease, AbortSignal.any([lifecycle.signal, AbortSignal.timeout(10000)])); }
+      catch { /* Metadata failure must not take a healthy event channel offline; retry later. */ }
+      finally { refreshingInfo = false; }
+    };
+    const infoRefreshTimer = setInterval(() => void refreshInfo(), 15000);
     let snapshot: ServiceData = {
       generation: connection.generation,
       projects: [],
@@ -1925,7 +1941,7 @@ function ServiceMonitor({
             if (status === "connected") eventStatus = "connected";
             else if (status === "reconnecting" || status === "stopped") eventStatus = "offline";
             if (alive) {
-              if (eventStatus === "connected") trigger.current();
+              if (eventStatus === "connected") { void refreshInfo(); trigger.current(); }
               else if (eventStatus === "offline") {
                 snapshot = { ...snapshot, eventStatus };
                 latest.current.onData(connection.serviceId, snapshot);
@@ -1954,6 +1970,7 @@ function ServiceMonitor({
       alive = false;
       unregisterRefresh();
       clearTimeout(bootstrapRetry);
+      clearInterval(infoRefreshTimer);
       window.removeEventListener("online", reconnectBootstrap);
       lifecycle.abort();
       trigger.current = () => undefined;

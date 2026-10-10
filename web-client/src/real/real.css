@@ -284,6 +284,25 @@
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+.workgraph-save-status { position: relative; }
+.real-toolbar .workgraph-save-trigger { display: inline-flex; align-items: center; gap: 4px; margin: 0 -5px; padding: 2px 5px; min-height: 24px; border: 0; border-radius: 5px; background: transparent; font-size: 11px; color: var(--muted); }
+.real-toolbar .workgraph-save-trigger:hover:not(:disabled), .real-toolbar .workgraph-save-trigger[aria-expanded="true"] { background: var(--fill); color: var(--text); }
+.workgraph-save-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
+.workgraph-save-menu { position: fixed; width: min(320px, calc(100vw - 32px)); max-height: min(70vh, 600px); overflow: auto; padding: 6px; z-index: 63; font-size: 13px; }
+.workgraph-save-menu[data-empty="true"] { width: min(260px, calc(100vw - 32px)); }
+.workgraph-save-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; color: var(--muted); font-size: 12px; line-height: 18px; }
+.workgraph-save-count { font-size: 11px; font-variant-numeric: tabular-nums; }
+.workgraph-save-empty { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 8px; line-height: 20px; }
+.workgraph-save-empty svg { flex-shrink: 0; color: var(--muted); }
+.workgraph-save-entry { padding: 6px 0 0; margin-top: 4px; border-top: 1px solid var(--stroke); }
+.workgraph-save-entry-heading { display: flex; align-items: center; gap: 8px; padding: 6px 8px; line-height: 18px; }
+.workgraph-save-entry-heading svg { flex-shrink: 0; color: var(--muted); }
+.workgraph-save-menu .workgraph-save-entry-heading strong { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workgraph-save-entry-heading > span { flex-shrink: 0; color: var(--muted); font-size: 11px; }
+.workgraph-save-preview { max-height: 84px; margin: 0 8px 6px 30px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 12px; line-height: 1.6; color: var(--muted); user-select: text; }
+.workgraph-save-menu .workgraph-save-note { margin: 4px 8px 8px; color: var(--muted); white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+.workgraph-save-error { margin: 4px 8px 8px; color: #a16207; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+[data-theme="dark"] .workgraph-save-error { color: #fbbf24; }
 .real-node-content {
   height: 100%;
   overflow: auto;
@@ -421,6 +440,8 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .workgraph-toast-viewport > *,
 .real-workspace .graph-main-menu,
 .real-workspace .graph-recent-menu,
+.real-workspace .workgraph-save-menu,
+.real-workspace .workspace-status-hints > .panel,
 .real-workspace .bottom-dock,
 .real-workspace .owg-zoom-controls {
   background-color: color-mix(in srgb, var(--panel) 72%, transparent);
@@ -554,6 +575,12 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .run-value-list dt { color: var(--muted); font-size: 11px; }
 .run-value-list dd { margin-left: 0; }
 .run-value-list pre { margin: 4px 0 10px; }
+.run-candidate-value { min-width: 0; margin-bottom: 8px; }
+.run-candidate-preview { display: flow-root; min-width: 0; line-height: 20px; overflow-wrap: anywhere; }
+.run-candidate-preview pre { line-height: inherit; }
+.run-candidate-preview[data-collapsed="true"] { max-height: 60px; overflow: hidden; }
+.run-candidate-preview > :first-child { margin-top: 0; }
+.run-candidate-preview > :last-child { margin-bottom: 0; }
 
 /* Work graph library and editor navigation. */
 .library-active > :not(.workgraph-library) { display: none !important; }
@@ -615,9 +642,14 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .graph-recent-menu button:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
 .graph-recent-menu p { margin: 8px; font-size: 13px; }
 .graph-recent-chevron { margin-left: auto; }
-.real-app .graph-main-menu button { border: 0; background: transparent; display: flex; align-items: center; gap: 10px; width: 100%; border-radius: 5px; font-size: 13px; }
-.real-app .graph-main-menu button:hover:not(:disabled) { background: var(--fill); }
-.graph-main-menu button:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+.real-app .graph-main-menu button,
+.real-workspace .workgraph-save-actions button { border: 0; background: transparent; display: flex; align-items: center; gap: 10px; width: 100%; border-radius: 5px; font-size: 13px; }
+.real-app .graph-main-menu button:hover:not(:disabled),
+.workgraph-save-actions button:hover:not(:disabled) { background: var(--fill); }
+.graph-main-menu button:focus-visible,
+.workgraph-save-actions button:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+.real-workspace .workgraph-save-actions button { padding: 8px; min-height: 36px; text-align: left; }
+.workgraph-save-actions button svg { flex-shrink: 0; color: var(--muted); }
 .graph-main-menu hr { border: 0; border-top: 1px solid var(--stroke); margin: 6px 0; }
 .graph-main-menu .danger { color: #ef4444; }
 .graph-management-actions > form { padding: 8px; border-radius: 8px; background: var(--fill); font-size: 12px; }
@@ -628,6 +660,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-app .graph-main-menu .graph-confirm-actions button { width: auto; min-width: 0; padding: 6px 3px; margin: 0; white-space: nowrap; }
 .real-app .graph-main-menu .graph-confirm-actions button:first-child { flex: 1; }
 .real-workspace:has(.graph-main-menu) .real-toolbar { z-index: 62; }
+.real-workspace:has(.workgraph-save-menu) .real-toolbar { z-index: 62; }
 .sidebar-closed .graph-main-menu { left: 62px; }
 @media (max-width: 700px) {
   .workgraph-library { padding: 84px 20px 24px; }

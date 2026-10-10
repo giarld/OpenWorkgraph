@@ -8,6 +8,10 @@ OpenWorkgraph 是基于无限画布思想的软件开发工作流产品，同时
 
 打开 [OpenWorkgraph 官方编辑器](https://workgraph.giarld.com/)，按照页面提供的引导完成配置即可开始使用。
 
+## 设计哲学：第一性原理
+
+![输入经由系统转化为输出](assets/readme/first-principles.png)
+
 ## 本地构建与运行
 
 ### Agent Service

@@ -187,7 +187,7 @@ export class ProjectFiles {
       if (range && start >= before.size) throw new ServiceError('INVALID_REQUEST', '文件读取范围超出内容长度。');
       const end = before.size === 0 ? -1 : Math.min(range?.end ?? before.size - 1, before.size - 1);
       const length = end < start ? 0 : end - start + 1;
-      if (length > maxBytes || (!range && before.size > maxBytes)) throw new ServiceError('PAYLOAD_TOO_LARGE', '项目文件超过 50 MiB，无法预览。');
+      if (length > maxBytes || (!range && before.size > maxBytes)) throw new ServiceError('PAYLOAD_TOO_LARGE', `项目文件读取超过 ${maxBytes / (1024 * 1024)} MiB 限制。`, { details: { maxBytes, bytes: length } });
       const current = await this.resolve(projectId, path, 'file');
       const linked = await fs.stat(current.path);
       if (current.path !== file.path || linked.dev !== before.dev || linked.ino !== before.ino)

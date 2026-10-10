@@ -1,4 +1,5 @@
 import { limitNodeTitle } from '../../../packages/protocol/src/node-title';
+import { NodeViewport } from './NodeViewport';
 import {
   forwardRef,
   memo,
@@ -8,6 +9,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type CSSProperties,
   type PointerEvent as PE,
 } from "react";
 import { groupAtCenter, insetNodePosition } from './group-drop';
@@ -128,12 +130,15 @@ export interface CanvasProps {
 }
 // Viewport frames change geometry, not document content. Keep expensive node
 // previews mounted without re-running their renderers on every pan/zoom frame.
-const NodeBody = memo(function NodeBody({ node, renderer }: {
+const NodeBody = memo(function NodeBody({ node, renderer, renderKey }: {
   node: WorkNode;
   renderer: { current: CanvasProps['renderNode'] };
   renderKey: unknown;
 }) {
-  return <>{renderer.current(node)}</>;
+  const contentKey = useMemo(() => ({ node, renderKey }), [node, renderKey]);
+  return ['image', 'video', 'audio', 'document', 'preview', 'file'].includes(node.type)
+    ? <NodeViewport key={node.id} contentKey={contentKey} render={() => renderer.current(node)}/>
+    : <>{renderer.current(node)}</>;
 });
 type Gesture = {
   pointer: number;
@@ -156,10 +161,10 @@ const interactive = (target: EventTarget | null) =>
   !!element(target)?.closest(INTERACTIVE);
 const CLIPBOARD = "application/x-openworkgraph-nodes";
 const acceptsInput = (node: WorkNode) =>
-  ["text", "image", "execution", "file", "preview"].includes(node.type);
+  ["text", "image", "execution", "file", "preview", "visualize"].includes(node.type);
 const suppliesOutput = (node: WorkNode) =>
   node.type !== "execution" && node.type !== "group";
-const resizeMinimum = (_node: WorkNode): Size => ({ width: 220, height: 160 });
+const resizeMinimum = (node: WorkNode): Size => node.type === 'visualize' ? ({ width: 480, height: 360 }) : ({ width: 220, height: 160 });
 type MoveGesture = Extract<Gesture, { kind: 'move' }>;
 function moveGeometry(g: MoveGesture) {
   const delta = { x: (g.current.x - g.start.x) / g.viewport.k, y: (g.current.y - g.start.y) / g.viewport.k };
@@ -211,8 +216,8 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         {props.renderTitlePrefix?.(node)}
         <span className="owg-node-title-text">{node.title}</span>
       </div>
-      <div className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : node.type === 'preview' ? ' owg-preview-body' : "")}>
-        {node.type === 'preview' ? <>
+      <div className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize'].includes(node.type) ? ' owg-preview-body' : "")}>
+        {['preview', 'visualize'].includes(node.type) ? <>
           <div className="owg-preview-content" inert={!props.selectedIds.includes(node.id)}>
             <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />
           </div>
@@ -684,7 +689,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     }, []);
     useEffect(() => {
       const down = (e: KeyboardEvent) => {
-        if (e.key === primaryKey) updateSnapModifier(e);
+        if (e.key === primaryKey || e.key === "Alt") updateSnapModifier(e);
         if (interactive(e.target) || e.defaultPrevented) return;
         if (e.code === "Space") {
           e.preventDefault();
@@ -693,7 +698,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         if (e.key === primaryKey) setModifierDown(true);
       };
       const up = (e: KeyboardEvent) => {
-        if (e.key === primaryKey) updateSnapModifier(e);
+        if (e.key === primaryKey || e.key === "Alt") updateSnapModifier(e);
         if (e.code === "Space") setSpace(false);
         if (e.key === primaryKey) setModifierDown(false);
       };
@@ -794,7 +799,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             node,
             corner: target.closest<HTMLElement>("[data-resize]")!.dataset
               .resize as ResizeCorner,
-            snapToGrid: primaryModifier(event),
+            snapToGrid: primaryModifier(event) || event.altKey,
             shiftKey: event.shiftKey,
           });
           return;
@@ -818,7 +823,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             nodes: nodes.filter((n) => moveIds.includes(n.id)),
             origins: nodes,
             anchorId: nodes.find(n => moveIds.includes(n.id) && n.memberIds?.includes(node.id))?.id ?? node.id,
-            snapToGrid: primaryModifier(event),
+            snapToGrid: primaryModifier(event) || event.altKey,
             clickSelection: deferDeselect ? ids : undefined,
           });
       } else
@@ -851,8 +856,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       const active = gestureRef.current;
       if (!active || (active.kind !== 'move' && active.kind !== 'resize')) return;
       const next = active.kind === 'move'
-        ? { ...active, snapToGrid: primaryModifier(event) }
-        : { ...active, snapToGrid: primaryModifier(event), shiftKey: event.shiftKey };
+        ? { ...active, snapToGrid: primaryModifier(event) || event.altKey }
+        : { ...active, snapToGrid: primaryModifier(event) || event.altKey, shiftKey: event.shiftKey };
       gestureRef.current = next;
       setGesture(next);
       if (next.moved) {
@@ -866,8 +871,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       if (!old || old.pointer !== event.pointerId) return;
       const g = {
         ...old,
-        ...(old.kind === 'move' ? { snapToGrid: primaryModifier(event) } : {}),
-        ...(old.kind === 'resize' ? { snapToGrid: primaryModifier(event) } : {}),
+        ...(old.kind === 'move' ? { snapToGrid: primaryModifier(event) || event.altKey } : {}),
+        ...(old.kind === 'resize' ? { snapToGrid: primaryModifier(event) || event.altKey } : {}),
         ...(old.kind === 'resize' ? { shiftKey: event.shiftKey } : {}),
         current: { x: event.clientX, y: event.clientY },
         moved:
@@ -950,8 +955,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       const g: Gesture = !cancelled && event.type === "pointerup" && (active.kind === "move" || active.kind === "resize")
         ? {
             ...active,
-            ...(active.kind === 'move' ? { snapToGrid: primaryModifier(event) } : {}),
-            ...(active.kind === 'resize' ? { snapToGrid: primaryModifier(event) } : {}),
+            ...(active.kind === 'move' ? { snapToGrid: primaryModifier(event) || event.altKey } : {}),
+            ...(active.kind === 'resize' ? { snapToGrid: primaryModifier(event) || event.altKey } : {}),
             ...(active.kind === 'resize' ? { shiftKey: event.shiftKey } : {}),
             current: release,
             moved: active.moved || Math.hypot(release.x - active.start.x, release.y - active.start.y) > 3,
@@ -1107,7 +1112,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             e.ctrlKey || e.metaKey || e.altKey || e.shiftKey ||
             target?.closest('input,textarea,select,button:not([data-canvas-shortcut-surface]),a,[contenteditable]:not([contenteditable="false"]),[role="textbox"],dialog,[role="dialog"],[role="alertdialog"]')) return;
           const targetId = target?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
-          const previewTarget = props.graph.nodes.some(node => node.id === targetId && node.type === 'preview');
+          const previewTarget = props.graph.nodes.some(node => node.id === targetId && ['preview', 'visualize'].includes(node.type));
           // Read-only preview surfaces reserve Space for node activation,
           // even when their pointer interactions require an interactive wrapper.
           if (e.code === 'Space' && previewTarget) {
@@ -1377,6 +1382,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         <div
           className="owg-world"
           style={{
+            // Embedded pages rasterize at least at the display scale. Integer
+            // steps avoid repainting their contents on every zoom frame.
+            '--owg-visualize-scale': Math.max(1, Math.ceil(viewport.k)),
             transform:
               "translate(" +
               viewport.x +
@@ -1385,7 +1393,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               "px) scale(" +
               viewport.k +
               ")",
-          }}
+          } as CSSProperties}
         >
           <svg className="owg-connections" aria-label={t("Node connections")}>
             {props.graph.edges.map((edge) => {

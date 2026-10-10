@@ -174,7 +174,7 @@ export function createService(
         );
       const rawPath = request.url ?? "";
       const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
-      const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills[/]search(?:[?]|$)/.test(rawPath);
+      const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills(?:[/]search)?(?:[?]|$)/.test(rawPath);
       const skillsManagementRoute = /^[/]v1[/]skills(?:[/][^/?#]+(?:[/](?:install|update|uninstall|config|files))?)?(?:[?]|$)/.test(rawPath);
       const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content)(?:[?]|$)/.test(rawPath);
       const queryRoute = fileRoute || skillsRoute || skillsManagementRoute || mediaRoute;

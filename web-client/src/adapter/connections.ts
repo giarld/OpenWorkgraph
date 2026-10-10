@@ -293,6 +293,7 @@ export class ConnectionRegistry {
   async discover(
     address: string,
     expectedServiceId?: string,
+    signal?: AbortSignal,
   ): Promise<ServiceInfo> {
     const headers: Record<string, string> = {
       "X-Workgraph-Protocol": PROTOCOL_VERSION,
@@ -301,7 +302,7 @@ export class ConnectionRegistry {
       headers["X-Workgraph-Service-Id"] = expectedServiceId;
     const response = await this.fetcher(
       normalizeAddress(address) + "/v1/info",
-      { headers, credentials: "omit", redirect: "error", cache: "no-store" },
+      { headers, credentials: "omit", redirect: "error", cache: "no-store", signal },
     );
     await checkResponse(response);
     const info = (await response.json()) as ServiceInfo;
@@ -315,6 +316,20 @@ export class ConnectionRegistry {
     if (expectedServiceId && info.serviceId !== expectedServiceId)
       throw new TransportError("SERVICE_MISMATCH", translate("The address does not belong to the expected Workspace"));
     return info;
+  }
+  /** Refresh metadata without replacing the session, generation or SSE fence. */
+  async refreshInfo(lease: ConnectionLease, signal?: AbortSignal): Promise<void> {
+    this.assertCurrent(lease);
+    const requestSignal = signal ? AbortSignal.any([lease.signal, signal]) : lease.signal;
+    const info = await this.discover(lease.address, lease.serviceId, requestSignal);
+    this.assertCurrent(lease);
+    if (requestSignal.aborted) throw new LifecycleCancelledError();
+    const row = this.rows.get(lease.serviceId)!;
+    if (JSON.stringify(row.info) === JSON.stringify(info)) return;
+    const updated = { ...row, info };
+    this.storage?.setItem(this.storagePrefix + lease.serviceId, JSON.stringify(updated));
+    this.rows.set(lease.serviceId, updated);
+    this.emit();
   }
   async requestClientPairing(address: string, identity: PairingIdentity): Promise<ClientPairingTicket> {
     address = normalizeAddress(address);

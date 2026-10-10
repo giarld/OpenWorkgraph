@@ -1,7 +1,7 @@
 {
   "name": "openworkgraph-workspace",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.8",
   "type": "module",
   "workspaces": [
     "packages/protocol",

@@ -134,7 +134,7 @@ export class ProjectFilesApi {
       return { handled: true, body: result };
     }
     if (request.method !== 'GET') throw new ServiceError('NOT_FOUND', '项目文件接口不存在。');
-    const allowed = action === 'search' ? ['query', 'showHidden', 'cursor', 'limit'] : ['content', 'media', 'thumbnail'].includes(action) ? ['path', 'cacheKey', ...(action === 'thumbnail' ? ['size'] : [])] : ['path', 'showHidden', 'cursor', 'limit'];
+    const allowed = action === 'search' ? ['query', 'showHidden', 'cursor', 'limit'] : ['content', 'media', 'thumbnail'].includes(action) ? ['path', 'cacheKey', ...(action === 'content' ? ['changeToken'] : []), ...(action === 'thumbnail' ? ['size'] : [])] : ['path', 'showHidden', 'cursor', 'limit'];
     if ([...url.searchParams.keys()].some(key => !allowed.includes(key)) || allowed.some(key => url.searchParams.getAll(key).length > 1))
       throw new ServiceError('INVALID_REQUEST', '项目文件查询参数无效。');
     const showHidden = url.searchParams.get('showHidden') === 'true';
@@ -149,6 +149,14 @@ export class ProjectFilesApi {
     if (action === 'content') {
       const path = normalizeProjectPath(url.searchParams.get('path'));
       if (!path) throw new ServiceError('INVALID_REQUEST', '需要文件路径。');
+      const expectedToken = url.searchParams.get('changeToken');
+      if (expectedToken !== null && (!expectedToken || expectedToken.length > 512)) throw new ServiceError('INVALID_REQUEST', '项目资产观察标记无效。');
+      const checkToken = async () => {
+        if (expectedToken === null) return;
+        const observation = (await this.files.stat(projectId, [path]))[0]!;
+        if (observation.state !== 'available' || observation.changeToken !== expectedToken) throw new ServiceError('REVISION_CONFLICT', '项目资产已变化，请刷新输入后重新加载。');
+      };
+      await checkToken();
       const header = request.headers.range;
       let range: { start:number; end?:number } | undefined;
       if (header) {
@@ -157,6 +165,7 @@ export class ProjectFilesApi {
         range = { start:Number(match[1]), ...(match[2] ? { end:Number(match[2]) } : {}) };
       }
       const content = await this.files.readRange(projectId, path, range);
+      await checkToken();
       this.auth.withSession(token, origin, () => undefined);
       if (range) return { handled:true, binary:content.bytes, status:206, headers:{ 'Content-Type':classifyProjectFile(path).mime, 'Content-Length':String(content.bytes.length), 'Accept-Ranges':'bytes', 'Content-Range':'bytes '+content.start+'-'+content.end+'/'+content.total, 'X-Content-Type-Options':'nosniff' } };
       return { handled: true, body: { path, bytes: content.bytes.length, base64: content.bytes.toString('base64') } };

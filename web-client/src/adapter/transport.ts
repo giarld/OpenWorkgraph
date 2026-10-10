@@ -133,8 +133,11 @@ export class Transport {
     const pathname = parts[0] ?? '';
     const fileQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
       /^\/v1\/projects\/[A-Za-z0-9_-]+\/files(?:\/(?:search|content|link-content|media|thumbnail))?$/.test(pathname);
-    const skillsQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 &&
-      /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills\/search$/.test(pathname);
+    const skillParams = new URLSearchParams(parts[1]);
+    const skillsQuery = parts.length === 2 && skillParams.size > 0 &&
+      /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills(?:\/search)?$/.test(pathname) &&
+      [...skillParams].every(([key, value]) => skillParams.getAll(key).length === 1 &&
+        (key === 'source' ? ['builtin-feature', 'openworkgraph', 'codex'].includes(value) : key === 'query' && pathname.endsWith('/search') && value.length <= 100));
     const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(pathname);
     // Stable skill identities may contain source separators and repository paths.
     // Permit exactly one encoded identity segment, never arbitrary encoded API paths.
@@ -262,6 +265,13 @@ export class Transport {
       for (const part of parts) digest.update(part);
       serialized = 'binary:' + bytesToHex(digest.digest());
       payload = new Blob(parts as BlobPart[], { type: GRAPH_BINARY_MIME });
+    } else if (verb === 'POST' && /^[/]v1[/]projects[/][A-Za-z0-9_-]+[/]graphs[/][A-Za-z0-9_-]+[/]visualize[/][A-Za-z0-9_-]+[/]bridge[/][A-Za-z0-9_-]+[/]asset$/.test(path) && body && typeof body === 'object' && 'payload' in body) {
+      const input = body as { payload: Blob; idempotencyKey: string };
+      if (!(input.payload instanceof Blob) || input.payload.type !== 'application/vnd.openworkgraph.visualize-asset' || Object.keys(input).some(key => !['payload', 'idempotencyKey'].includes(key)))
+        throw new TransportError('INVALID_REQUEST', 'Invalid asset export payload');
+      const digest = sha256.create(), reader = input.payload.stream().getReader();
+      try { while (true) { const part = await reader.read(); if (part.done) break; digest.update(part.value); } } finally { reader.releaseLock(); }
+      serialized = 'binary:' + bytesToHex(digest.digest()); payload = input.payload;
     } else serialized = body === undefined ? undefined : JSON.stringify(body);
     const key =
       body && typeof body === "object" && "idempotencyKey" in body

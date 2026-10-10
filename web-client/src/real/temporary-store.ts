@@ -7,9 +7,12 @@ import { randomId } from '../adapter/random';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { GraphBundle, Json, CopiedProvenance } from '../../../packages/protocol/src/index';
-import { sniffResourceMime } from '../../../packages/protocol/src/resource-mime';
+import { sniffResourceMime, isOpaqueResourceMime } from '../../../packages/protocol/src/resource-mime';
 import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
 import { importedGraphTitle } from '../../../packages/protocol/src/graph-title';
+import { validateVisualizeNodeContent, validateVisualizePagePackage, validateVisualizeForm } from '../../../packages/protocol/src/visualize-validation';
+import { collectVisualizeAssetReferences, validateVisualizeAssetReference } from '../../../packages/protocol/src/visualize-assets';
+import type { VisualizeNodeContent, VisualizePagePackage, VisualizeResourceReference } from '../../../packages/protocol/src/visualize';
 import { FILE_NODE_MAX_BYTES, importedNodeType } from '../domain/file-types';
 import { graphPath, type GraphSnapshot, type GraphOperation, type Request } from './contracts';
 import type { CanvasCreated } from './ResourcesPanel';
@@ -39,10 +42,119 @@ const EXPORT_MAX_NODES = 2000;
 const EXPORT_MAX_RESOURCES = 256;
 const EXPORT_MAX_TOTAL_RESOURCE_BYTES = WORKGRAPH_TRANSFER_TOTAL_BYTES;
 const EXPORT_MAX_BUNDLE_BYTES = WORKGRAPH_BUNDLE_MAX_BYTES;
-const preservedTextMimes = new Set(['text/plain', 'text/markdown', 'text/csv', 'image/svg+xml', 'application/json', 'application/xml', 'text/xml', 'text/yaml', 'text/x-yaml', 'application/yaml', 'application/x-yaml']);
+const preservedTextMimes = new Set(['text/plain', 'text/markdown', 'text/csv', 'text/css', 'text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript', 'image/svg+xml', 'application/json', 'application/xml', 'text/xml', 'text/yaml', 'text/x-yaml', 'application/yaml', 'application/x-yaml']);
+const coreTypes = new Set(['text', 'image', 'document', 'video', 'file', 'preview', 'execution', 'group', 'visualize']);
+const resourceKey = (reference: VisualizeResourceReference) => JSON.stringify([reference.resourceId, reference.resourceVersion]);
+const canonical = (value: unknown): string => JSON.stringify(value && typeof value === 'object'
+  ? Array.isArray(value) ? value.map(item => JSON.parse(canonical(item)))
+    : Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, JSON.parse(canonical(item))]))
+  : value);
+export function visualizeResourceReferences(value: unknown): VisualizeResourceReference[] {
+  const content = validateVisualizeNodeContent(value);
+  if (!content.page || !content.form) return [];
+  const references = [content.page.resource, ...content.page.dependencies, content.form.resource, ...collectVisualizeAssetReferences(content.form.data)
+    .flatMap(asset => asset.kind === 'resource' ? [{ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion }] : [])];
+  return [...new Map(references.map(reference => [resourceKey(reference), reference])).values()];
+}
+/** Only explicitly tagged assets are identities; ordinary business IDs stay intact. */
+export function remapTemporaryVisualizeAssetData(value: Json, mapping: Map<string, VisualizeResourceReference>): Json {
+  if (!value || typeof value !== 'object') return value;
+  if (!Array.isArray(value) && value.format === 'openworkgraph.asset-reference') {
+    const asset = validateVisualizeAssetReference(value);
+    if (asset.kind === 'project-file') return structuredClone(asset) as unknown as Json;
+    const next = mapping.get(resourceKey(asset));
+    if (!next) throw Error(translate('A resource referenced by the visualization node is missing.'));
+    return { ...asset, ...next };
+  }
+  return Array.isArray(value) ? value.map(child => remapTemporaryVisualizeAssetData(child, mapping))
+    : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, remapTemporaryVisualizeAssetData(child, mapping)]));
+}
+/** Rewrite fixed references and tagged form assets; view state stays business data. */
+export function remapTemporaryVisualizeContent(value: unknown, mapping: Map<string, VisualizeResourceReference>, edges: Map<string, string>): Json {
+  const content = validateVisualizeNodeContent(value);
+  const mapped = (reference: VisualizeResourceReference) => {
+    const next = mapping.get(resourceKey(reference));
+    if (!next) throw Error(translate('A resource referenced by the visualization node is missing.'));
+    return structuredClone(next);
+  };
+  if (content.page && content.form) {
+    content.page.resource = mapped(content.page.resource);
+    content.page.dependencies = content.page.dependencies.map(mapped);
+    content.form.resource = mapped(content.form.resource);
+    content.form.data = remapTemporaryVisualizeAssetData(content.form.data, mapping) as { [key: string]: Json };
+  }
+  content.inputBindings = content.inputBindings.map(binding => {
+    const edgeId = edges.get(binding.edgeId);
+    if (!edgeId) throw Error(translate('A reference edge bound by the visualization node is missing.'));
+    return { ...binding, edgeId };
+  });
+  return content as unknown as Json;
+}
+export function remapTemporaryVisualizePage(value: unknown, mapping: Map<string, VisualizeResourceReference>): VisualizePagePackage {
+  const page = validateVisualizePagePackage(value);
+  page.initialForm = remapTemporaryVisualizeAssetData(page.initialForm, mapping) as { [key: string]: Json };
+  page.form.schema = remapTemporaryVisualizeAssetData(page.form.schema as unknown as Json, mapping) as unknown as typeof page.form.schema;
+  const markers = new Map<string, string>();
+  for (const dependency of page.dependencies) if (dependency.kind === 'resource') {
+    const next = mapping.get(resourceKey(dependency));
+    if (!next) throw Error(translate('A resource required by the visualization page is missing.'));
+    markers.set('visualize-resource:' + encodeURIComponent(dependency.resourceId) + '@' + dependency.resourceVersion,
+      'visualize-resource:' + encodeURIComponent(next.resourceId) + '@' + next.resourceVersion);
+    Object.assign(dependency, next);
+  }
+  if (markers.size) {
+    const pattern = [...markers.keys()].map(marker => marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    page.html = page.html.replace(new RegExp('(?:' + pattern + ')(?![0-9])', 'g'), marker => markers.get(marker)!);
+  }
+  return validateVisualizePagePackage(page);
+}
+export async function validateTemporaryVisualizeResources(nodes: GraphSnapshot['nodes'], resources: Map<string, TemporaryResource>): Promise<Map<string, VisualizePagePackage>> {
+  const read = async (reference: VisualizeResourceReference) => {
+    const resource = resources.get(resourceKey(reference));
+    if (!resource || resource.blob.type !== 'application/json' || resource.blob.size > 4_194_304) throw Error(translate('A visualization fixed JSON resource is missing or invalid.'));
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await resource.blob.arrayBuffer()));
+  };
+  const pages = new Map<string, VisualizePagePackage>();
+  for (const node of nodes) if (node.type === 'visualize') {
+    if (node.schemaVersion !== 1) throw Error(translate('Unsupported visualization node schema version.'));
+    const content = validateVisualizeNodeContent(node.content);
+    if (!content.page || !content.form) continue;
+    const page = validateVisualizePagePackage(await read(content.page.resource));
+    const references: VisualizeResourceReference[] = [];
+    for (const dependency of page.dependencies) if (dependency.kind === 'resource') {
+      const mime = resources.get(resourceKey(dependency))?.blob.type;
+      const matches = dependency.media === 'script' ? ['text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript'].includes(mime ?? '')
+        : dependency.media === 'style' ? mime === 'text/css' : mime?.startsWith(dependency.media + '/') || dependency.media === 'video' && mime?.startsWith('audio/');
+      if (!matches) throw Error(translate('A visualization page dependency is missing or has an incompatible MIME type.'));
+      references.push({ resourceId: dependency.resourceId, resourceVersion: dependency.resourceVersion });
+    }
+    for (const asset of collectVisualizeAssetReferences({ initialForm: page.initialForm, schema: page.form.schema } as unknown as Json)) if (asset.kind === 'resource') {
+      if (!resources.get(resourceKey(asset))) throw Error(translate('A resource required by the visualization page is missing.'));
+      references.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
+    }
+    const unique = [...new Map(references.map(reference => [resourceKey(reference), reference])).values()];
+    if (canonical(unique) !== canonical(content.page.dependencies) || content.page.resource.resourceId === content.form.resource.resourceId || page.form.version !== content.form.schemaVersion) throw Error(translate('The visualization page and form resource contracts do not match.'));
+    const data = await read(content.form.resource);
+    validateVisualizeForm(page.form.schema, data, 'save');
+    for (const asset of collectVisualizeAssetReferences(data)) if (asset.kind === 'resource' && !resources.get(resourceKey(asset)))
+      throw Error(translate('A resource referenced by the visualization node is missing.'));
+    if (canonical(data) !== canonical(content.form.data)) throw Error(translate('The visualization business form does not match its fixed resource.'));
+    pages.set(resourceKey(content.page.resource), page);
+  }
+  return pages;
+}
+export function validateVisualizeConfiguration(previous: Json | undefined, next: Json): void {
+  const content = validateVisualizeNodeContent(next);
+  const old = previous === undefined ? undefined : validateVisualizeNodeContent(previous);
+  if (previous !== undefined && ['page', 'form', 'state'].some(field => canonical(old?.[field as keyof VisualizeNodeContent] ?? null) !== canonical(content[field as keyof VisualizeNodeContent] ?? null)))
+    throw Error(translate('Ordinary edits cannot replace the visualization page, business form, or view state.'));
+}
 const portableMime = (bytes: Uint8Array, declared: string) => {
   const detected = sniffResourceMime(bytes);
-  return detected === 'text/plain' && preservedTextMimes.has(declared.toLowerCase()) ? declared.toLowerCase() : detected;
+  const mime = declared.toLowerCase();
+  if (detected === 'text/plain' && preservedTextMimes.has(mime) ||
+      ['text/plain', 'application/octet-stream'].includes(detected) && isOpaqueResourceMime(mime)) return mime;
+  return detected;
 };
 const base64 = (bytes: Uint8Array) => {
   let binary = '';
@@ -69,9 +181,16 @@ export function applyTemporaryOperations(source: GraphSnapshot, operations: Grap
     switch (op.type) {
       case 'node.create':
         if (graph.nodes.some(n => n.id === op.node.id)) throw Error(translate("Node already exists"));
+        if (op.node.type === 'visualize') {
+          if (op.node.schemaVersion !== 1) throw Error(translate('Unsupported visualization node schema version.'));
+          validateVisualizeConfiguration(undefined, op.node.content);
+          if (validateVisualizeNodeContent(op.node.content).page) throw Error(translate('Visualization page snapshots require the page copy or Work Graph import flow.'));
+        }
         graph.nodes.push(structuredClone(op.node)); break;
       case 'node.content': {
         const n = node(op.nodeId);
+        if (n.readOnly) throw Error(translate('The node does not exist or is read-only.'));
+        if (n.type === 'visualize') validateVisualizeConfiguration(n.content, op.content);
         if (n.contentVersion !== op.expectedContentVersion) throw Object.assign(conflict(), { code: 'CONTENT_CONFLICT' });
         n.content = structuredClone(op.content); n.contentVersion++; break;
       }
@@ -174,6 +293,7 @@ export class TemporaryCanvasStore {
     const graph: GraphSnapshot = { serviceId: 'browser-local', projectId: 'temporary', graphId: randomId(),
       title: bundle.graph.title, updatedAt: new Date().toISOString(), archived: false, trashed: false, executionRevision: 0, layoutRevision: 0, eventCursor: '', nodes: [], edges: [] };
     const resources: Record<string, TemporaryResource> = Object.create(null);
+    const sourceResources = new Map<string, TemporaryResource>();
     const resourceIds = new Map<string, { id: string; bytes: number; mime: string }>();
     let totalBytes = 0;
     for (const resource of bundle.resources) {
@@ -183,10 +303,27 @@ export class TemporaryCanvasStore {
       if (resourceIds.has(key)) throw Error(translate("Duplicate resource."));
       const bytes = Uint8Array.from(atob(resource.base64), c => c.charCodeAt(0));
       if (bytes.length !== resource.bytes || bytesToHex(sha256(bytes)) !== resource.sha256) throw Error(translate("Resource file verification failed."));
-      const detected = sniffResourceMime(bytes);
-      const mime = detected === 'text/plain' && resource.mime.toLowerCase() === 'image/svg+xml' ? 'image/svg+xml' : detected;
+      const mime = portableMime(bytes, resource.mime);
       const id = randomId(); resourceIds.set(key, { id, bytes: bytes.length, mime });
       resources[id] = { name: resource.name, blob: new Blob([bytes], { type: mime }) };
+      sourceResources.set(key, resources[id]);
+    }
+    const pages = await validateTemporaryVisualizeResources(bundle.graph.nodes, sourceResources);
+    const visualizeMapping = new Map([...resourceIds].map(([key, resource]) => [key, { resourceId: resource.id, resourceVersion: 1 }]));
+    for (const [key, page] of pages) {
+      const resource = resources[resourceIds.get(key)!.id];
+      resource.blob = new Blob([JSON.stringify(remapTemporaryVisualizePage(page, visualizeMapping))], { type: 'application/json' });
+    }
+    for (const node of bundle.graph.nodes) if (node.type === 'visualize') {
+      const content = validateVisualizeNodeContent(node.content);
+      if (content.form) resources[resourceIds.get(resourceKey(content.form.resource))!.id].blob = new Blob(
+        [JSON.stringify(remapTemporaryVisualizeAssetData(content.form.data, visualizeMapping))], { type: 'application/json' });
+    }
+    if (Object.values(resources).some(resource => resource.blob.size > FILE_NODE_MAX_BYTES) || Object.values(resources).reduce((total, resource) => total + resource.blob.size, 0) > EXPORT_MAX_TOTAL_RESOURCE_BYTES) throw Error(translate('The Work Graph resources exceed the export limit.'));
+    const edgeMapping = new Map<string, string>();
+    for (const edge of bundle.graph.edges) {
+      if (!edge || typeof edge.id !== 'string' || edgeMapping.has(edge.id)) throw Error(translate('A Work Graph connection is invalid.'));
+      edgeMapping.set(edge.id, randomId());
     }
     const remap = (value: Json, depth = 0): Json => {
       if (depth > 32) throw Error(translate("The node content is nested too deeply."));
@@ -219,9 +356,10 @@ export class TemporaryCanvasStore {
         if (!ids.has(id) || members.has(id) || bundle.graph.nodes.find(v => v.id === id)?.type === 'group') throw Error(translate("Group members are missing or overlapping."));
         members.add(id); return ids.get(id)!;
       });
-      return { ...n, id: ids.get(n.id)!, content: remap(['text','image','document','video','file','preview','execution','group'].includes(n.type) ? portableSkillContent(n.content) : n.content), ...(memberIds ? { memberIds } : {}) };
+      const portable = coreTypes.has(n.type) ? portableSkillContent(n.content) : n.content;
+      return { ...n, id: ids.get(n.id)!, content: n.type === 'visualize' ? remapTemporaryVisualizeContent(portable, visualizeMapping, edgeMapping) : remap(portable), ...(memberIds ? { memberIds } : {}) };
     });
-    const edges = new Set<string>(), pairs = new Set<string>(), incoming = new Map<string, number>();
+    const edges = new Set<string>(), pairs = new Set<string>(), incoming = new Map<string, number>(), deliveryTargets = new Set<string>();
     graph.edges = bundle.graph.edges.map(e => {
       const source = graph.nodes.find(n => n.id === ids.get(e?.sourceId)), target = graph.nodes.find(n => n.id === ids.get(e?.targetId));
       const pair = JSON.stringify([e?.sourceId, e?.targetId]);
@@ -233,10 +371,15 @@ export class TemporaryCanvasStore {
         if (source.type === 'execution' || count > 8) throw Error(translate("A content predecessor is invalid."));
       } else if (e.kind === 'execution') {
         if (source.type !== 'execution' || target.type !== 'execution') throw Error(translate("Sequence edges can only connect execution nodes."));
-      } else if (e.kind !== 'delivery' || source.type !== 'execution' || !['document','image','video','file'].includes(target.type) || !target.readOnly) throw Error(translate("The delivery connection is invalid."));
+      } else if (e.kind !== 'delivery' || source.type !== 'execution' || !['text','document','image','video','file','visualize'].includes(target.type) || (!target.readOnly && target.type !== 'visualize') || deliveryTargets.has(target.id)) throw Error(translate("The delivery connection is invalid."));
+      if (e.kind === 'delivery') deliveryTargets.add(target.id);
       edges.add(e.id); pairs.add(pair);
-      return { ...e, id: randomId(), sourceId: source.id, targetId: target.id };
+      return { ...e, id: edgeMapping.get(e.id)!, sourceId: source.id, targetId: target.id };
     });
+    for (const n of graph.nodes) if (n.type === 'visualize') {
+      const content = validateVisualizeNodeContent(n.content);
+      if (content.inputBindings.some(binding => !graph.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === n.id))) throw Error(translate('Visualization bindings must name incoming reference edges of the node.'));
+    }
     if (!executionOrder(graph.edges)) throw Error(translate("Sequence connections cannot form a cycle."));
     // A public import copies content, never the authority of a runtime delivery.
     const copiedProvenance: CopiedProvenance[] = [];
@@ -249,7 +392,7 @@ export class TemporaryCanvasStore {
         else throw Error(translate("A copy provenance node is missing."));
       }
     }
-    const core = new Set(['text', 'image', 'document', 'video', 'file', 'preview', 'execution', 'group']);
+    const core = coreTypes;
     for (const node of graph.nodes) {
       node.contentVersion = 1;
       if (!core.has(node.type)) continue;
@@ -336,7 +479,7 @@ export class TemporaryCanvasStore {
     // Capture the graph and resource descriptors in one read transaction.
     const record = await this.access(graphId, false, value => value);
     const { title, nodes, edges } = record.graph;
-    const portableNodes = nodes.map(node => { const copy = structuredClone(node); if (['text','image','document','video','file','preview','execution','group'].includes(copy.type)) copy.content = portableSkillContent(copy.content); return copy; });
+    const portableNodes = nodes.map(node => { const copy = structuredClone(node); if (coreTypes.has(copy.type)) copy.content = portableSkillContent(copy.content); return copy; });
     if (portableNodes.length > EXPORT_MAX_NODES || edges.length > EXPORT_MAX_NODES * 9) throw Error(translate("The Work Graph exceeds the export limit."));
     const resourceIds = new Set(Object.keys(record.resources));
     const projectResourceIds = new Set<string>();
@@ -364,7 +507,15 @@ export class TemporaryCanvasStore {
       Object.values(value).forEach(visit);
     };
     const projectNodeIds = new Set(projectPlans.map(plan => plan.node.id));
-    for (const node of portableNodes) if (!projectNodeIds.has(node.id)) visit(node.content);
+    for (const node of portableNodes) if (!projectNodeIds.has(node.id)) {
+      if (node.type === 'visualize') {
+        if (node.schemaVersion !== 1) throw Error(translate('Unsupported visualization node schema version.'));
+        const content = validateVisualizeNodeContent(node.content);
+        if (content.inputBindings.some(binding => !edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === node.id))) throw Error(translate('Visualization bindings must name incoming reference edges of the node.'));
+        for (const reference of visualizeResourceReferences(content)) visit(reference as unknown as Json);
+      } else visit(node.content);
+    }
+    await validateTemporaryVisualizeResources(portableNodes, new Map([...links].map(([resourceId, version]) => [JSON.stringify([resourceId, version]), record.resources[resourceId]])));
     let totalResourceBytes = 0;
     for (const [resourceId] of links) {
       const resource = record.resources[resourceId];
@@ -398,7 +549,7 @@ export class TemporaryCanvasStore {
     const liveNodes = new Set(nodes.map(n => n.id));
     const bundle: GraphBundle = { format: 'openworkgraph.graph', version: 1, graph: { title, nodes:portableNodes, edges }, resources:projectResources, pluginRequirements: structuredClone(record.pluginRequirements ?? []),
       copiedProvenance: (record.copiedProvenance ?? []).filter(p => p.kind === 'copied-node' ? liveNodes.has(p.nodeId) : liveNodes.has(p.sourceId) && liveNodes.has(p.targetId)) };
-    const core = new Set(['text', 'image', 'document', 'video', 'file', 'preview', 'execution', 'group']);
+    const core = coreTypes;
     for (const node of portableNodes) {
       if (!core.has(node.type) && !bundle.pluginRequirements.some(r => r.typeId === node.type && r.schemaVersion === node.schemaVersion))
         bundle.pluginRequirements.push({ typeId: node.type, schemaVersion: node.schemaVersion, contract: null });
@@ -436,6 +587,96 @@ export class TemporaryCanvasStore {
     if (!match) throw Object.assign(Error(translate("This operation requires a Workspace connection.")), { code: 'SERVICE_UNAVAILABLE' });
     const [, id, suffix] = match;
     if (!suffix && body === undefined) return this.access(id, false, r => documentSnapshot(r)) as Promise<T>;
+    if (suffix === '/resources/import-bytes' && body !== undefined) {
+      const input = body as { name: string; blob: Blob; idempotencyKey: string };
+      if (!input || typeof input.name !== 'string' || !input.name.trim() || !(input.blob instanceof Blob) || typeof input.idempotencyKey !== 'string' || !input.idempotencyKey || input.blob.size > FILE_NODE_MAX_BYTES) throw Error(translate('The visualization copy resource is invalid or exceeds the size limit.'));
+      const bytes = new Uint8Array(await input.blob.arrayBuffer()), mime = portableMime(bytes, input.blob.type);
+      const signature = JSON.stringify([input.name, mime, bytesToHex(sha256(bytes))]), key = 'visualize-bytes:' + input.idempotencyKey;
+      return this.access(id, true, record => {
+        if (record.graph.archived || record.graph.trashed) throw Error(translate('Archived or trashed Work Graphs are read-only.'));
+        if (record.copies?.[key]) {
+          if (record.receiptBodies?.[key] !== signature) throw Object.assign(Error(translate('The parameters for this idempotency key changed.')), { code: 'IDEMPOTENCY_CONFLICT' });
+          return record.copies[key];
+        }
+        const resourceId = randomId();
+        record.resources[resourceId] = { name: input.name, blob: new Blob([bytes], { type: mime }) };
+        (record.receiptBodies ??= {})[key] = signature;
+        return (record.copies ??= {})[key] = { resource: { id: resourceId, name: input.name, current: { version: 1, mime, bytes: bytes.length } }, referenceId: resourceId };
+      }) as Promise<T>;
+    }
+    if (suffix === '/visualize-paste' && body !== undefined) {
+      const command = structuredClone(body) as { operations: GraphOperation[]; pages: { nodeId: string; page: VisualizePagePackage }[]; resources?: { resourceId: string; name: string; blob: Blob }[]; idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number };
+      if (!command || typeof command.idempotencyKey !== 'string' || !command.idempotencyKey || !Array.isArray(command.operations) || !Array.isArray(command.pages) || !command.pages.length || command.pages.length > 100 || command.operations.length > 300 || jsonByteLength(command) > EXPORT_MAX_BUNDLE_BYTES) throw Error(translate('Invalid visualization paste request.'));
+      if (command.resources !== undefined && (!Array.isArray(command.resources) || command.resources.length > 1000)) throw Error(translate('Invalid visualization paste request.'));
+      const staged: Record<string, TemporaryResource> = Object.create(null);
+      const fingerprints: unknown[] = [];
+      let resourceBytes = 0;
+      for (const resource of command.resources ?? []) {
+        if (!resource || typeof resource.resourceId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(resource.resourceId) || staged[resource.resourceId] || typeof resource.name !== 'string' || !resource.name.trim() || !(resource.blob instanceof Blob) || resource.blob.size > FILE_NODE_MAX_BYTES) throw Error(translate('Invalid visualization paste request.'));
+        resourceBytes += resource.blob.size;
+        if (resourceBytes > WORKGRAPH_TRANSFER_TOTAL_BYTES) throw Error(translate('The Work Graph resources exceed the export limit.'));
+        const bytes = new Uint8Array(await resource.blob.arrayBuffer()), mime = portableMime(bytes, resource.blob.type);
+        staged[resource.resourceId] = { name: resource.name, blob: new Blob([bytes], { type: mime }) };
+        fingerprints.push([resource.resourceId, resource.name, mime, bytesToHex(sha256(bytes))]);
+      }
+      const key = 'visualize-paste:' + command.idempotencyKey, signature = JSON.stringify(command.resources === undefined ? command : { ...command, resources: fingerprints });
+      const record = await this.access(id, false, r => r);
+      if (record.receipts[key]) {
+        if (record.receiptBodies?.[key] !== signature) throw Object.assign(Error(translate('The parameters for this idempotency key changed.')), { code: 'IDEMPOTENCY_CONFLICT' });
+        return record.receipts[key] as T;
+      }
+      if (Object.keys(staged).some(resourceId => record.resources[resourceId])) throw Error(translate('Invalid visualization paste request.'));
+      const snapshots = new Map<string, Json>();
+      for (const entry of command.pages) {
+        const operation = command.operations.find(op => op.type === 'node.create' && op.node.id === entry.nodeId);
+        if (!operation || operation.type !== 'node.create' || operation.node.type !== 'visualize' || operation.node.readOnly || operation.node.schemaVersion !== 1 || snapshots.has(entry.nodeId)) throw Error(translate('Invalid visualization paste request.'));
+        const content = validateVisualizeNodeContent(operation.node.content), page = validateVisualizePagePackage(entry.page);
+        if (!content.page || !content.form || !content.state) throw Error(translate('Invalid visualization paste request.'));
+        const pageId = randomId(), formId = randomId();
+        content.page.resource = { resourceId: pageId, resourceVersion: 1 };
+        content.form.resource = { resourceId: formId, resourceVersion: 1 };
+        staged[pageId] = { name: 'visualize-page.json', blob: new Blob([JSON.stringify(page)], { type: 'application/json' }) };
+        staged[formId] = { name: 'visualize-form.json', blob: new Blob([JSON.stringify(content.form.data)], { type: 'application/json' }) };
+        const resources = new Map(Object.entries({ ...record.resources, ...staged }).map(([resourceId, resource]) => [JSON.stringify([resourceId, 1]), resource]));
+        await validateTemporaryVisualizeResources([{ ...operation.node, content: content as unknown as Json }], resources);
+        snapshots.set(entry.nodeId, content as unknown as Json);
+      }
+      if (Object.values(staged).reduce((bytes, resource) => bytes + resource.blob.size, 0) > WORKGRAPH_TRANSFER_TOTAL_BYTES) throw Error(translate('The Work Graph resources exceed the export limit.'));
+      return this.access(id, true, current => {
+        if (current.graph.archived || current.graph.trashed) throw Error(translate('Archived or trashed Work Graphs are read-only.'));
+        if (current.receipts[key]) {
+          if (current.receiptBodies?.[key] !== signature) throw Object.assign(Error(translate('The parameters for this idempotency key changed.')), { code: 'IDEMPOTENCY_CONFLICT' });
+          return current.receipts[key];
+        }
+        if (current.graph.executionRevision !== command.expectedExecutionRevision || current.graph.layoutRevision !== command.expectedLayoutRevision) throw conflict();
+        if (Object.keys(staged).some(resourceId => current.resources[resourceId])) throw Error(translate('Invalid visualization paste request.'));
+        const operations = command.operations.map(operation => {
+          if (operation.type !== 'node.create' || !snapshots.has(operation.node.id)) return operation;
+          const { page: _page, form: _form, state: _state, ...content } = operation.node.content as Record<string, Json>;
+          return { ...operation, node: { ...operation.node, content } };
+        });
+        const next = applyTemporaryOperations(current.graph, operations);
+        for (const node of next.nodes) if (snapshots.has(node.id)) node.content = snapshots.get(node.id)!;
+        Object.assign(current.resources, staged);
+        recordDocumentVersion(current, next);
+        rememberReceipt(current, key, signature, current.graph);
+        return current.graph;
+      }) as Promise<T>;
+    }
+    const visualizeMatch = /^[/]visualize[/]([^/]+)$/.exec(suffix);
+    if (visualizeMatch) {
+      const record = await this.access(id, false, r => r);
+      const node = record.graph.nodes.find(n => n.id === visualizeMatch[1]);
+      if (!node || node.type !== 'visualize' || node.schemaVersion !== 1) throw Error(translate('Node not found'));
+      if (body !== undefined || (method !== undefined && method !== 'GET')) {
+        if (node.readOnly || record.graph.archived || record.graph.trashed) throw Object.assign(Error(translate('The node does not exist or is read-only.')), { code: 'READ_ONLY' });
+        throw Object.assign(Error(translate('Connect a Workspace and import the temporary Work Graph before editing its visualization page.')), { code: 'TEMPORARY_SERVICE_REQUIRED' });
+      }
+      const content = validateVisualizeNodeContent(node.content);
+      const resources = new Map(visualizeResourceReferences(content).map(reference => [resourceKey(reference), record.resources[reference.resourceId]]));
+      const pages = await validateTemporaryVisualizeResources([node], resources);
+      return { serviceId: record.graph.serviceId, projectId: record.graph.projectId, graphId: record.graph.graphId, nodeId: node.id, contentVersion: node.contentVersion, executionRevision: record.graph.executionRevision, layoutRevision: record.graph.layoutRevision, content, page: content.page ? pages.get(resourceKey(content.page.resource))! : null } as T;
+    }
     if (suffix === '/export' && body === undefined) return this.exportGraph(id) as Promise<T>;
     if (suffix === '/permanent-delete') {
       const command = body as { expectedExecutionRevision: number; expectedLayoutRevision: number; confirmTitle: string };

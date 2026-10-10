@@ -20,7 +20,13 @@ export function transaction<T>(db: DatabaseSync, work: () => T): T {
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
 export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): void {
-  transaction(db, () => {
+  // SQLite's documented table rebuild requires FK enforcement disabled outside
+  // the transaction. Integrity is checked before commit and enforcement restored.
+  const rebuild = Number(db.prepare('PRAGMA user_version').get()!['user_version']) < 26 && migrations.some(item => item.version === 26);
+  const foreignKeys = Number(db.prepare('PRAGMA foreign_keys').get()!['foreign_keys']);
+  if (rebuild && db.isTransaction) throw new ServiceError('MIGRATION_FAILED', 'Schema migration must run outside a transaction');
+  if (rebuild) db.exec('PRAGMA foreign_keys=OFF');
+  try { transaction(db, () => {
     const version = Number(db.prepare('PRAGMA user_version').get()!['user_version']);
     if (version > SCHEMA_VERSION || version < 0) throw new ServiceError('SCHEMA_UNSUPPORTED', `Unsupported database schema ${version}; expected 0..${SCHEMA_VERSION}`);
     if (version === 0 && db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new ServiceError('SCHEMA_UNSUPPORTED', 'Unversioned nonempty database; refusing to overwrite');
@@ -38,13 +44,13 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
     for (const table of ['identity','settings','sessions','pairing_codes','projects','graphs','nodes','node_versions','edges','blobs','assets','asset_versions','runs','snapshots','outputs','asset_references','events','interactions','occupancy','idempotency','plugin_contracts','backups','trusted_origins','canvas_resources','canvas_resource_versions','canvas_resource_references','canvas_outputs']) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new ServiceError('SCHEMA_UNSUPPORTED', `Missing schema table ${table}`);
     }
-    for (const table of ['execution_input_snapshots','execution_outputs','project_file_bindings','project_file_observations','project_file_outputs','node_resource_history','graph_groups','group_members','run_runtime','run_process_records','run_notifications','generation_candidates','publication_manifests','resource_uploads','resource_upload_chunks','resource_blob_files','resource_file_deletions','resource_read_leases','resource_maintenance_leases']) {
+    for (const table of ['launch_input_snapshots','execution_input_snapshots','execution_outputs','project_file_bindings','project_file_observations','project_file_outputs','node_resource_history','graph_groups','group_members','run_runtime','run_process_records','run_notifications','generation_candidates','publication_manifests','resource_uploads','resource_upload_chunks','resource_blob_files','resource_file_deletions','resource_read_leases','resource_maintenance_leases']) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new ServiceError('SCHEMA_UNSUPPORTED', `Missing schema table ${table}`);
     }
     if (db.prepare('PRAGMA foreign_key_check').get()) throw new ServiceError('SCHEMA_UNSUPPORTED', 'Database has foreign key violations');
     if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_version_schemas'").get())throw new ServiceError('SCHEMA_UNSUPPORTED','Missing node version schema history');
     for (const table of ['image_providers','image_provider_models','image_provider_config_versions','image_provider_revoked_credentials']) if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new ServiceError('SCHEMA_UNSUPPORTED', 'Missing image provider directory');
-  });
+  }); } finally { if (rebuild) db.exec('PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=' + foreignKeys); }
 }
 export function openDatabase(path: string, migrations: readonly Migration[] = MIGRATIONS): DatabaseSync {
   const db = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: 5000, allowExtension: false });

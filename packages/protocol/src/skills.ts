@@ -1,3 +1,5 @@
+import type { VisualizeFeatureSelection } from './visualize.js';
+
 /** Skill identities are portable; paths and configuration values never belong in graph packages. */
 export const SKILL_NAME_PATTERN = '[A-Za-z0-9_.:-]+';
 const skillName = new RegExp('^' + SKILL_NAME_PATTERN + '$');
@@ -28,6 +30,12 @@ export function legacySkillMentions(prompt: string, knownNames: readonly string[
 }
 export interface SkillReference { skillId: string; source: 'openworkgraph' | 'codex'; name: string; start: number; end: number }
 export interface SkillCandidate { skillId: string; source: 'openworkgraph' | 'codex'; name: string; description: string }
+/** Product functions are separate candidates, never installable skill identities. */
+export interface BuiltinFeatureCandidate extends VisualizeFeatureSelection { name: string; description: string }
+/** Keep legacy items unchanged; clients combine features with items for selection. */
+export interface SkillCandidates { items: SkillCandidate[]; features?: BuiltinFeatureCandidate[] }
+/** Both selections are frozen together, but only real skills resolve packages/configuration. */
+export interface FrozenPromptSelection { skills: FrozenSkill[]; features: VisualizeFeatureSelection[] }
 export interface SkillEnvironmentField { name: string; label: string; description: string; required: boolean; secret: boolean; default?: string; translations?: Record<string, { label: string; description: string }> }
 export interface SkillConfigSchema { version: 1; environment: SkillEnvironmentField[] }
 export interface SkillSource { id: string; repository: string; branch: string; directory: string }
