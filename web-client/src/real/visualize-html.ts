@@ -7,7 +7,7 @@ import defaultStyles from './visualize-default.css?raw';
 export const VISUALIZE_HTML_SANDBOX = 'allow-scripts';
 export const VISUALIZE_HTML_PERMISSIONS = ['camera', 'microphone', 'geolocation', 'clipboard-read', 'clipboard-write', 'display-capture', 'fullscreen', 'payment', 'usb', 'serial'].map(feature => feature + " 'none'").join('; ');
 export interface VisualizeStaticResource {
-  resourceId: string; resourceVersion: number; media: VisualizeDependency['media'];
+  resourceId: string; resourceVersion: number; media: VisualizeDependency['media'] | 'binary';
   relativePath?: string;
   /** Host-owned object URL or MIME-checked data URL; never an authenticated API URL. */
   url: string;
@@ -79,7 +79,7 @@ export async function prepareVisualizeHtmlDocument(options: VisualizeHtmlOptions
   }));
   await Promise.all(copy.resources.map(async resource => {
     if (!resource.url.startsWith('blob:')) return;
-    try { resource.url = await download(resource.url, resource.media); }
+    try { if (resource.media !== 'binary') resource.url = await download(resource.url, resource.media); }
     catch { resource.url = ''; }
   }));
   copy.resources = copy.resources.filter(resource => resource.url);
@@ -115,15 +115,16 @@ export function buildVisualizeHtmlDocument(options: VisualizeHtmlOptions): strin
   if (!Array.isArray(resources) || resources.length > 512) fail('Too many static resources');
   if (resources.reduce((bytes, resource) => bytes + (typeof resource?.url === 'string' ? resource.url.length : 0), 0) > 67_108_864) fail('Static resource data budget exceeded');
   for (const resource of resources) {
-    if (typeof resource.resourceId !== 'string' || !resource.resourceId.trim() || resource.resourceId.length > 256 || !Number.isSafeInteger(resource.resourceVersion) || resource.resourceVersion < 1 || !['script', 'style', 'image', 'video'].includes(resource.media) || typeof resource.url !== 'string') fail('Invalid static resource');
-    if (resource.relativePath !== undefined && (!isVisualizeProjectPath(resource.relativePath) || !['image', 'video'].includes(resource.media))) fail('Invalid project asset');
+    if (typeof resource.resourceId !== 'string' || !resource.resourceId.trim() || resource.resourceId.length > 256 || !Number.isSafeInteger(resource.resourceVersion) || resource.resourceVersion < 1 || !['script', 'style', 'image', 'video', 'binary'].includes(resource.media) || typeof resource.url !== 'string') fail('Invalid static resource');
+    if (resource.relativePath !== undefined && (!isVisualizeProjectPath(resource.relativePath) || !['image', 'video', 'binary'].includes(resource.media))) fail('Invalid project asset');
     const key = resource.relativePath === undefined ? visualizeResourceUrl(resource.resourceId, resource.resourceVersion) : 'visualize-project-file:' + encodeURIComponent(resource.relativePath);
     if (Object.hasOwn(urls, key)) fail('Duplicate static resource');
-    const mime = { script: '(?:text|application)/javascript', style: 'text/css', image: 'image/[a-zA-Z0-9.+-]+', video: '(?:video|audio)/[a-zA-Z0-9.+-]+' }[resource.media];
-    const data = new RegExp('^data:' + mime + ';base64,[A-Za-z0-9+/]*={0,2}$').test(resource.url);
+    const mime = { script: '(?:text|application)/javascript', style: 'text/css', image: 'image/[a-zA-Z0-9.+-]+', video: '(?:video|audio)/[a-zA-Z0-9.+-]+', binary: '' }[resource.media];
+    const data = resource.media !== 'binary' && new RegExp('^data:' + mime + ';base64,[A-Za-z0-9+/]*={0,2}$').test(resource.url);
     let blob = false;
     try { const url = new URL(resource.url); blob = url.protocol === 'blob:' && url.origin === origin.origin && !url.search && !url.hash && !/[\u0000- \u007f]/.test(resource.url); } catch { /* Invalid static URL. */ }
     const binary = resource.url === 'visualize-host-asset:' + encodeURIComponent(key);
+    if (resource.media === 'binary' && !binary) fail('Binary resources require the host asset transport');
     if (!data && !blob && !binary) fail('Static resources require host-owned blob URLs or MIME-matched base64 data URLs');
     urls[key] = resource.url; media.set(key, resource.media);
   }
@@ -139,7 +140,7 @@ export function buildVisualizeHtmlDocument(options: VisualizeHtmlOptions): strin
     ...assets.filter(asset => asset.media === kind && asset.url?.startsWith('https:')).map(asset => new URL(asset.url!).origin + new URL(asset.url!).pathname),
     ...resources.filter(resource => resource.media === kind).map(resource => resource.url.startsWith('blob:') || resource.url.startsWith('visualize-host-asset:') ? 'blob:' : 'data:'),
   ])].join(' ');
-  const csp = ["default-src 'none'", "script-src 'unsafe-inline' " + sources('script'), "style-src 'unsafe-inline' " + sources('style'), 'img-src data: ' + sources('image'), 'media-src data: ' + sources('video'), 'font-src data:', "connect-src 'none'", "worker-src 'none'", "frame-src 'none'", "child-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"].join('; ');
+  const csp = ["default-src 'none'", "script-src 'unsafe-inline' " + sources('script'), "style-src 'unsafe-inline' " + sources('style'), 'img-src data: ' + sources('image'), 'media-src data: ' + sources('video'), 'font-src data:', 'connect-src blob:', "worker-src 'none'", "frame-src 'none'", "child-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"].join('; ');
   const config: Bootstrap = { html: page.html, hostOrigin: options.hostOrigin, sessionId: options.sessionId, nodeId: options.nodeId, assets, urls, theme, locale, timeout, expanded: options.expanded === true };
   const sdk = options.sdkSource.replace(/<\/script/gi, '<\\/script');
   return '<!doctype html><html lang="' + locale + '"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + escapeAttribute(csp) + '"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><style data-visualize-default-styles>' + defaultStyles + '</style></head><body><script>' + sdk + '</script><script>(' + installVisualizeActivityController.toString() + ')(' + jsonScript({ hostOrigin: options.hostOrigin, sessionId: options.sessionId, nodeId: options.nodeId }) + ');(' + bootstrap.toString() + ')(' + jsonScript(config) + ');</script></body></html>';
@@ -167,7 +168,10 @@ function bootstrap(config: Bootstrap): void {
   });
   const errors = document.createElement('div');
   errors.dataset.visualizeErrors = ''; errors.setAttribute('role', 'alert'); errors.hidden = true; document.body.prepend(errors);
+  let pageHasErrors = false;
+  const reportPageStatus = (status: 'ready' | 'error') => window.parent.postMessage({ channel: 'openworkgraph.visualize.page-status', version: 1, sessionId: config.sessionId, nodeId: config.nodeId, status }, config.hostOrigin);
   function report(id: string, media: string): void {
+    pageHasErrors = true; reportPageStatus('error');
     errors.hidden = false;
     const line = document.createElement('div');
     line.textContent = (config.locale.startsWith('zh') ? '静态资源加载失败：' : 'Static resource unavailable: ') + id;
@@ -189,8 +193,8 @@ function bootstrap(config: Bootstrap): void {
       if (typeof asset.key !== 'string' || !/^(?:visualize-resource:|visualize-project-file:)/.test(asset.key)) continue;
       const expected = config.urls[asset.key];
       if ((message.type === 'response' && !expected?.startsWith('visualize-host-asset:')) || !(asset.bytes instanceof ArrayBuffer) || asset.bytes.byteLength > 300 * 1024 * 1024 || typeof asset.mime !== 'string') continue;
-      const allowed = asset.media === 'image' ? /^image[/]/ : asset.media === 'video' ? /^(?:video|audio)[/]/ : asset.media === 'style' ? /^text[/]css$/ : asset.media === 'script' ? /^(?:text|application)[/](?:javascript|ecmascript)$/ : null;
-      if (!allowed?.test(asset.mime)) continue;
+      const allowed = asset.media === 'image' ? /^image[/]/ : asset.media === 'video' ? /^(?:video|audio)[/]/ : asset.media === 'style' ? /^text[/]css$/ : asset.media === 'script' ? /^(?:text|application)[/](?:javascript|ecmascript)$/ : asset.media === 'binary' ? /^[a-zA-Z0-9!#$&^_.+-]+[/][a-zA-Z0-9!#$&^_.+-]+$/ : null;
+      if (!allowed?.test(asset.mime.split(';')[0].trim())) continue;
       const url = URL.createObjectURL(new Blob([asset.bytes], { type: asset.mime })); objectUrls.add(url);
       if (expected) {
         for (const [key, value] of Object.entries(config.urls)) if (value === expected) config.urls[key] = url;
@@ -301,4 +305,5 @@ function bootstrap(config: Bootstrap): void {
     }
   })();
   void page.visualizeAssetsReady.catch(() => report('Page', 'html'));
+  void Promise.all([page.visualizeReady, page.visualizeAssetsReady]).then(() => { if (!pageHasErrors) reportPageStatus('ready'); }).catch(() => undefined);
 }

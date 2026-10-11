@@ -6,7 +6,7 @@ import { Graphs } from './graphs.js';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
-import { DEFAULT_EXECUTION_TITLES, promptRunTitle } from './run-title.js';
+import { DEFAULT_EXECUTION_TITLES, DEFAULT_VISUALIZE_TITLES, promptRunTitle } from './run-title.js';
 import { freezeVisualizeRunInputs } from './visualize-run-inputs.js';
 
 export interface RunContext { runId: string; projectId: string; graphId: string; nodeId: string; kind: SubmitRun['kind']; baseVersion: number; canonicalPath: string; publicationVersion: 1 | 2; sandboxMode?: SandboxMode }
@@ -228,13 +228,14 @@ export class Runs {
   /** A prompt-derived title created by this Run may still receive its agent title. */
   shouldGenerateNodeTitle(id: string): boolean {
     const run = this.get(id), runtime = this.runtime(id);
-    if (runtime.details.kind !== 'execution') return true;
+    if (runtime.details.kind !== 'execution' && runtime.details.kind !== 'visualize_generation') return true;
     const node = this.db.prepare('SELECT n.current_version,n.read_only,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=? AND n.deleted=0').get(run.nodeId, run.graphId);
     if (!node || node.read_only || node.current_version !== (runtime.details.titleVersion ?? runtime.details.baseVersion)) return false;
     const content = JSON.parse(String(node.content)) as Json;
     if (!content || typeof content !== 'object' || Array.isArray(content)) return false;
     const title = typeof content.title === 'string' ? content.title.trim() : '';
-    return runtime.details.generatedTitle !== true && (runtime.details.titleVersion !== undefined || !title || DEFAULT_EXECUTION_TITLES.has(title));
+    const defaults = runtime.details.kind === 'visualize_generation' ? DEFAULT_VISUALIZE_TITLES : DEFAULT_EXECUTION_TITLES;
+    return runtime.details.generatedTitle !== true && (runtime.details.titleVersion !== undefined || !title || defaults.has(title));
   }
   /** Title-only versions must not look like user edits when publishing generation. */
   updateNodeTitle(id: string, token: RunToken, value: string, generated = true): boolean {

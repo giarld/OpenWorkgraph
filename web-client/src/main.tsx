@@ -5,6 +5,7 @@ import './i18n/catalogs';
 const RealApp = lazy(() =>
   import("./real/RealApp").then((module) => ({ default: module.RealApp })),
 );
+const VisualizeStandalone = lazy(() => import('./real/VisualizeStandalone').then(module => ({ default: module.VisualizeStandalone })));
 import "./styles.css";
 if (!location.hash) history.replaceState(null, '', location.pathname + location.search + '#workgraphs');
 function LoadingWorkspace() {
@@ -14,7 +15,7 @@ function LoadingWorkspace() {
 createRoot(document.getElementById("root")!).render(
   <I18nProvider>
     <Suspense fallback={<LoadingWorkspace />}>
-      <RealApp />
+      {new URLSearchParams(location.search).get('view') === 'visualize' ? <VisualizeStandalone /> : <RealApp />}
     </Suspense>
   </I18nProvider>,
 );

@@ -150,8 +150,16 @@ export function createVisualizePageSdk(options: {
         revisions = { ...response.result.revisions };
         capabilities = { ...response.result.capabilities };
         break;
-      case 'saveState': case 'updateForm': case 'createSuccessors': case 'exportAsset':
-        revisions = { ...response.result.revisions };
+      case 'saveState':
+        // Only advance a data version when this page received that snapshot.
+        // A state save can observe another session's form without returning it.
+        revisions = { ...response.result.revisions, formVersion: revisions.formVersion, inputVersion: revisions.inputVersion };
+        break;
+      case 'updateForm': case 'createSuccessors':
+        revisions = { ...response.result.revisions, stateVersion: revisions.stateVersion, inputVersion: revisions.inputVersion };
+        break;
+      case 'exportAsset':
+        revisions = { ...response.result.revisions, formVersion: revisions.formVersion, stateVersion: revisions.stateVersion, inputVersion: revisions.inputVersion };
         break;
       case 'readInputs': revisions.inputVersion = response.result.inputs.version; break;
       case 'requestLayout': revisions.layoutRevision = response.result.layoutRevision; break;

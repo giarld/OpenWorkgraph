@@ -1,4 +1,5 @@
-export type PreviewFormat = 'html' | 'image' | 'svg' | 'markdown' | 'code' | 'pdf' | 'csv' | 'video' | 'hex';
+import { audioMimeByExtension, previewAudioMime } from '../domain/audio-formats';
+export type PreviewFormat = 'html' | 'image' | 'svg' | 'markdown' | 'code' | 'pdf' | 'csv' | 'video' | 'audio' | 'hex';
 export type PreviewMode = 'rendered' | 'text' | 'hex';
 export function previewMode(value: unknown): PreviewMode | undefined {
   return value === 'rendered' || value === 'text' || value === 'hex' ? value : undefined;
@@ -29,6 +30,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (ext === 'svg') return 'svg';
   if (imageMimeByExtension[ext]) return 'image';
   if (ext === 'pdf') return 'pdf';
+  if (Object.hasOwn(audioMimeByExtension, ext)) return 'audio';
   if (['mp4','m4v','mov','webm','mkv','avi','mpg','mpeg','ogv'].includes(ext)) return 'video';
   if (Object.hasOwn(languages, ext)) return 'code';
   if (ext === 'bin') return 'hex';
@@ -39,6 +41,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (previewImageMime('', mime)) return 'image';
   if (mime === 'application/pdf') return 'pdf';
   if (mime.startsWith('video/')) return 'video';
+  if (previewAudioMime('', mime)) return 'audio';
   return 'hex';
 }
 export function codeMarkdown(text: string, name: string): string {

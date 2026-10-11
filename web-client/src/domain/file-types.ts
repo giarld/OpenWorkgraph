@@ -1,4 +1,5 @@
 import { translate } from "../i18n/translate";
+import { audioMimeByExtension } from './audio-formats';
 /** Browser File.type may be empty (notably Markdown and WAV on some systems). */
 export function fileMime(file: { name: string; type: string }): string {
   if (/[.]svg$/i.test(file.name)) return 'image/svg+xml';
@@ -24,10 +25,7 @@ export function fileMime(file: { name: string; type: string }): string {
     mp4: "video/mp4",
     webm: "video/webm",
     mov: "video/quicktime",
-    mp3: "audio/mpeg",
-    wav: "audio/wav",
-    ogg: "audio/ogg",
-    m4a: "audio/mp4",
+    ...audioMimeByExtension,
   };
   return types[extension] ?? "application/octet-stream";
 }

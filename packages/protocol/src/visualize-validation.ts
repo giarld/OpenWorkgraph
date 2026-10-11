@@ -1,4 +1,5 @@
 import type { Json } from './index.js';
+import { validateVisualizeLogoSvg } from './visualize-logo.js';
 import {
   VISUALIZE_BRIDGE_VERSION, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE,
   VISUALIZE_PAGE_VERSION, VISUALIZE_SCHEMA_DIALECT,
@@ -186,9 +187,14 @@ export function validateVisualizePagePackage(value: unknown): VisualizePagePacka
     throw error;
   }
   if (!object(page)) fail('INVALID_REQUEST', 'Invalid visualize page package');
-  fields(page, ['format', 'version', 'bridgeVersion', 'html', 'dependencies', 'form', 'initialForm', 'initialState', 'layout']);
+  fields(page, ['format', 'version', 'bridgeVersion', 'html', 'dependencies', 'form', 'initialForm', 'initialState', 'layout', ...(page.version === 2 ? ['logoSvg', 'inputNames'] : [])]);
   if (page.format !== 'openworkgraph.visualize-page') fail('INVALID_REQUEST', 'Invalid page format');
-  if (page.version !== VISUALIZE_PAGE_VERSION || page.bridgeVersion !== VISUALIZE_BRIDGE_VERSION) fail('SCHEMA_UNSUPPORTED', 'Unsupported page or bridge version');
+  if (page.version !== 1 && page.version !== VISUALIZE_PAGE_VERSION || page.bridgeVersion !== VISUALIZE_BRIDGE_VERSION) fail('SCHEMA_UNSUPPORTED', 'Unsupported page or bridge version');
+  if (page.version === 2) {
+    const logoError = validateVisualizeLogoSvg(page.logoSvg);
+    if (logoError) fail('INVALID_REQUEST', logoError);
+    if (own(page, 'inputNames') && (!Array.isArray(page.inputNames) || page.inputNames.length > 64 || page.inputNames.some(name => !boundedString(name, 128) || !name.trim()) || new Set(page.inputNames).size !== page.inputNames.length)) fail('INVALID_REQUEST', 'Invalid input name hints');
+  }
   if (!boundedString(page.html, 2_097_152) || !page.html.trim()) fail('INVALID_REQUEST', 'Nonempty bounded HTML is required');
   if (!object(page.form)) fail('SCHEMA_UNSUPPORTED', 'Form declaration is required');
   fields(page.form, ['dialect', 'version', 'schema'], 'SCHEMA_UNSUPPORTED', '/form');

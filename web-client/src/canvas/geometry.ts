@@ -7,6 +7,19 @@ export interface Size {
   height: number;
 }
 export interface Rect extends Point, Size {}
+export interface NavigationArea {
+  centerX: number;
+  left: number;
+  right: number;
+}
+/** Prefer the page center, shifting right when the target would sit behind a sidebar. */
+export function navigationCenterX(width: number, area: NavigationArea, padding = 16): number {
+  const inset = Math.min(padding, Math.max(0, area.right - area.left) / 2);
+  const minimum = area.left + inset + width / 2;
+  const maximum = area.right - inset - width / 2;
+  // Oversized targets keep their left edge visible instead of hiding it under the sidebar.
+  return Math.max(minimum, Math.min(area.centerX, maximum));
+}
 export interface Viewport extends Point {
   k: number;
 }

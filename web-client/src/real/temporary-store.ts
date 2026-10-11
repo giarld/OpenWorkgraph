@@ -1,5 +1,5 @@
 import { portableSkillContent } from "./project-file-mentions";
-import { documentSnapshot, recordDocumentVersion, travelDocumentVersion, type DocumentTimeline } from './document-versions';
+import { documentSnapshot, recordDocumentVersion, recordVisualizeInteraction, travelDocumentVersion, type VersionedDocument } from './document-versions';
 import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '../../../packages/protocol/src/index';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
@@ -16,6 +16,9 @@ import type { VisualizeNodeContent, VisualizePagePackage, VisualizeResourceRefer
 import { FILE_NODE_MAX_BYTES, importedNodeType } from '../domain/file-types';
 import { graphPath, type GraphSnapshot, type GraphOperation, type Request } from './contracts';
 import type { CanvasCreated } from './ResourcesPanel';
+import { buildVisualizeToolTemplate, remapVisualizeAssetPackage, validateVisualizeAssetPackageBytes, visualizeLibraryResourceKey, VISUALIZE_LIBRARY_MAX_DECODED_BYTES } from '../../../packages/protocol/src/visualize-library';
+import { validateVisualizeBridgeRequest } from '../../../packages/protocol/src/visualize-bridge';
+import type { VisualizeHostContext, VisualizeBridgeResponse } from '../../../packages/protocol/src/visualize';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
 
@@ -28,8 +31,8 @@ export interface TemporaryProjectFileDescriptor {
   read(): Promise<Uint8Array>;
 }
 export type TemporaryProjectFileReader = (source: { serviceId: string; projectId: string; relativePath: string }) => Promise<TemporaryProjectFileDescriptor>;
-type ServiceOperation = { signature: string; result?: unknown };
-type RecordValue = { graph: GraphSnapshot; timeline?: DocumentTimeline; nodeVersions?: Record<string, number>; receiptBodies?: Record<string,string>; resources: Record<string, TemporaryResource>; receipts: Record<string, GraphSnapshot>; copies?: Record<string, CanvasCreated>; serviceOperations?: Record<string, ServiceOperation>; pluginRequirements?: GraphBundle['pluginRequirements']; copiedProvenance?: CopiedProvenance[] };
+type ServiceOperation = { signature: string; result?: unknown; packageDigest?: string };
+type RecordValue = VersionedDocument & { receiptBodies?: Record<string,string>; resources: Record<string, TemporaryResource>; receipts: Record<string, GraphSnapshot>; copies?: Record<string, CanvasCreated>; serviceOperations?: Record<string, ServiceOperation>; pluginRequirements?: GraphBundle['pluginRequirements']; copiedProvenance?: CopiedProvenance[] };
 function rememberReceipt(record: RecordValue, key: string, signature: string, graph: GraphSnapshot) {
   (record.receiptBodies ??= {})[key] = signature;
   record.receipts[key] = structuredClone(graph);
@@ -37,7 +40,7 @@ function rememberReceipt(record: RecordValue, key: string, signature: string, gr
     delete record.receipts[expired]; delete record.receiptBodies[expired];
   }
 }
-const conflict = () => Object.assign(Error(translate("The temporary Work Graph was modified in another page. Refresh and try again.")), { code: 'REVISION_CONFLICT' });
+const conflict = () => Object.assign(Error(translate("The temporary Work Graph was modified in another page. Refresh and try again.")), { code: 'REVISION_CONFLICT', status: 409 });
 const EXPORT_MAX_NODES = 2000;
 const EXPORT_MAX_RESOURCES = 256;
 const EXPORT_MAX_TOTAL_RESOURCE_BYTES = WORKGRAPH_TRANSFER_TOTAL_BYTES;
@@ -52,7 +55,7 @@ const canonical = (value: unknown): string => JSON.stringify(value && typeof val
 export function visualizeResourceReferences(value: unknown): VisualizeResourceReference[] {
   const content = validateVisualizeNodeContent(value);
   if (!content.page || !content.form) return [];
-  const references = [content.page.resource, ...content.page.dependencies, content.form.resource, ...collectVisualizeAssetReferences(content.form.data)
+  const references = [content.page.resource, ...content.page.dependencies, content.form.resource, ...collectVisualizeAssetReferences({ form: content.form.data, state: content.state?.data ?? null })
     .flatMap(asset => asset.kind === 'resource' ? [{ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion }] : [])];
   return [...new Map(references.map(reference => [resourceKey(reference), reference])).values()];
 }
@@ -82,6 +85,7 @@ export function remapTemporaryVisualizeContent(value: unknown, mapping: Map<stri
     content.page.dependencies = content.page.dependencies.map(mapped);
     content.form.resource = mapped(content.form.resource);
     content.form.data = remapTemporaryVisualizeAssetData(content.form.data, mapping) as { [key: string]: Json };
+    if (content.state) content.state.data = remapTemporaryVisualizeAssetData(content.state.data, mapping);
   }
   content.inputBindings = content.inputBindings.map(binding => {
     const edgeId = edges.get(binding.edgeId);
@@ -93,6 +97,7 @@ export function remapTemporaryVisualizeContent(value: unknown, mapping: Map<stri
 export function remapTemporaryVisualizePage(value: unknown, mapping: Map<string, VisualizeResourceReference>): VisualizePagePackage {
   const page = validateVisualizePagePackage(value);
   page.initialForm = remapTemporaryVisualizeAssetData(page.initialForm, mapping) as { [key: string]: Json };
+  page.initialState = remapTemporaryVisualizeAssetData(page.initialState, mapping);
   page.form.schema = remapTemporaryVisualizeAssetData(page.form.schema as unknown as Json, mapping) as unknown as typeof page.form.schema;
   const markers = new Map<string, string>();
   for (const dependency of page.dependencies) if (dependency.kind === 'resource') {
@@ -128,15 +133,15 @@ export async function validateTemporaryVisualizeResources(nodes: GraphSnapshot['
       if (!matches) throw Error(translate('A visualization page dependency is missing or has an incompatible MIME type.'));
       references.push({ resourceId: dependency.resourceId, resourceVersion: dependency.resourceVersion });
     }
-    for (const asset of collectVisualizeAssetReferences({ initialForm: page.initialForm, schema: page.form.schema } as unknown as Json)) if (asset.kind === 'resource') {
+    for (const asset of collectVisualizeAssetReferences({ initialForm: page.initialForm, initialState: page.initialState, schema: page.form.schema } as unknown as Json)) if (asset.kind === 'resource') {
       if (!resources.get(resourceKey(asset))) throw Error(translate('A resource required by the visualization page is missing.'));
       references.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
     }
     const unique = [...new Map(references.map(reference => [resourceKey(reference), reference])).values()];
-    if (canonical(unique) !== canonical(content.page.dependencies) || content.page.resource.resourceId === content.form.resource.resourceId || page.form.version !== content.form.schemaVersion) throw Error(translate('The visualization page and form resource contracts do not match.'));
+    if (unique.length !== content.page.dependencies.length || new Set(content.page.dependencies.map(resourceKey)).size !== unique.length || unique.some(reference => !content.page!.dependencies.some(saved => resourceKey(saved) === resourceKey(reference))) || content.page.resource.resourceId === content.form.resource.resourceId || page.form.version !== content.form.schemaVersion) throw Error(translate('The visualization page and form resource contracts do not match.'));
     const data = await read(content.form.resource);
     validateVisualizeForm(page.form.schema, data, 'save');
-    for (const asset of collectVisualizeAssetReferences(data)) if (asset.kind === 'resource' && !resources.get(resourceKey(asset)))
+    for (const asset of collectVisualizeAssetReferences({ form: data, state: content.state?.data ?? null })) if (asset.kind === 'resource' && !resources.get(resourceKey(asset)))
       throw Error(translate('A resource referenced by the visualization node is missing.'));
     if (canonical(data) !== canonical(content.form.data)) throw Error(translate('The visualization business form does not match its fixed resource.'));
     pages.set(resourceKey(content.page.resource), page);
@@ -250,6 +255,7 @@ export function applyTemporaryOperations(source: GraphSnapshot, operations: Grap
 
 export class TemporaryCanvasStore {
   private database?: Promise<IDBDatabase>;
+  private visualizeSessions = new Map<string, { graphId: string; nodeId: string; presentation: Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> }>();
   private open() {
     return this.database ??= new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(TEMPORARY_DATABASE, 1);
@@ -587,6 +593,135 @@ export class TemporaryCanvasStore {
     if (!match) throw Object.assign(Error(translate("This operation requires a Workspace connection.")), { code: 'SERVICE_UNAVAILABLE' });
     const [, id, suffix] = match;
     if (!suffix && body === undefined) return this.access(id, false, r => documentSnapshot(r)) as Promise<T>;
+    if (suffix === '/visualize-assets/install-result' && body !== undefined) {
+      const command = body as { idempotencyKey: string };
+      return this.access(id, false, record => {
+        const prior = record.serviceOperations?.['visualize-install:' + command.idempotencyKey];
+        if (!prior) return undefined;
+        if (prior.signature !== JSON.stringify(command)) throw Object.assign(Error('Idempotency conflict'), { code: 'IDEMPOTENCY_CONFLICT' });
+        return prior.result;
+      }) as Promise<T>;
+    }
+    if ((suffix === '/visualize-assets/install' || suffix === '/visualize-assets/import') && body !== undefined) {
+      const command = body as { package: unknown; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string; assertCurrent?: () => void };
+      if (!command || typeof command.idempotencyKey !== 'string' || !command.idempotencyKey || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw Error(translate('Invalid visualization paste request.'));
+      const pkg = await validateVisualizeAssetPackageBytes(command.package);
+      const { package: _package, assertCurrent, ...intent } = command;
+      const key = 'visualize-install:' + command.idempotencyKey, signature = JSON.stringify(intent);
+      const packageDigest = bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(pkg))));
+      const mapping = new Map(pkg.resources.map(resource => [visualizeLibraryResourceKey(resource.resourceId, resource.version), { resourceId: randomId(), resourceVersion: 1 }]));
+      const installed = remapVisualizeAssetPackage(pkg, mapping), nodeId = randomId();
+      const staged: Record<string, TemporaryResource> = Object.create(null);
+      for (const resource of installed.resources) staged[resource.resourceId] = { name: resource.name, blob: new Blob([Uint8Array.from(atob(resource.base64), char => char.charCodeAt(0))], { type: resource.mime }) };
+      const candidate: GraphSnapshot['nodes'][number] = { id: nodeId, type: 'visualize', schemaVersion: 1, contentVersion: 1, readOnly: false, x: command.x, y: command.y, width: installed.node.width, height: installed.node.height, content: { ...installed.node.content, title: installed.node.title } as unknown as Json };
+      // An installation is acknowledged only when the regular reader can open it.
+      visualizeResourceReferences(candidate.content);
+      await validateTemporaryVisualizeResources([candidate], new Map(Object.entries(staged).map(([resourceId, resource]) => [resourceKey({ resourceId, resourceVersion: 1 }), resource])));
+      return this.access(id, true, record => {
+        assertCurrent?.();
+        const receipt = record.serviceOperations?.[key];
+        if (receipt) { if (receipt.signature !== signature || receipt.packageDigest !== packageDigest) throw Object.assign(Error('Idempotency conflict'), { code: 'IDEMPOTENCY_CONFLICT' }); return receipt.result; }
+        if (record.graph.archived || record.graph.trashed) throw Object.assign(Error(translate('Archived or trashed Work Graphs are read-only.')), { code: 'READ_ONLY' });
+        if (record.graph.executionRevision !== command.expectedExecutionRevision || record.graph.layoutRevision !== command.expectedLayoutRevision) throw conflict();
+        const next = structuredClone(record.graph);
+        next.nodes.push(candidate);
+        next.executionRevision++; next.layoutRevision++; next.updatedAt = new Date().toISOString();
+        Object.assign(record.resources, staged); recordDocumentVersion(record, next);
+        const result = { nodeId, snapshot: record.graph };
+        (record.serviceOperations ??= {})[key] = { signature, packageDigest, result };
+        return result;
+      }) as Promise<T>;
+    }
+    const packageMatch = /^[/]visualize[/]([^/]+)[/]library-package$/.exec(suffix);
+    if (packageMatch && body !== undefined) {
+      const expected = body as Record<string, unknown>, record = await this.access(id, false, r => r);
+      if (typeof expected.idempotencyKey !== 'string' || !expected.idempotencyKey) throw Error(translate('Resource operations require an idempotency key.'));
+      const packageKey = 'visualize-package:' + expected.idempotencyKey, packageSignature = JSON.stringify(expected);
+      const prior = record.serviceOperations?.[packageKey];
+      if (prior) { if (prior.signature !== packageSignature) throw Object.assign(Error('Idempotency conflict'), { code: 'IDEMPOTENCY_CONFLICT' }); return prior.result as T; }
+      const node = record.graph.nodes.find(item => item.id === packageMatch[1]);
+      if (!node || node.readOnly || record.graph.archived || record.graph.trashed) throw Object.assign(Error(translate('The node does not exist or is read-only.')), { code: 'READ_ONLY' });
+      const content = validateVisualizeNodeContent(node.content);
+      if (!content.page || !content.form || !content.state) throw Error(translate('Generate an interactive page before saving it to the asset library.'));
+      if (expected.expectedContentVersion !== node.contentVersion || expected.expectedPageRevision !== content.page.revision || expected.expectedFormVersion !== content.form.version || expected.expectedStateVersion !== content.state.version || expected.expectedExecutionRevision !== record.graph.executionRevision || expected.expectedLayoutRevision !== record.graph.layoutRevision) throw conflict();
+      const fixedPage = record.resources[content.page.resource.resourceId];
+      if (!fixedPage || fixedPage.blob.type !== 'application/json' || fixedPage.blob.size > 4_194_304) throw Error(translate('A visualization fixed JSON resource is missing or invalid.'));
+      const page = validateVisualizePagePackage(JSON.parse(await fixedPage.blob.text()));
+      const refs = [content.page.resource, ...page.dependencies.flatMap(dep => dep.kind === 'resource' ? [dep] : []), ...collectVisualizeAssetReferences({ schema: page.form.schema, initialForm: page.initialForm, initialState: page.initialState } as unknown as Json).flatMap(ref => ref.kind === 'resource' ? [ref] : [])];
+      const resources: GraphBundle['resources'] = []; let total = 0;
+      for (const ref of new Map(refs.map(ref => [resourceKey(ref), ref])).values()) {
+        const resource = record.resources[ref.resourceId];
+        if (!resource || ref.resourceVersion !== 1) throw Error(translate('A resource required by the visualization page is missing.'));
+        total += resource.blob.size; if (total > VISUALIZE_LIBRARY_MAX_DECODED_BYTES) throw Error(translate('Interactive content exceeds the size limit.'));
+        const bytes = new Uint8Array(await resource.blob.arrayBuffer());
+        resources.push({ resourceId: ref.resourceId, version: 1, name: resource.name, mime: resource.blob.type, bytes: bytes.length, sha256: bytesToHex(sha256(bytes)), base64: base64(bytes) });
+      }
+      const pkg = buildVisualizeToolTemplate({ node, page, resources, projectFiles: expected.projectFiles as Record<string, GraphBundle['resources'][number]> | undefined });
+      return this.access(id, true, current => {
+        const prior = current.serviceOperations?.[packageKey];
+        if (prior) { if (prior.signature !== packageSignature) throw Object.assign(Error('Idempotency conflict'), { code: 'IDEMPOTENCY_CONFLICT' }); return prior.result; }
+        if (current.graph.executionRevision !== record.graph.executionRevision || current.graph.layoutRevision !== record.graph.layoutRevision) throw conflict();
+        (current.serviceOperations ??= {})[packageKey] = { signature: packageSignature, result: pkg }; return pkg;
+      }) as Promise<T>;
+    }
+    const bridgeMatch = /^[/]visualize[/]([^/]+)[/]bridge(?:[/]([^/]+))?$/.exec(suffix);
+    if (bridgeMatch) {
+      const [, nodeId, sessionId] = bridgeMatch;
+      if (!sessionId) {
+        const stored = await this.request<import('../../../packages/protocol/src/visualize').VisualizeStoredNode>(graphPath('temporary', id) + '/visualize/' + nodeId);
+        if (!stored.page) throw Error(translate('The saved interactive page is unavailable.'));
+        const sessionId = randomId(); this.visualizeSessions.set(sessionId, { graphId: id, nodeId, presentation: body as Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> });
+        return { sessionId, nodeId } as T;
+      }
+      const session = this.visualizeSessions.get(sessionId);
+      if (!session || session.graphId !== id || session.nodeId !== nodeId) throw Object.assign(Error('Session expired'), { code: 'SESSION_EXPIRED' });
+      if (method === 'DELETE') { this.visualizeSessions.delete(sessionId); return undefined as T; }
+      const request = validateVisualizeBridgeRequest(body);
+      if (request.sessionId !== sessionId || request.nodeId !== nodeId) throw Object.assign(Error('Session expired'), { code: 'SESSION_EXPIRED' });
+      const stored = await this.request<import('../../../packages/protocol/src/visualize').VisualizeStoredNode>(graphPath('temporary', id) + '/visualize/' + nodeId);
+      const key = 'visualize-bridge:' + sessionId + ':' + request.requestId, signature = JSON.stringify(request);
+      return this.access(id, request.method !== 'initialize' && request.method !== 'readInputs', record => {
+        const identity = { channel: request.channel, version: request.version, sessionId, nodeId, requestId: request.requestId, type: 'response', method: request.method };
+        const failure = (code: string, message: string) => ({ ...identity, ok: false, error: { code, message, retryable: false } });
+        const prior = record.serviceOperations?.[key];
+        if (prior) return prior.signature === signature ? prior.result : failure('IDEMPOTENCY_CONFLICT', 'Idempotency conflict');
+        const node = record.graph.nodes.find(item => item.id === nodeId);
+        if (!node) return failure('SESSION_EXPIRED', translate('Node not found'));
+        const content = validateVisualizeNodeContent(node.content);
+        if (!content.page || !content.form || !content.state) return failure('SESSION_EXPIRED', translate('The saved interactive page is unavailable.'));
+        const revisions = () => ({ pageRevision: content.page!.revision, formVersion: content.form!.version, stateVersion: content.state!.version, inputVersion: 1, executionRevision: record.graph.executionRevision, layoutRevision: record.graph.layoutRevision });
+        const inputs = { version: 1, digest: bytesToHex(sha256(new TextEncoder().encode('[]'))), inputs: [] };
+        if (request.method !== 'initialize' && request.expected.pageRevision !== content.page.revision) return failure('REVISION_CONFLICT', translate('The visualization page changed. Reload it before editing.'));
+        if (request.method === 'initialize') return { ...identity, ok: true, result: { ...session.presentation, pageRevision: content.page.revision, form: content.form, state: content.state, inputs, inputsChanged: false, revisions: revisions(), capabilities: { readOnly: node.readOnly || record.graph.archived || record.graph.trashed, online: true, canCreateSuccessors: false, canExportAssets: false } } };
+        if (request.method === 'readInputs') return content.inputBindings.length ? failure('INPUT_BLOCKED', translate('Temporary page input refresh requires converting this Work Graph to a project workspace.')) : { ...identity, ok: true, result: { inputs, inputsChanged: false } };
+        if (node.readOnly || record.graph.archived || record.graph.trashed) return failure('READ_ONLY', translate('The current Work Graph is read-only.'));
+        if (!['saveState', 'updateForm', 'requestLayout'].includes(request.method)) return failure('READ_ONLY', translate('Convert this Work Graph to a project workspace to create successors or export assets.'));
+        if (request.expected.formVersion !== content.form.version || request.expected.stateVersion !== content.state.version || request.expected.executionRevision !== record.graph.executionRevision || request.expected.layoutRevision !== record.graph.layoutRevision) return failure('REVISION_CONFLICT', translate('The temporary Work Graph was modified in another page. Refresh and try again.'));
+        const next = structuredClone(record.graph), target = next.nodes.find(item => item.id === nodeId)!;
+        if (request.method === 'updateForm') validateVisualizeForm(stored.page!.form.schema, request.params.form, 'save');
+        if (request.method === 'updateForm' || request.method === 'saveState') {
+          const data = request.method === 'updateForm' ? request.params.form : request.params.state;
+          for (const asset of collectVisualizeAssetReferences(data)) {
+            if (asset.kind === 'project-file') return failure('RESOURCE_UNAVAILABLE', translate('Convert this Work Graph to a project workspace before using project file references.'));
+            if (asset.resourceVersion !== 1 || !record.resources[asset.resourceId]) return failure('RESOURCE_UNAVAILABLE', translate('A resource referenced by the visualization node is missing.'));
+          }
+        }
+        let result: unknown;
+        if (request.method === 'saveState') { content.state = { ...content.state, data: request.params.state, version: content.state.version + 1 }; next.executionRevision++; }
+        else if (request.method === 'updateForm') {
+          content.form = { ...content.form, data: request.params.form, version: content.form.version + 1, resource: { resourceId: randomId(), resourceVersion: 1 } };
+          record.resources[content.form.resource.resourceId] = { name: 'visualize-form.json', blob: new Blob([JSON.stringify(content.form.data)], { type: 'application/json' }) }; next.executionRevision++;
+        } else if (request.method === 'requestLayout') { target.width = request.params.width; target.height = request.params.height; next.layoutRevision++; }
+        target.content = content as unknown as Json; target.contentVersion++;
+        if (request.method==='requestLayout') recordDocumentVersion(record, next);
+        else recordVisualizeInteraction(record, next, nodeId);
+        if (request.method === 'saveState') result = { state: content.state, revisions: revisions() };
+        else if (request.method === 'updateForm') result = { form: content.form, revisions: revisions() };
+        else if (request.method === 'requestLayout') result = { size: request.params, layoutRevision: record.graph.layoutRevision };
+        const response = { ...identity, ok: true, result } as VisualizeBridgeResponse;
+        (record.serviceOperations ??= {})[key] = { signature, result: response }; return response;
+      }) as Promise<T>;
+    }
     if (suffix === '/resources/import-bytes' && body !== undefined) {
       const input = body as { name: string; blob: Blob; idempotencyKey: string };
       if (!input || typeof input.name !== 'string' || !input.name.trim() || !(input.blob instanceof Blob) || typeof input.idempotencyKey !== 'string' || !input.idempotencyKey || input.blob.size > FILE_NODE_MAX_BYTES) throw Error(translate('The visualization copy resource is invalid or exceeds the size limit.'));

@@ -36,7 +36,7 @@ export type ResolvedPreviewSource =
   | { state: 'ready'; nodeId: string; source: PreviewSource };
 
 const renderers: PreviewRendererDefinition[] = [...builtInPreviewRenderers];
-const sourceResolvers: PreviewSourceDefinition[] = ['text','image','file','document','video'].map(type => ({
+const sourceResolvers: PreviewSourceDefinition[] = ['text','image','file','document','video','audio'].map(type => ({
   type, schemaVersion: 1,
   resolve(node) {
     const c = node.content && typeof node.content === 'object' && !Array.isArray(node.content) ? node.content : {};

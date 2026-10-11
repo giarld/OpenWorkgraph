@@ -1,5 +1,5 @@
 import type { GraphScope, Json, Run, VisualizeNodeContent, VisualizePagePackage } from '@openworkgraph/protocol';
-import { validateVisualizePagePackage, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
+import { normalizeVisualizePageLogo, validateVisualizePagePackage, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
 import { randomUUID } from 'node:crypto';
 import type { PreparedBlob } from './blob-store.js';
 import { Graphs } from './graphs.js';
@@ -10,14 +10,20 @@ import { canonicalJson } from './persistence/repositories.js';
 import { validateStoredVisualizeContent, validateVisualizeDependencies, validateVisualizeProjectDependencies, validateVisualizeTransition, visualizeChecked } from './visualize-content.js';
 import { resolveGeneratedVisualizeAssets, type GeneratedVisualizeAsset } from './visualize-generated-assets.js';
 
-export interface PreparedVisualizePublication { readonly page: VisualizePagePackage }
+export interface PreparedVisualizePublication { readonly page: VisualizePagePackage; readonly warnings: readonly string[] }
 interface Preparation { scope: GraphScope; page: VisualizePagePackage; blobs: PreparedBlob[]; disposed: boolean }
 
-/** Shared by Agent preflight and publication; no resources are installed here. */
-export function validateGeneratedVisualizePage(value: unknown, generated = new Map<string, GeneratedVisualizeAsset>()): VisualizePagePackage {
-  const page = visualizeChecked(() => validateVisualizePagePackage(generated.size ? resolveGeneratedVisualizeAssets(value, generated) : value));
+/** Shared by Agent preflight and publication; no resources are installed here.
+ * Promote legacy deliveries without changing the original Output file or hash. */
+export function prepareGeneratedVisualizePage(value: unknown, generated = new Map<string, GeneratedVisualizeAsset>()): { page: VisualizePagePackage; warnings: string[] } {
+  const normalized = visualizeChecked(() => normalizeVisualizePageLogo(value));
+  const page = visualizeChecked(() => validateVisualizePagePackage(generated.size ? resolveGeneratedVisualizeAssets(normalized.page, generated) : normalized.page));
   if (/data:(?:image|video|audio)[/][^\s"'<>]*;base64,/i.test(page.html)) throw new ServiceError('INVALID_REQUEST', '页面 HTML 不得内嵌媒体 base64；请使用资产引用。');
-  return page;
+  return { page, warnings: normalized.warnings };
+}
+
+export function validateGeneratedVisualizePage(value: unknown, generated = new Map<string, GeneratedVisualizeAsset>()): VisualizePagePackage {
+  return prepareGeneratedVisualizePage(value, generated).page;
 }
 
 /** Both Run paths share the same validation gates as VisualizePages. Preparation
@@ -29,7 +35,7 @@ export class VisualizePublication {
   }
   async prepare(scope: GraphScope, value: unknown, generated = new Map<string, GeneratedVisualizeAsset>()): Promise<PreparedVisualizePublication> {
     if (this.graphs.db.isTransaction) throw new Error('Visualize publication preparation must run outside a transaction');
-    const page = validateGeneratedVisualizePage(value, generated);
+    const { page, warnings } = prepareGeneratedVisualizePage(value, generated);
     await validateVisualizeProjectDependencies(this.graphs.db, scope, page);
     const blobs: PreparedBlob[] = [];
     try {
@@ -43,7 +49,7 @@ export class VisualizePublication {
       });
       blobs.push(await this.resources.prepareBytes(Buffer.from(canonicalJson(page as unknown as Json)), 'application/json'));
       blobs.push(await this.resources.prepareBytes(Buffer.from(canonicalJson(page.initialForm)), 'application/json'));
-      const token = Object.freeze({ page: structuredClone(page) });
+      const token = Object.freeze({ page: structuredClone(page), warnings: Object.freeze([...warnings]) });
       this.preparations.set(token, { scope: { serviceId: scope.serviceId, projectId: scope.projectId, graphId: scope.graphId }, page, blobs, disposed: false });
       return token;
     } catch (error) {

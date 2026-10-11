@@ -1,8 +1,10 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { GraphScope, Json, VisualizeNodeContent, VisualizePagePackage, VisualizeResourceReference } from '@openworkgraph/protocol';
 import { collectVisualizeAssetReferences, validateVisualizeForm, validateVisualizeNodeContent, validateVisualizePagePackage, VisualizeValidationError } from '@openworkgraph/protocol';
 import type { ProjectFileInput, ResourceEnvelope } from '@openworkgraph/protocol';
-import { classifyProjectFile, ProjectFiles } from './project-files.js';
+import { classifyProjectFile, normalizeProjectPath, ProjectFiles } from './project-files.js';
 import { ServiceError } from './errors.js';
 import { hashBytes } from './blob-store.js';
 import { canonicalJson } from './persistence/repositories.js';
@@ -17,7 +19,7 @@ export function visualizeChecked<T>(work: () => T): T {
 }
 export function visualizeResourceLinks(content: VisualizeNodeContent): VisualizeResourceReference[] {
   const references = content.page && content.form ? [content.page.resource, ...content.page.dependencies, content.form.resource] : [];
-  if (content.form) for (const asset of collectVisualizeAssetReferences(content.form.data)) if (asset.kind === 'resource') references.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
+  for (const asset of visualizeChecked(() => collectVisualizeAssetReferences({ form: content.form?.data ?? null, state: content.state?.data ?? null }))) if (asset.kind === 'resource') references.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
   return [...new Map(references.map(reference => [reference.resourceId + ':' + reference.resourceVersion, reference])).values()];
 }
 /** Tagged form assets become actual accepted Run inputs, never guessed from strings. */
@@ -42,7 +44,50 @@ export async function validateVisualizeProjectDependencies(db: DatabaseSync, sco
     const mime = classifyProjectFile(dependency.relativePath).mime;
     if (!(mime.startsWith(dependency.media + '/') || dependency.media === 'video' && mime.startsWith('audio/'))) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', '项目资产类型与页面依赖声明不符。');
   }
-  for (const asset of collectVisualizeAssetReferences(page.initialForm)) if (asset.kind === 'project-file') await files.resolve(scope.projectId, asset.relativePath, 'file');
+  for (const asset of visualizeChecked(() => collectVisualizeAssetReferences(visualizePageAssetData(page)))) if (asset.kind === 'project-file') await files.resolve(scope.projectId, asset.relativePath, 'file');
+}
+/** Keep page closure ordering shared by stored and portable validation. */
+export function visualizePageAssetData(page: VisualizePagePackage, includeState = true): Json {
+  return { initialForm: page.initialForm, schema: page.form.schema as unknown as Json, ...(includeState ? { initialState: page.initialState } : {}) };
+}
+/** Old page v1 writers omitted initialState from their stored dependency list.
+ * Accept only that exact legacy list; callers still validate and retain the full closure. */
+export function visualizeDependenciesAgree(page: VisualizePagePackage, expected: VisualizeResourceReference[], stored: VisualizeResourceReference[]): boolean {
+  const key = (reference: VisualizeResourceReference) => JSON.stringify([reference.resourceId, reference.resourceVersion]);
+  const storedKeys = new Set(stored.map(key));
+  const same = (references: VisualizeResourceReference[]) => storedKeys.size === stored.length && references.length === stored.length && references.every(reference => storedKeys.has(key(reference)));
+  if (same(expected)) return true;
+  if (page.version !== 1) return false;
+  const keys = new Set(page.dependencies.filter(dependency => dependency.kind === 'resource').map(reference => JSON.stringify([reference.resourceId, reference.resourceVersion])));
+  for (const asset of visualizeChecked(() => collectVisualizeAssetReferences(visualizePageAssetData(page, false)))) if (asset.kind === 'resource') keys.add(JSON.stringify([asset.resourceId, asset.resourceVersion]));
+  return same(expected.filter(reference => keys.has(JSON.stringify([reference.resourceId, reference.resourceVersion]))));
+}
+/** Graph writes are synchronous: repeat the project path boundary at commit time.
+ * Reads keep live-file availability separate from immutable JSON integrity. */
+export function validateVisualizeProjectAssetAccess(db: DatabaseSync, scope: VisualizeResourceScope, data: Json): void {
+  for (const asset of visualizeChecked(() => collectVisualizeAssetReferences(data))) if (asset.kind === 'project-file') {
+    const path = normalizeProjectPath(asset.relativePath);
+    const project = db.prepare('SELECT canonical_path,state FROM projects WHERE id=?').get(scope.projectId);
+    if (!project) throw new ServiceError('NOT_FOUND', '项目不存在。');
+    if (project['state'] !== 'active') throw new ServiceError('PROJECT_INACTIVE', '项目已停用。');
+    let root: string;
+    try {
+      root = realpathSync(String(project['canonical_path']));
+      if (root !== project['canonical_path'] || !statSync(root).isDirectory()) throw new Error('Project root changed');
+    } catch (cause) { throw new ServiceError('PROJECT_UNAVAILABLE', '项目目录不可访问；请修复路径。', { cause }); }
+    let target: string;
+    try { target = realpathSync(resolve(root, path)); }
+    catch (cause) { throw new ServiceError((cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'NOT_FOUND' : 'PROJECT_UNAVAILABLE', '项目文件不可访问。', { cause }); }
+    const rest = relative(root, target);
+    if (rest === '..' || rest.startsWith('..' + sep) || isAbsolute(rest)) throw new ServiceError('INVALID_REQUEST', '项目路径越界。');
+    try {
+      if (!statSync(target).isFile()) throw new ServiceError('INVALID_REQUEST', '项目路径不是普通文件。');
+      accessSync(target, constants.R_OK);
+    } catch (cause) {
+      if (cause instanceof ServiceError) throw cause;
+      throw new ServiceError('PROJECT_UNAVAILABLE', '项目文件不可访问。', { cause });
+    }
+  }
 }
 function resourceRow(db: DatabaseSync, scope: VisualizeResourceScope, reference: VisualizeResourceReference) {
   const row = db.prepare('SELECT v.mime,v.sha256,b.bytes,f.path FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id JOIN blobs b ON b.sha256=v.sha256 JOIN resource_blob_files f ON f.sha256=v.sha256 WHERE r.id=? AND r.project_id=? AND r.graph_id=? AND v.version=?').get(reference.resourceId, scope.projectId, scope.graphId, reference.resourceVersion);
@@ -80,11 +125,31 @@ export function validateVisualizeDependencies(db: DatabaseSync, scope: GraphScop
     if (!matches) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', '页面依赖 MIME 与声明类型不符。');
     dependencies.push(reference);
   }
-  for (const asset of collectVisualizeAssetReferences({ initialForm: page.initialForm, schema: page.form.schema } as unknown as Json)) if (asset.kind === 'resource' && !pending.has(asset.resourceId)) {
+  for (const asset of visualizeChecked(() => collectVisualizeAssetReferences(visualizePageAssetData(page)))) if (asset.kind === 'resource' && !pending.has(asset.resourceId)) {
     resourceRow(db, scope, asset);
     dependencies.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
   }
   return [...new Map(dependencies.map(reference => [reference.resourceId + ':' + reference.resourceVersion, reference])).values()];
+}
+/** Generic graph metadata must remain usable when page/form bytes are damaged.
+ * Only a valid legacy page may supplement its omitted initialState closure. */
+export function normalizeVisualizeMetadata(db: DatabaseSync, scope: GraphScope, value: unknown): VisualizeNodeContent {
+  const content = visualizeChecked(() => validateVisualizeNodeContent(value));
+  if (content.page) {
+    try {
+      const page = visualizeChecked(() => validateVisualizePagePackage(readStoredVisualizeJson(db, scope, content.page!.resource)));
+      if (page.version === 1) {
+        const dependencies = validateVisualizeDependencies(db, scope, page);
+        if (visualizeDependenciesAgree(page, dependencies, content.page.dependencies)) content.page.dependencies = dependencies;
+      }
+    } catch (error) {
+      if (!(error instanceof ServiceError)) throw error;
+    }
+  }
+  for (const reference of visualizeResourceLinks(content)) {
+    if (!db.prepare('SELECT 1 FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id WHERE r.id=? AND r.project_id=? AND r.graph_id=? AND v.version=?').get(reference.resourceId, scope.projectId, scope.graphId, reference.resourceVersion)) throw new ServiceError('INPUT_BLOCKED', '页面资源不属于当前工作图或版本不存在。');
+  }
+  return content;
 }
 /** DB-only integrity gate shared by graph commands, page commits and restart reads. */
 export function validateStoredVisualizeContent(db: DatabaseSync, scope: GraphScope, value: unknown): { content: VisualizeNodeContent; page: VisualizePagePackage | null } {
@@ -92,11 +157,12 @@ export function validateStoredVisualizeContent(db: DatabaseSync, scope: GraphSco
   if (!content.page || !content.form) return { content, page: null };
   const page = visualizeChecked(() => validateVisualizePagePackage(readStoredVisualizeJson(db, scope, content.page!.resource)));
   const dependencies = validateVisualizeDependencies(db, scope, page);
-  if (canonicalJson(dependencies as unknown as Json) !== canonicalJson(content.page.dependencies as unknown as Json)) throw new ServiceError('INPUT_BLOCKED', '页面依赖引用与页面包不一致。');
+  if (!visualizeDependenciesAgree(page, dependencies, content.page.dependencies)) throw new ServiceError('INPUT_BLOCKED', '页面依赖引用与页面包不一致。');
+  content.page.dependencies = dependencies;
   if (content.page.resource.resourceId === content.form.resource.resourceId || content.form.schemaVersion !== page.form.version) throw new ServiceError('INVALID_REQUEST', '页面与表单资源必须分开，结构版本必须一致。');
   const data = readStoredVisualizeJson(db, scope, content.form.resource);
   visualizeChecked(() => validateVisualizeForm(page.form.schema, data, 'save'));
-  resolveVisualizeFormAssets(db, scope, data);
+  resolveVisualizeFormAssets(db, scope, { form: data, state: content.state?.data ?? null });
   if (canonicalJson(data) !== canonicalJson(content.form.data)) throw new ServiceError('INVALID_REQUEST', '业务表单与固定 JSON 资源版本不一致。');
   return { content, page };
 }

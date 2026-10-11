@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { copyFile, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -13,5 +13,11 @@ for (const cwd of [join(root, '..', 'packages', 'protocol'), root]) {
   const result = spawnSync(process.execPath, [process.env.npm_execpath, 'run', 'build'], { cwd, stdio: 'inherit' });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
-// Keep the published README identical to the repository's maintained copy.
-await copyFile(join(root, '..', 'README.md'), join(root, 'README.md'));
+// Keep published documentation identical to the repository's maintained copies.
+for (const name of ['README.md', 'README.en.md']) {
+  await copyFile(join(root, '..', name), join(root, name));
+}
+const readmeAssets = join(root, 'assets', 'readme');
+await rm(readmeAssets, { recursive: true, force: true });
+await mkdir(dirname(readmeAssets), { recursive: true });
+await cp(join(root, '..', 'assets', 'readme'), readmeAssets, { recursive: true });

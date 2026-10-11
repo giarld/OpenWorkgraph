@@ -3,7 +3,7 @@ import type { SkillReference } from './skills.js';
 
 /** These versions evolve independently of the product, graph bundle and database. */
 export const VISUALIZE_NODE_SCHEMA_VERSION = 1 as const;
-export const VISUALIZE_PAGE_VERSION = 1 as const;
+export const VISUALIZE_PAGE_VERSION = 2 as const;
 export const VISUALIZE_BRIDGE_VERSION = 1 as const;
 export const VISUALIZE_SCHEMA_DIALECT = 'openworkgraph.visualize-form/1' as const;
 export const VISUALIZE_DEFAULT_SIZE = Object.freeze({ width: 480, height: 360 });
@@ -60,7 +60,7 @@ export type VisualizeDependency =
 /** HTML includes inline CSS/JS; carried files are immutable graph resource versions. */
 export interface VisualizePagePackage {
   format: 'openworkgraph.visualize-page';
-  version: typeof VISUALIZE_PAGE_VERSION;
+  version: 1 | typeof VISUALIZE_PAGE_VERSION;
   bridgeVersion: typeof VISUALIZE_BRIDGE_VERSION;
   html: string;
   dependencies: VisualizeDependency[];
@@ -68,6 +68,8 @@ export interface VisualizePagePackage {
   initialForm: { [key: string]: Json };
   initialState: Json;
   layout?: VisualizeSize;
+  logoSvg?: string;
+  inputNames?: string[];
 }
 export interface VisualizeFormSnapshot {
   pageRevision: number;
@@ -116,6 +118,8 @@ export interface VisualizeInput {
   name: string;
   edgeId: string;
   sourceNodeId: string;
+  /** Source node title at capture time; empty when unnamed. Older hosts may omit it. */
+  sourceNodeTitle?: string;
   contentVersion: number;
   resources: ResourceEnvelope[];
   /** Scoped project-relative identities; resolved by the host, never arbitrary page paths. */

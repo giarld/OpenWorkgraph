@@ -1,4 +1,4 @@
-import { RESOURCE_SCHEMA } from './resource-schema.js';
+import { RESOURCE_SCHEMA, ASSET_PRESENTATION_SCHEMA } from './resource-schema.js';
 import { WORKFLOW_SCHEMA } from './workflow-schema.js';
 import { ASSET_BUSINESS_SCHEMA } from './asset-business-schema.js';
 import { PLUGIN_SCHEMA } from './plugin-schema.js';
@@ -249,5 +249,5 @@ PRAGMA legacy_alter_table=OFF;
 CREATE UNIQUE INDEX one_active_run_per_node ON runs(node_id) WHERE status NOT IN ('succeeded','failed','cancelled','interrupted');
 CREATE INDEX runs_project_sequence ON runs(project_id,sequence);
 CREATE UNIQUE INDEX runs_id_graph ON runs(id,graph_id);
-` }];
-export const SCHEMA_VERSION = 26;
+` }, { version: 27, sql: ASSET_PRESENTATION_SCHEMA }];
+export const SCHEMA_VERSION = 27;

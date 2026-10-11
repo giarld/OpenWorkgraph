@@ -21,6 +21,8 @@ import { SkillsApi } from './skills-api.js';
 import { SkillsManagementApi } from './skills-management-api.js';
 import { StorageApi } from './storage-api.js';
 import { VisualizeApi } from './visualize-api.js';
+import { VisualizeLibraryApi } from './visualize-library-api.js';
+import { VisualizeLibrary } from './visualize-library.js';
 import type { Json } from '@openworkgraph/protocol';
 export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; headers?:Record<string,string> }
 export class BusinessApi {
@@ -34,8 +36,11 @@ export class BusinessApi {
   private skillsManagementApi?:SkillsManagementApi;
   private storageApi?:StorageApi;
   private visualizeApi?:VisualizeApi;
+  private visualizeLibraryApi?:VisualizeLibraryApi;
   constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
+    this.visualizeLibraryApi??=new VisualizeLibraryApi(new VisualizeLibrary(this.graphs,this.runtime.resources),this.auth);
+    const library=await this.visualizeLibraryApi.handle(request,path,token,origin);if(library.handled)return library;
     this.visualizeApi??=new VisualizeApi(this.runtime.visualize,this.auth,this.runtime.visualizeInputs,this.runtime.visualizeBridge);
     const visualize=await this.visualizeApi.handle(request,path,token,origin);if(visualize.handled)return visualize;
     this.storageApi??=new StorageApi(this.db,this.runtime.directories,this.runtime.resources,this.auth);

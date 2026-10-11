@@ -3,13 +3,13 @@ import type { VisualizeInputSnapshot, VisualizeSchemaDeclaration } from '@openwo
 /** Executable examples injected into generation instructions, shared with regression tests. */
 export const visualizeImageInputExample: VisualizeInputSnapshot = {
   version: 1, digest: '0'.repeat(64), inputs: [
-    { name: 'photo-resource', edgeId: 'edge-resource', sourceNodeId: 'image-node', contentVersion: 1,
+    { name: 'photo-resource', edgeId: 'edge-resource', sourceNodeId: 'image-node', sourceNodeTitle: '参考图片', contentVersion: 1,
       resources: [{ kind: 'image', sourceNodeIds: ['image-node'], text: null, resource: {
         resourceId: 'provided-graph-resource-id', version: 3, mime: 'image/png', bytes: 123456,
         sha256: 'a'.repeat(64), representationVersion: null,
       } }],
     },
-    { name: 'photo-file', edgeId: 'edge-project-file', sourceNodeId: 'file-image-node', contentVersion: 1,
+    { name: 'photo-file', edgeId: 'edge-project-file', sourceNodeId: 'file-image-node', sourceNodeTitle: '项目照片', contentVersion: 1,
       resources: [], projectFiles: [{ kind: 'image', relativePath: 'images/照片 01.png',
         sourceNodeIds: ['file-image-node'], edgeIds: ['edge-project-file'] }],
       projectFileData: [{ kind: 'image', relativePath: 'images/照片 01.png', mime: 'image/png',
@@ -51,18 +51,19 @@ function collectInputImages(snapshot) {
     });
   }
   for (const input of snapshot.inputs) {
+    const label = input.sourceNodeTitle?.trim() || input.name;
     for (const item of input.resources ?? []) {
       const resource = item.resource;
       if (!resource?.mime.startsWith('image/')) continue;
       const asset = { format: 'openworkgraph.asset-reference', version: 1, kind: 'resource',
         resourceId: resource.resourceId, resourceVersion: resource.version };
-      add(asset, { label: input.name, mime: resource.mime, bytes: resource.bytes }, [resource.sha256]);
+      add(asset, { label, mime: resource.mime, bytes: resource.bytes }, [resource.sha256]);
     }
     for (const file of input.projectFileData ?? []) {
       if (!file.mime.startsWith('image/') || file.asset.kind !== 'project-file') continue;
       const { format, version, kind, relativePath, mode } = file.asset;
       const asset = { format, version, kind, relativePath, mode };
-      add(asset, { label: input.name + ': ' + file.relativePath, mime: file.mime, bytes: file.bytes },
+      add(asset, { label: label + ': ' + file.relativePath, mime: file.mime, bytes: file.bytes },
         [file.changeToken, file.sha256]);
     }
   }
@@ -190,9 +191,10 @@ ${visualizeCollectInputImagesExample}
 export function visualizeInputGuidance(): string {
   return [
     'Input sources are two RESOURCE ORIGINS, not two node types: project file references (文件引用) and fixed Work Graph resources (工作图资源, also called canvas resources in code). Both may be image/file/video nodes; never infer resource origin solely from node type or a link icon.',
-    'Runtime input contract: const context = await window.visualizeReady; const result = await window.visualize.readInputs(false); const accepted = result.inputs; const items = accepted.inputs. context.inputs has this same VisualizeInputSnapshot shape. SDK results are direct values, NOT result.result or a bridge {ok,result} envelope. input.name is an inputBindings name or, without a binding, its edgeId. Only currently accepted inputs describe current connections.',
+    'Runtime input contract: const context = await window.visualizeReady; const result = await window.visualize.readInputs(false); const accepted = result.inputs; const items = accepted.inputs. context.inputs has this same VisualizeInputSnapshot shape. SDK results are direct values, NOT result.result or a bridge {ok,result} envelope. input.name is an inputBindings name or, without a binding, its edgeId. input.sourceNodeTitle is the title of input.sourceNodeId at capture time (the original source when routed through a preview), empty when unnamed; older hosts may omit it. Use input.sourceNodeTitle?.trim() || input.name for display labels, keep input.name for binding lookup, and render titles as text, never HTML. Renames appear after explicit readInputs(true), while readInputs(false) retains the accepted title and reports changes. Only currently accepted inputs describe current connections.',
     'Complete readInputs(false) result example with BOTH image resource origins (illustrative IDs/digests/bytes only; copy actual provided values):\n```json\n' + JSON.stringify({ inputs: visualizeImageInputExample, inputsChanged: false }, null, 2) + '\n```',
     'Fixed resources live in input.resources[].resource: resourceId is a Work Graph resource ID, NOT an asset-library assetId; resource.version becomes asset.resourceVersion. File references may have resources:[]; projectFiles is the identity list and projectFileData contains the readable metadata and asset reference. Binary text is null; bytes travel separately, never base64. Text is in resources[].text or projectFileData[].text; a visualize predecessor also supplies form.data. Do not parse binary metadata as text or recursively mine old form selections/static dependencies as current connections.',
+    'All accepted binary files (including ROM, ZIP, PDF and unknown formats) are readable, not just images/video/audio. Await window.visualizeAssetsReady, build the marker from resourceId/version or projectFileData[].asset.relativePath, then const url = window.visualizeResolveUrl(marker); if (!url) throw new Error("File bytes unavailable; refresh inputs or reopen"); const response = await fetch(url); if (!response.ok) throw new Error("File read failed"); const bytes = new Uint8Array(await response.arrayBuffer()); Parse bytes using the file format; text:null does not mean the binary file is invalid. CSP permits fetching iframe-local blob: URLs only, never authenticated Workspace APIs or arbitrary network URLs. Do not add binary files as script/style/image/video dependencies; accepted inputs or tagged form/state asset references authorize data loading. After explicit readInputs(true), re-resolve the marker and read fresh bytes before claiming success.',
     'Reusable browser image collector for both resource origins. Filter by MIME, deduplicate by asset identity, keep metadata OUTSIDE the tagged asset, and fingerprint project files with changeToken/sha256 so replacing a file at the same path is detectable:\n```js\n' + visualizeCollectInputImagesExample + '\n```',
     'Page form declaration for a source field accepting either origin; use initialForm:{} until selected. This dialect has NO oneOf/anyOf/conditional required. The schema declares common required fields and branch fields as optional; the host tagged-asset validator separately requires exactly the correct branch keys and rejects missing/mixed keys and appended metadata even on form saves. Save source:selected.asset, never the whole collector entry, envelope, MIME/fingerprint or Blob URL:\n```json\n' + JSON.stringify(visualizeImageSourceForm, null, 2) + '\n```',
     'Minimal complete HTML example using that form declaration, dependencies:[], initialForm:{}, initialState:{}. Accepted inputs already authorize their media; do not duplicate them as hardcoded static dependencies. Restore a saved choice only if it remains in the accepted images; one image may be selected automatically, multiple images require explicit choice. If a business tool supports only one image, explain that constraint instead of silently selecting the first:\n```html\n' + visualizeImageSelectionHtmlExample + '\n```',

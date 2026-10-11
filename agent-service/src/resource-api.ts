@@ -127,6 +127,12 @@ export class ResourceApi {
  private async content(request: IncomingMessage, scope: ResourceScope & {graphId?: string}, kind:'asset'|'canvas', id:string, version:number, action:string|undefined, read:<T>(work:()=>T)=>T):Promise<ApiResult> {
   const identity={...scope,serviceId:this.graphs.serviceId,...(kind==='asset'?{assetId:id}:{resourceId:id})};
   if(action===undefined) return {handled:true,body:read(()=>({...identity,...(kind==='asset'?this.resources.readAssetVersion(scope,id,version):this.resources.readCanvasVersion(scope as CanvasScope,id,version))}))};
+  if(action==='visualize-logo' && kind==='asset') {
+   if(request.headers.range) invalid('资产 Logo 不接受 Range。');
+   return read(()=>{const logo=this.resources.visualizeLogo(scope,id,version),bytes=Buffer.from(logo.svg);
+    return {handled:true,binary:bytes,headers:{'Content-Type':'image/svg+xml','Content-Length':String(bytes.length),'Content-Disposition':'inline','X-Content-Type-Options':'nosniff','Cache-Control':'private, max-age=31536000, immutable','ETag':'"'+logo.sha256+'"','Content-Security-Policy':"sandbox; default-src 'none'"}};
+   });
+  }
   if(action==='representation') {const result=await this.resources.representation(scope,kind,id,version);return {handled:true,body:read(()=>({...identity,...result}))};}
   if(action==='thumbnail') {
    if(request.headers.range) invalid('缩略图不接受 Range。');

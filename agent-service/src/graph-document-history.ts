@@ -1,10 +1,10 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
-import { TERMINAL_RUN_STATUSES, type GraphDocumentHistory, type GraphHistoryTravel, type GraphScope, type Json } from '@openworkgraph/protocol';
+import { TERMINAL_RUN_STATUSES, visualizeGraphContent, type GraphDocumentHistory, type GraphHistoryTravel, type GraphScope, type Json } from '@openworkgraph/protocol';
 import type { Graphs } from './graphs.js';
 import { resourceLinks } from './graphs.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
-import { restoreVisualizeContent } from './visualize-transfer.js';
+import { latestVisualizeContent, restoreVisualizeContent } from './visualize-transfer.js';
 
 type Row = Record<string, SQLInputValue>;
 interface Document { title: string; nodes: Row[]; edges: Row[]; groups: Row[]; members: Row[]; outputs: Row[] }
@@ -56,11 +56,26 @@ export class GraphDocumentVersions {
     this.db.prepare('DELETE FROM graph_document_heads WHERE graph_id=?').run(id);
     this.db.prepare('DELETE FROM graph_document_versions WHERE graph_id=?').run(id);
   }
+  /** Advance CAS anchors without adding a version, resetting expiry, or truncating redo. */
+  advanceInteraction(scope: GraphScope, execution: number, layout: number) {
+    if (!this.db.isTransaction) throw Error('Interaction history acknowledgement requires a transaction');
+    const head = this.head(scope.graphId);
+    if (!head || Number(head['expires_at']) <= Date.now() || head['execution_revision'] !== execution || head['layout_revision'] !== layout || head['run_sequence'] !== this.runSequence(scope.graphId)) return;
+    const graph = this.graphs.scope(scope);
+    this.db.prepare('UPDATE graph_document_heads SET execution_revision=?,layout_revision=? WHERE graph_id=?').run(graph['execution_revision'] as number, graph['layout_revision'] as number, scope.graphId);
+  }
+  private retainInteractionResources(version: number, document: Document) {
+    for (const node of document.nodes) if (node['type'] === 'visualize') {
+      const latest = latestVisualizeContent(this.db, String(node['id']), JSON.parse(String(node['content'])) as Json);
+      for (const link of resourceLinks(latest, 'visualize')) this.db.prepare('INSERT OR IGNORE INTO graph_document_resources(version_id,resource_id,resource_version) VALUES(?,?,?)').run(version, link.resourceId, link.version);
+    }
+  }
   private append(scope: GraphScope, document: Document): number {
     const id = Number(this.db.prepare('INSERT INTO graph_document_versions(graph_id,document) VALUES(?,?)').run(scope.graphId, canonicalJson(document as unknown as Json)).lastInsertRowid);
     for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json,String(node['type']))) {
       this.db.prepare('INSERT OR IGNORE INTO graph_document_resources(version_id,resource_id,resource_version) VALUES(?,?,?)').run(id, link.resourceId, link.version);
     }
+    this.retainInteractionResources(id, document);
     return id;
   }
   private anchorActiveRuns(graphId: string, cursor: number, excludeRunId?: string) {
@@ -145,7 +160,13 @@ export class GraphDocumentVersions {
           const id=key(row), old=oldRows.get(id), next=nextRows.get(id);
           if (!changed.has(id) || !old || !next) return row;
           const merged={...row};
-          for (const [name,value] of Object.entries(next)) if (canonicalJson((old[name]??null) as Json)!==canonicalJson((value??null) as Json)) merged[name]=value;
+          for (const [name,value] of Object.entries(next)) if (canonicalJson((old[name]??null) as Json)!==canonicalJson((value??null) as Json)) {
+            // Page saves made during a Run are not publication changes. Preserve
+            // each historical page/configuration instead of overwriting it with the live page.
+            if (field==='nodes' && name==='content' && old['type']==='visualize' && next['type']==='visualize'
+              && canonicalJson(visualizeGraphContent(JSON.parse(String(old['content'])) as Json))===canonicalJson(visualizeGraphContent(JSON.parse(String(value)) as Json))) continue;
+            merged[name]=value;
+          }
           return merged;
         });
         for (const [id,row] of nextRows) if (changed.has(id) && !document[field].some(item=>key(item)===id)) document[field].push(row);
@@ -154,6 +175,7 @@ export class GraphDocumentVersions {
       this.db.prepare('DELETE FROM graph_document_resources WHERE version_id=?').run(version['id']!);
       for (const node of document.nodes) for (const link of resourceLinks(JSON.parse(String(node['content'])) as Json,String(node['type'])))
         this.db.prepare('INSERT OR IGNORE INTO graph_document_resources(version_id,resource_id,resource_version) VALUES(?,?,?)').run(version['id']!,link.resourceId,link.version);
+      this.retainInteractionResources(Number(version['id']), document);
     }
     this.db.prepare('UPDATE graph_document_heads SET execution_revision=?,layout_revision=?,run_sequence=? WHERE graph_id=?').run(current.execution,current.layout,current.run,scope.graphId);
   }
@@ -169,6 +191,8 @@ export class GraphDocumentVersions {
       head = this.head(id)!;
     }
     let cursor = Number(head['cursor']);
+    // Keep the latest independent data readable when this command deletes/replaces a node.
+    this.retainInteractionResources(cursor, before.document);
     // Keep active Runs gated even when a stale head required a new baseline.
     // Also repair a missing gate before appending the current user command.
     this.anchorActiveRuns(id,cursor);
@@ -197,6 +221,7 @@ export class GraphDocumentVersions {
       if (!target && !gates.length) throw new ServiceError('CONFLICT', request.direction === 'undo' ? '没有可撤销操作。' : '没有可重做操作。');
       if (gates.length) this.db.prepare('DELETE FROM graph_document_run_gates WHERE graph_id=? AND cursor=?').run(request.graphId,Number(head['cursor']));
       if (!target) return this.graphs.snapshot(request) as unknown as Json;
+      this.retainInteractionResources(Number(head['cursor']), this.capture(request).document);
       this.restore(request, JSON.parse(String(target['document'])) as Document);
       this.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1,layout_revision=layout_revision+1 WHERE id=?').run(request.graphId);
       this.db.prepare('UPDATE graph_document_heads SET cursor=?,execution_revision=?,layout_revision=? WHERE graph_id=?').run(target['id']!, request.expectedExecutionRevision + 1, request.expectedLayoutRevision + 1, request.graphId);

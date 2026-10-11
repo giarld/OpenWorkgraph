@@ -6,7 +6,7 @@ export * from './graph-title.js';
 export * from './node-title.js';
 export * from './graph-binary.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.4.8' as const;
+export const SERVICE_VERSION = '0.4.10' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -26,7 +26,7 @@ export interface Capability { status: 'available' | 'unavailable' | 'unknown'; r
 export interface ImageRouteCapability { route: {type:'codex'} | {type:'api';providerId:string;modelId:string}; modes: Record<ImageInputMode,Capability> }
 export type CoreCapabilityName = 'pairing' | 'projects' | 'graphs' | 'assets' | 'execution' | 'imageGeneration' | 'events' | 'backups';
 export type ProjectFileCapabilityName = 'projectFiles' | 'projectFileReferences';
-export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName, Capability>>; imageRoutes?: ImageRouteCapability[] }
+export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName | 'visualizeLibrary', Capability>>; imageRoutes?: ImageRouteCapability[]; visualizeCompatibility?: import('./visualize-library.js').VisualizeCompatibility }
 export interface Health { status: 'ok'; version: string; protocolVersion: string }
 export function isProtocolCompatible(version: string): boolean { return /^1\.\d+$/.test(version); }
 export interface Session { id: string; browserName: string; pairedAt: string; lastUsedAt: string; expiresAt: string; current: boolean; origin: string; state: 'active' | 'expired' }
@@ -74,7 +74,8 @@ export interface DeleteGraph extends GraphScope { idempotencyKey: string; expect
 export interface GraphLifecycleRequest extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number }
 export interface PurgeGraph extends GraphLifecycleRequest { confirmationTitle: string }
 export interface GraphCommand extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; operations: GraphOperation[] }
-export interface AssetVersion { assetId: string; version: number; mime: string; bytes: number; sha256: string; state: 'processing' | 'ready' | 'failed'; representationVersion: number | null }
+export interface VisualizeAssetPresentation { kind: 'visualize'; title: string; logoSha256: string; inputNames: string[]; usesCdn: boolean }
+export interface AssetVersion { presentation?: VisualizeAssetPresentation; assetId: string; version: number; mime: string; bytes: number; sha256: string; state: 'processing' | 'ready' | 'failed'; representationVersion: number | null }
 export interface CanvasResourceVersion { resourceId: string; version: number; mime: string; bytes: number; sha256: string; representationVersion: number | null }
 export interface CanvasResource extends GraphScope { id: string; name: string; current: CanvasResourceVersion }
 export interface LibraryAsset extends Scope { id: string; name: string; shared: boolean; deleted: boolean; current: AssetVersion }
@@ -152,3 +153,6 @@ export * from './visualize-bridge.js';
 export * from './visualize-sdk.js';
 export * from './visualize-browser-host.js';
 export * from './visualize-export.js';
+export * from './visualize-logo.js';
+export * from './visualize-library.js';
+export * from './visualize-history.js';

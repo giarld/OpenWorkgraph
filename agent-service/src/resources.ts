@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { parseSupportedVisualizeAsset } from './visualize-compatibility.js';
 import { open, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { BlobStore, hashBytes, supportsText, readBounded } from './blob-store.js';
+import { VISUALIZE_ASSET_MIME, VISUALIZE_LIBRARY_MAX_JSON_BYTES, VISUALIZE_DEFAULT_LOGO_SVG, VisualizeValidationError, validateVisualizeLogoSvg, validateVisualizePagePackage } from '@openworkgraph/protocol';
+import type { VisualizeAssetPresentation } from '@openworkgraph/protocol';
+import { BlobStore, hashBytes, supportsText, readBounded, sniffMime, mimeMatchesBytes, validMime } from './blob-store.js';
 import type { PreparedBlob } from './blob-store.js';
 import { ServiceError } from './errors.js';
 import { transaction } from './persistence/database.js';
@@ -19,7 +22,8 @@ export interface UploadStatus { uploadId: string; projectId: string; name: strin
 export interface PreparedAppend {readonly uploadId: string; readonly projectId: string; readonly offset: number; readonly bytes: number; readonly sha256: string; readonly path: string}
 export interface PreparedFinish {readonly uploadId: string; readonly projectId: string; readonly blob: PreparedBlob}
 export interface ResourceVersion {version: number; sha256: string; bytes: number; mime: string; state: 'ready'; representationVersion: number | null}
-export interface LibraryAsset {id: string; projectId: string; name: string; shared: boolean; deleted: boolean; current: ResourceVersion & {assetId: string}}
+export type { VisualizeAssetPresentation } from '@openworkgraph/protocol';
+export interface LibraryAsset {id: string; projectId: string; name: string; shared: boolean; deleted: boolean; current: ResourceVersion & {assetId: string; presentation?: VisualizeAssetPresentation}}
 export interface CanvasResource {id: string; projectId: string; graphId: string; name: string; current: ResourceVersion & {resourceId: string}}
 export interface CanvasCreated {resource: CanvasResource; referenceId: string}
 type Row = Record<string, string | number | bigint | Uint8Array | null>;
@@ -30,11 +34,36 @@ const missing=(): never => {throw new ServiceError('NOT_FOUND','Resource not fou
 const conflict=(message='Resource changed'): never => {throw new ServiceError('REVISION_CONFLICT',message);};
 function name(value: string): string {if (typeof value!=='string' || !value.trim() || value.length>512 || [...value].some(c=>c.charCodeAt(0)<32)) return invalid('Invalid resource name'); return value.trim();}
 function integer(value: number): void {if (!Number.isSafeInteger(value) || value<0) invalid('Expected a nonnegative safe integer');}
+type AssetPresentationCache = {presentation: VisualizeAssetPresentation; logoSvg: string};
+function assetPresentation(text: string, maxResourceBytes: number): AssetPresentationCache {
+ try {
+  const pkg=parseSupportedVisualizeAsset(JSON.parse(text));
+  for(const resource of pkg.resources) {
+   if(resource.bytes>maxResourceBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','可视化资产内嵌资源超过文件大小上限。');
+   const bytes=Buffer.from(resource.base64,'base64');
+   if(bytes.toString('base64')!==resource.base64 || bytes.length!==resource.bytes || hashBytes(bytes)!==resource.sha256) invalid('可视化资产资源字节或 SHA-256 校验失败。');
+   if(!validMime(resource.mime) || !mimeMatchesBytes(resource.mime,sniffMime(bytes),true)) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','可视化资产资源 MIME 与字节不匹配。');
+   if(supportsText(resource.mime)) {const decoded=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(resource.mime==='application/json') JSON.parse(decoded);}
+  }
+  const reference=pkg.node.content.page?.resource;
+  const resource=reference && pkg.resources.find(item=>item.resourceId===reference.resourceId && item.version===reference.resourceVersion);
+  if(!resource) return invalid('可视化资产缺少页面资源。');
+  const page=validateVisualizePagePackage(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.from(resource.base64,'base64'))));
+  const candidate=page.logoSvg ?? VISUALIZE_DEFAULT_LOGO_SVG;
+  const error=validateVisualizeLogoSvg(candidate);if(error) return invalid(error);
+  return {presentation:{kind:'visualize',title:pkg.title,logoSha256:hashBytes(Buffer.from(candidate)),inputNames:[...pkg.inputNames],usesCdn:page.dependencies.some(item=>item.kind==='cdn')},logoSvg:candidate};
+ } catch(cause) {
+  if(cause instanceof ServiceError) throw cause;
+  if(cause instanceof VisualizeValidationError) throw new ServiceError(cause.code==='PAYLOAD_TOO_LARGE'||cause.code==='SCHEMA_UNSUPPORTED'?cause.code:'INVALID_REQUEST',cause.message,{cause});
+  throw new ServiceError('INVALID_REQUEST','无效的可视化资产内容包。',{cause});
+ }
+}
 
 /** All commit methods require the caller's synchronous authenticated transaction. */
 export class Resources {
  readonly db: DatabaseSync; readonly blobs: BlobStore; readonly now: () => number;
  private readonly appends=new WeakSet<object>(); private readonly finishes=new WeakSet<object>();
+ private readonly visualizePrepared=new WeakMap<PreparedBlob,{original: PreparedBlob; cache: AssetPresentationCache}>();
  private readonly videoFrames=new Map<string, Buffer>();
  constructor(db: DatabaseSync, blobs: BlobStore, options: {now?: () => number} = {}) {this.db=db;this.blobs=blobs;this.now=options.now ?? Date.now;}
  private tx(): void {if (!this.db.isTransaction) throw new Error('Resource commit requires caller transaction');}
@@ -53,6 +82,7 @@ export class Resources {
   this.tx();this.writable(request);integer(request.bytes);name(request.name);
   if (request.bytes>this.blobs.maxBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','Resource exceeds configured maximum');
   if (typeof request.mime!=='string' || !/^[a-zA-Z0-9.+-]+[/][a-zA-Z0-9.+-]+$/.test(request.mime)) invalid('Invalid MIME');
+  if (request.mime.toLowerCase()===VISUALIZE_ASSET_MIME && request.bytes>VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw new ServiceError('PAYLOAD_TOO_LARGE','可视化资产内容包超过大小上限。');
   if (request.sha256!==undefined && !/^[a-f0-9]{64}$/.test(request.sha256)) invalid('Invalid SHA-256');
   const id=randomUUID();
   this.db.prepare('INSERT INTO resource_uploads(id,project_id,name,mime,bytes,expected_sha256,created_at) VALUES(?,?,?,?,?,?,?)').run(id,request.projectId,name(request.name),request.mime,request.bytes,request.sha256 ?? null,this.now());
@@ -84,10 +114,21 @@ export class Resources {
   const buffers: Buffer[]=[];let offset=0;
   for (const chunk of chunks) {const bytes=await this.blobs.read(String(chunk['path']));if (Number(chunk['offset'])!==offset || bytes.length!==chunk['bytes'] || hashBytes(bytes)!==chunk['sha256']) invalid('Corrupt upload chunk');buffers.push(bytes);offset+=bytes.length;}
   if (offset!==status.bytes) invalid('Incomplete upload chunks');
-  const blob=await this.blobs.prepare(Buffer.concat(buffers,offset),status.mime,row['expected_sha256']===null?undefined:String(row['expected_sha256']));
+  const blob=await this.prepareBytes(Buffer.concat(buffers,offset),status.mime,row['expected_sha256']===null?undefined:String(row['expected_sha256']));
   const result=Object.freeze({uploadId,projectId:scope.projectId,blob});this.finishes.add(result);return result;
  }
- async prepareBytes(bytes: Uint8Array, mime='application/octet-stream', sha256?: string): Promise<PreparedBlob> {this.outside();return this.blobs.prepare(bytes,mime,sha256);}
+ async prepareBytes(bytes: Uint8Array, mime='application/octet-stream', sha256?: string): Promise<PreparedBlob> {
+  this.outside();
+  if(mime.toLowerCase().split(';')[0]!.trim()!==VISUALIZE_ASSET_MIME) return this.blobs.prepare(bytes,mime,sha256);
+  if(bytes.byteLength>VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw new ServiceError('PAYLOAD_TOO_LARGE','可视化资产内容包超过大小上限。');
+  const stable=Buffer.from(bytes);let text: string;
+  try {text=new TextDecoder('utf-8',{fatal:true}).decode(stable);} catch(cause) {throw new ServiceError('INVALID_REQUEST','可视化资产必须使用 UTF-8。',{cause});}
+  const cache=assetPresentation(text,this.blobs.maxBytes);
+  // The store owns validated JSON bytes; semantic MIME is assigned here only.
+  const original=await this.blobs.prepare(stable,'application/json',sha256);
+  const result=Object.freeze({...original,mime:VISUALIZE_ASSET_MIME});
+  this.visualizePrepared.set(result,{original,cache});return result;
+ }
  async prepareProjectFile(scope: ResourceScope, path: string, mime='application/octet-stream'): Promise<PreparedBlob> {
   this.outside();this.project(scope);const registeredRoot=String(this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(scope.projectId)!['canonical_path']);const root=await realpath(registeredRoot);
   if(root!==registeredRoot) throw new ServiceError('PROJECT_UNAVAILABLE','Registered project path was replaced by a symlink');
@@ -113,11 +154,11 @@ export class Resources {
    if(bytes.length!==before.size || before.size!==after.size || before.mtimeMs!==after.mtimeMs || before.dev!==after.dev || before.ino!==after.ino ||
       before.size!==current.size || before.mtimeMs!==current.mtimeMs || before.dev!==current.dev || before.ino!==current.ino)
     throw new ServiceError('CONFLICT','File changed during import');
-   return await this.blobs.prepare(bytes,mime);
+   return await this.prepareBytes(bytes,mime);
   } finally {await file.close();}
  }
  private register(blob: PreparedBlob): void {
-  this.tx();this.blobs.assertPrepared(blob);
+  this.tx();this.blobs.assertPrepared(this.visualizePrepared.get(blob)?.original ?? blob);
   if(this.db.prepare('SELECT 1 FROM resource_file_deletions WHERE path=?').get(blob.path)) conflict('Prepared file was retired; prepare again');
   const prior=this.db.prepare('SELECT b.bytes,f.path FROM blobs b LEFT JOIN resource_blob_files f USING(sha256) WHERE b.sha256=?').get(blob.sha256);
   if (prior && Number(prior['bytes'])!==blob.bytes) invalid('Blob hash metadata mismatch');
@@ -130,7 +171,7 @@ export class Resources {
  /** Explicit cleanup of a known failed preparation; never scan unknown files.
   * The permanent tombstone prevents any later commit from reusing this path. */
  discardPrepared(blob: PreparedBlob): boolean {
-  this.tx();this.blobs.assertPrepared(blob);
+  this.tx();this.blobs.assertPrepared(this.visualizePrepared.get(blob)?.original ?? blob);
   if(this.db.prepare('SELECT 1 FROM resource_blob_files WHERE path=?').get(blob.path)) return false;
   this.queueFile(blob.path);return true;
  }
@@ -153,11 +194,21 @@ export class Resources {
   this.db.prepare('DELETE FROM resource_upload_chunks WHERE upload_id=?').run(prepared.uploadId);
   return result;
  }
- createLibraryFromPrepared(target: LibraryTarget, blob: PreparedBlob): LibraryAsset {this.tx();this.writable(target);this.register(blob);return this.libraryFromBlob(target,blob.sha256,blob.mime);}
- private libraryFromBlob(target: LibraryTarget, sha256: string, mime: string): LibraryAsset {
+ createLibraryFromPrepared(target: LibraryTarget, blob: PreparedBlob): LibraryAsset {this.tx();this.writable(target);this.register(blob);return this.libraryFromBlob(target,blob.sha256,blob.mime,this.visualizePrepared.get(blob)?.cache);}
+ private libraryFromBlob(target: LibraryTarget, sha256: string, mime: string, preparedCache?: AssetPresentationCache): LibraryAsset {
   if(target.mode!=='new' && target.mode!=='update') invalid('Choose new or explicit update target');
   if(!this.db.prepare('SELECT 1 FROM resource_blob_files WHERE sha256=?').get(sha256)) throw new ServiceError('NOT_IMPLEMENTED','Legacy blob storage has not been registered');
   this.writable(target);const title=name(target.name);let id: string,version: number;
+  let cache=preparedCache;
+  if(mime===VISUALIZE_ASSET_MIME && !cache) {
+   const stored=this.db.prepare('SELECT p.* FROM asset_version_presentations p JOIN asset_versions v ON v.asset_id=p.asset_id AND v.version=p.version WHERE v.sha256=? AND v.mime=? LIMIT 1').get(sha256,mime);
+   if(stored) cache={presentation:{kind:'visualize',title:String(stored['title']),logoSha256:String(stored['logo_sha256']),inputNames:JSON.parse(String(stored['input_names'])) as string[],usesCdn:stored['uses_cdn']===1},logoSvg:String(stored['logo_svg'])};
+   else {
+    const text=this.db.prepare("SELECT text FROM resource_representations WHERE sha256=? AND processor='builtin-utf8' AND version=1 AND state='ready'").get(sha256)?.['text'];
+    if(typeof text!=='string') return invalid('可视化资产缺少已校验的内容。');
+    cache=assetPresentation(text,this.blobs.maxBytes);
+   }
+  }
   if(target.mode==='new') {id=randomUUID();version=1;this.db.prepare('INSERT INTO assets(id,project_id,name,current_version) VALUES(?,?,?,1)').run(id,target.projectId,title);}
   else {
    id=target.assetId;const old=this.db.prepare('SELECT * FROM assets WHERE id=? AND project_id=? AND deleted_at IS NULL').get(id,target.projectId);if(!old) return missing();
@@ -165,6 +216,10 @@ export class Resources {
    this.db.prepare('UPDATE assets SET name=?,current_version=? WHERE id=?').run(title,version,id);
   }
   this.db.prepare("INSERT INTO asset_versions(asset_id,version,sha256,mime,state,representation_version) VALUES(?,?,?,?,'ready',?)").run(id,version,sha256,mime,this.representationVersion(sha256,mime));
+  if(mime===VISUALIZE_ASSET_MIME && cache) {
+   const p=cache.presentation;
+   this.db.prepare('INSERT INTO asset_version_presentations(asset_id,version,kind,title,logo_sha256,input_names,uses_cdn,logo_svg) VALUES(?,?,?,?,?,?,?,?)').run(id,version,p.kind,p.title,p.logoSha256,JSON.stringify(p.inputNames),p.usesCdn?1:0,cache.logoSvg);
+  }
   this.event('asset.changed',target,null,id,version,target.mode==='new'?'created':'updated');
   return this.getAsset(target,id);
  }
@@ -279,10 +334,20 @@ export class Resources {
  readCanvasVersion(scope: CanvasScope, id: string, version: number): ResourceVersion {
   this.graph(scope);integer(version);const row=this.db.prepare('SELECT v.*,b.bytes FROM canvas_resource_versions v JOIN canvas_resources r ON r.id=v.resource_id JOIN blobs b USING(sha256) WHERE r.id=? AND r.graph_id=? AND v.version=?').get(id,scope.graphId,version);if(!row) return missing();return this.version(row);
  }
- readAssetVersion(scope: ResourceScope, id: string, version: number): ResourceVersion {
+ readAssetVersion(scope: ResourceScope, id: string, version: number): ResourceVersion & {presentation?: VisualizeAssetPresentation} {
   this.project(scope);integer(version);
   const row=this.db.prepare("SELECT v.*,b.bytes FROM asset_versions v JOIN assets a ON a.id=v.asset_id JOIN blobs b USING(sha256) WHERE a.id=? AND v.version=? AND v.state='ready' AND (a.project_id=? OR (a.shared=1 AND a.deleted_at IS NULL) OR EXISTS(SELECT 1 FROM asset_references ar LEFT JOIN runs r ON r.id=ar.run_id LEFT JOIN nodes n ON n.id=ar.node_id LEFT JOIN graphs g ON g.id=n.graph_id WHERE ar.asset_id=a.id AND ar.asset_version=v.version AND (r.project_id=? OR g.project_id=?)) OR EXISTS(SELECT 1 FROM outputs o JOIN runs r ON r.id=o.run_id WHERE o.asset_id=a.id AND o.asset_version=v.version AND r.project_id=?))").get(id,version,scope.projectId,scope.projectId,scope.projectId,scope.projectId);
-  if(!row) return missing();return this.version(row);
+  if(!row) return missing();
+  const presentation=this.db.prepare('SELECT kind,title,logo_sha256,input_names,uses_cdn FROM asset_version_presentations WHERE asset_id=? AND version=?').get(id,version);
+  return {...this.version(row),...(presentation?{presentation:{kind:'visualize' as const,title:String(presentation['title']),logoSha256:String(presentation['logo_sha256']),inputNames:JSON.parse(String(presentation['input_names'])) as string[],usesCdn:presentation['uses_cdn']===1}}:{})};
+ }
+ visualizeLogo(scope: ResourceScope, id: string, version: number): {svg: string; sha256: string} {
+  this.readAssetVersion(scope,id,version);
+  const row=this.db.prepare('SELECT logo_svg,logo_sha256 FROM asset_version_presentations WHERE asset_id=? AND version=?').get(id,version);
+  if(!row) return missing();
+  const svg=String(row['logo_svg']),sha256=String(row['logo_sha256']);
+  if(hashBytes(Buffer.from(svg))!==sha256 || validateVisualizeLogoSvg(svg)!==null) throw new ServiceError('INTERNAL_ERROR','资产 Logo 缓存完整性校验失败。');
+  return {svg,sha256};
  }
  async readContent(scope: ResourceScope | CanvasScope, kind: 'asset'|'canvas', id: string, version: number, range?: {start: number; end?: number}): Promise<{bytes: Buffer; mime: string; total: number; start: number; end: number}> {
   this.outside();const lease=randomUUID();let metadata!: ResourceVersion;let path='';

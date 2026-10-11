@@ -19,6 +19,7 @@ export interface Draft {
   content: Json;
   state: SaveState;
   error?: string;
+  errorCode?: string;
 }
 export interface EditorState {
   graph: GraphSnapshot;
@@ -454,7 +455,7 @@ export class GraphEditor {
           this.emit({
             drafts: this.state.drafts.map((d) =>
               d.nodeId === draft.nodeId && this.owns(d)
-                ? { ...d, state, error: messageOf(error) }
+                ? { ...d, state, error: messageOf(error), errorCode: errorCode(error) }
                 : d,
             ),
             error: messageOf(error),

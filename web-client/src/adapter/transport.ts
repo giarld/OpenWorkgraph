@@ -42,6 +42,7 @@ function immutableMediaPath(path: string): boolean {
       /\.(?:mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(new URLSearchParams(path.slice(pathname.length + 1)).get('path') ?? ''))
     return false;
   return /^\/v1\/projects\/[A-Za-z0-9_-]+\/(?:assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*|graphs\/[A-Za-z0-9_-]+\/resources\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*)\/(?:thumbnail|preview|content)$/.test(pathname)
+    || /^\/v1\/projects\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*\/visualize-logo$/.test(pathname)
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/(?:thumbnail|media|content)$/.test(pathname);
 }
 const memoryJournals = new WeakMap<ConnectionRegistry, Map<string, Map<string, PendingRequestEntry>>>();

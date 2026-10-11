@@ -20,6 +20,7 @@ import { Repositories } from "./persistence/repositories.js";
 import { Auth, normalizeOrigin } from "./auth.js";
 import { ServiceError } from "./errors.js";
 import { readJson } from "./http.js";
+import { visualizeCompatibility } from './visualize-compatibility.js';
 import { acceptsHost, listenerInfo } from "./network.js";
 import { Projects } from "./projects.js";
 import { ProjectProbe } from "./project-probe.js";
@@ -97,6 +98,7 @@ export function createService(
     serviceId,
     version: SERVICE_VERSION,
     protocolVersion: PROTOCOL_VERSION,
+    visualizeCompatibility,
     capabilities: {
       pairing: {
         status: "available",
@@ -106,6 +108,7 @@ export function createService(
       projects: unavailable,
       graphs: unavailable,
       assets: unavailable,
+      visualizeLibrary: { status: 'available', reason: 'Visualize page v2 and portable interactive asset v1', verifiedAt: null },
       execution: unavailable,
       imageGeneration: {
         status: "unknown",
@@ -176,7 +179,7 @@ export function createService(
       const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
       const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills(?:[/]search)?(?:[?]|$)/.test(rawPath);
       const skillsManagementRoute = /^[/]v1[/]skills(?:[/][^/?#]+(?:[/](?:install|update|uninstall|config|files))?)?(?:[?]|$)/.test(rawPath);
-      const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content)(?:[?]|$)/.test(rawPath);
+      const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content|visualize-logo)(?:[?]|$)/.test(rawPath);
       const queryRoute = fileRoute || skillsRoute || skillsManagementRoute || mediaRoute;
       const path = queryRoute ? rawPath.split('?')[0]! : rawPath;
       if (

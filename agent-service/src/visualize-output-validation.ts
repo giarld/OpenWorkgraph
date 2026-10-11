@@ -3,10 +3,10 @@ import { hashBytes } from './blob-store.js';
 import { ServiceError } from './errors.js';
 import { MAX_MANIFEST, parsePublicationManifest, readPublicationOutput, validatePublicationOutputBytes } from './publication.js';
 import type { GeneratedVisualizeAsset } from './visualize-generated-assets.js';
-import { validateGeneratedVisualizePage } from './visualize-publication.js';
+import { prepareGeneratedVisualizePage } from './visualize-publication.js';
 
 export type VisualizeOutputValidation =
-  | { valid: true; path: string; bytes: number; sha256: string; checks: string[]; remainingChecks: string[] }
+  | { valid: true; path: string; bytes: number; sha256: string; warnings: string[]; checks: string[]; remainingChecks: string[] }
   | { valid: false; error: { code: string; message: string; fields: VisualizeFieldError[] } };
 
 /** Read-only validation of actual Output files. Publication still owns resource
@@ -30,8 +30,8 @@ export async function validateVisualizeOutput(root: string, path: string, kind: 
       // resource records are allocated before the real publication transaction.
       generated.set(item.outputKey, { resourceId: 'preflight-' + item.outputKey, resourceVersion: 1, mime: item.mime });
     }
-    validateGeneratedVisualizePage(JSON.parse(bytes.toString('utf8')), generated);
-    return { valid: true, path, bytes: bytes.length, sha256, checks: ['publication-manifest', 'page-size-and-sha256', 'generated-media-size-sha256-and-mime', 'page-protocol'], remainingChecks: ['Publication verifies existing resource access and project dependencies, then installs the page.', 'Browser interactions and downloads require separate testing.'] };
+    const { warnings } = prepareGeneratedVisualizePage(JSON.parse(bytes.toString('utf8')), generated);
+    return { valid: true, path, bytes: bytes.length, sha256, warnings, checks: ['publication-manifest', 'page-size-and-sha256', 'generated-media-size-sha256-and-mime', 'page-logo-normalization', 'page-protocol'], remainingChecks: ['Publication verifies existing resource access and project dependencies, then installs the page.', 'Browser interactions and downloads require separate testing.'] };
   } catch (error) {
     if (error instanceof VisualizeValidationError) return { valid: false, error: { code: error.code, message: error.message, fields: error.fields } };
     if (error instanceof ServiceError) {

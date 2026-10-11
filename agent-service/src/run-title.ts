@@ -1,6 +1,7 @@
 import { limitNodeTitle } from '@openworkgraph/protocol';
 
 export const DEFAULT_EXECUTION_TITLES = new Set(['执行任务', 'Execution task']);
+export const DEFAULT_VISUALIZE_TITLES = new Set(['New Visualize', '新建Visualize', '新建可视化交互']);
 
 /** Immediate title for backends without an early agent title (including API images). */
 export function promptRunTitle(prompt: string): string | undefined {

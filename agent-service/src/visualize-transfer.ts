@@ -8,7 +8,7 @@ import type { Graphs } from './graphs.js';
 import type { Resources } from './resources.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
-import { validateStoredVisualizeContent, visualizeChecked, visualizeResourceLinks } from './visualize-content.js';
+import { validateStoredVisualizeContent, visualizeChecked, visualizeDependenciesAgree, visualizePageAssetData, visualizeResourceLinks } from './visualize-content.js';
 
 export const transferResourceKey = (id: string, version: number): string => JSON.stringify([id, version]);
 export type VisualizeResourceMap = Map<string, VisualizeResourceReference>;
@@ -25,11 +25,11 @@ export function remapVisualizeAssetData(value: Json, resources: VisualizeResourc
   }
   return Array.isArray(value) ? value.map(child => remapVisualizeAssetData(child, resources)) : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, remapVisualizeAssetData(child, resources)]));
 }
-/** Only declared references and their reserved HTML URL markers are identities.
- * Schema, initial form and view-state values remain opaque business data. */
+/** Remap explicit asset descriptors and declared HTML markers, preserving business strings. */
 export function remapVisualizePage(page: VisualizePagePackage, resources: VisualizeResourceMap): VisualizePagePackage {
   const result = structuredClone(page);
   result.initialForm = remapVisualizeAssetData(result.initialForm, resources) as { [key: string]: Json };
+  result.initialState = remapVisualizeAssetData(result.initialState, resources);
   result.form.schema = remapVisualizeAssetData(result.form.schema as unknown as Json, resources) as unknown as typeof result.form.schema;
   const replacements = new Map<string, string>();
   for (const dependency of result.dependencies) if (dependency.kind === 'resource') {
@@ -52,6 +52,7 @@ export function remapVisualizeContent(value: Json, resources: VisualizeResourceM
     content.form.resource = mapped(content.form.resource, resources);
     content.form.data = remapVisualizeAssetData(content.form.data, resources) as { [key: string]: Json };
   }
+  if (content.state) content.state.data = remapVisualizeAssetData(content.state.data, resources);
   if (edges) content.inputBindings = content.inputBindings.map(binding => ({ ...binding, edgeId: edges.get(binding.edgeId) ?? invalid('Missing visualize input edge remapping') }));
   return content as unknown as Json;
 }
@@ -79,15 +80,16 @@ export function validateVisualizeBundle(nodes: Node[], resources: BundleResource
       references.push({ resourceId: dependency.resourceId, resourceVersion: dependency.resourceVersion });
     }
     const unique = [...new Map(references.map(reference => [transferResourceKey(reference.resourceId, reference.resourceVersion), reference])).values()];
-    for (const asset of collectVisualizeAssetReferences({ initialForm: page.initialForm, schema: page.form.schema } as unknown as Json)) if (asset.kind === 'resource') {
-      if (!entries.has(transferResourceKey(asset.resourceId, asset.resourceVersion))) invalid('Missing initial form asset');
+    for (const asset of visualizeChecked(() => collectVisualizeAssetReferences(visualizePageAssetData(page)))) if (asset.kind === 'resource') {
+      if (!entries.has(transferResourceKey(asset.resourceId, asset.resourceVersion))) invalid('Missing visualize page asset');
       if (!unique.some(reference => reference.resourceId === asset.resourceId && reference.resourceVersion === asset.resourceVersion)) unique.push({ resourceId: asset.resourceId, resourceVersion: asset.resourceVersion });
     }
-    if (canonicalJson(unique as unknown as Json) !== canonicalJson(content.page.dependencies as unknown as Json)) invalid('Visualize package/node dependencies disagree');
+    if (!visualizeDependenciesAgree(page, unique, content.page.dependencies)) invalid('Visualize package/node dependencies disagree');
     if (content.page.resource.resourceId === content.form.resource.resourceId || page.form.version !== content.form.schemaVersion) invalid('Visualize page/form identity or schema mismatch');
     const form = read(content.form.resource);
     visualizeChecked(() => validateVisualizeForm(page.form.schema, form, 'save'));
     if (canonicalJson(form) !== canonicalJson(content.form.data)) invalid('Visualize form/fixed resource mismatch');
+    for (const asset of visualizeChecked(() => collectVisualizeAssetReferences({ form, state: content.state?.data ?? null }))) if (asset.kind === 'resource' && !entries.has(transferResourceKey(asset.resourceId, asset.resourceVersion))) invalid('Missing visualize current form/state asset');
     const pageKey = transferResourceKey(content.page.resource.resourceId, content.page.resource.resourceVersion);
     pages.set(pageKey, page);
   }
@@ -131,12 +133,36 @@ export async function prepareVisualizeCopy(graphs: Graphs, resources: Resources,
     return remapVisualizeContent(content as unknown as Json, mapping);
   };
 }
-/** Undo selects old immutable bytes, but subsequent edits need a fresh resource head.
+/** Interaction data belongs to a node and immutable page bytes, independently of the graph cursor. */
+export function latestVisualizeContent(db: DatabaseSync, nodeId: string, value: Json): Json {
+  const content = visualizeChecked(() => validateVisualizeNodeContent(value));
+  if (!content.page) return value;
+  const row = db.prepare(`SELECT v.content FROM node_versions v
+    JOIN canvas_resource_versions p ON p.resource_id=json_extract(v.content,'$.page.resource.resourceId')
+      AND p.version=json_extract(v.content,'$.page.resource.resourceVersion')
+    WHERE v.node_id=? AND p.resource_id=? AND p.sha256=(SELECT sha256 FROM canvas_resource_versions WHERE resource_id=? AND version=?)
+    ORDER BY v.version DESC LIMIT 1`).get(nodeId, content.page.resource.resourceId, content.page.resource.resourceId, content.page.resource.resourceVersion);
+  return row ? JSON.parse(String(row['content'])) as Json : value;
+}
+
+/** Undo selects old immutable page bytes, but subsequent edits need a fresh resource head.
  * Append an alias version; never mutate old versions or existing Run snapshots. */
 export function restoreVisualizeContent(db: DatabaseSync, scope: GraphScope, nodeId: string, value: Json, previous: Json): Json {
-  const { content } = validateStoredVisualizeContent(db, scope, value);
+  const content = visualizeChecked(() => validateVisualizeNodeContent(value));
   const old = visualizeChecked(() => validateVisualizeNodeContent(previous));
   if (!content.page || !content.form || !content.state) return content as unknown as Json;
+  const latest = visualizeChecked(() => validateVisualizeNodeContent(latestVisualizeContent(db, nodeId, value)));
+  if (!latest.form || !latest.state) throw new ServiceError('INVALID_REQUEST', 'Saved visualization interaction data is unavailable');
+  content.form = { ...latest.form, pageRevision: content.page.revision };
+  content.state = { ...latest.state, pageRevision: content.page.revision };
+  const pageHash = (reference: VisualizeResourceReference) => db.prepare('SELECT sha256 FROM canvas_resource_versions WHERE resource_id=? AND version=?').get(reference.resourceId, reference.resourceVersion)?.['sha256'];
+  if (old.page && old.page.resource.resourceId === content.page.resource.resourceId && pageHash(old.page.resource) === pageHash(content.page.resource)) {
+    // Configuration/layout undo must not replace the iframe or its own undo stack.
+    content.page = { ...content.page, resource: old.page.resource, revision: old.page.revision };
+    content.form.pageRevision = old.page.revision; content.state.pageRevision = old.page.revision;
+    return validateStoredVisualizeContent(db, scope, content).content as unknown as Json;
+  }
+  validateStoredVisualizeContent(db, scope, content);
   const advance = (reference: VisualizeResourceReference): void => {
     const head = db.prepare('SELECT current_version FROM canvas_resources WHERE id=?').get(reference.resourceId)!;
     if (head['current_version'] === reference.resourceVersion) return;

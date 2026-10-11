@@ -1,4 +1,7 @@
 import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
+import { VisualizeNodePreview } from './VisualizeNodePreview';
+import { openVisualizeStandalone, visualizeStandaloneUrl } from './visualize-download';
+import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
 import { NodeTitleInput } from '../components/NodeTitleInput';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
@@ -49,14 +52,16 @@ import type {
   ModelDefaults,
 } from "./contracts";
 import type { ImageGenerationOptions, ImageProvider, ImageRoute } from '../../../packages/protocol/src/index';
-import { graphPath, messageOf } from "./contracts";
+import { errorCode, graphPath, messageOf } from "./contracts";
 import { GraphEditor, type Draft } from "./editor";
 import {
   uploadCanvas,
   createResourceUpload,
+  visualizeUploadMime,
   CanvasResourcePreview,
   CanvasProjectFilePreview,
   type CanvasCreated,
+  type LibraryAsset,
 } from "./ResourcesPanel";
 import { RealPluginView } from "./plugin-views";
 import {
@@ -172,6 +177,7 @@ function ProjectFileContent({ request, projectId, source, mime, name, compact = 
   return <div className="ow-project-reference-empty"><FileIcon size={32}/><strong>{name}</strong><span>{path}</span></div>;
 }
 interface CanvasUploadJob {
+  visualize?: { body: { package: VisualizeAssetPackage; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string }; result?: { nodeId: string; snapshot: GraphSnapshot } };
   replacement?: { nodeId: string; version: number; content: Json; type: string };
   id: string;
   file: File;
@@ -218,6 +224,9 @@ export interface GraphWorkspaceProps {
   refreshToken: number;
   onChanged: () => void;
   onAssetsChanged?: () => void;
+  visualizeLibraryAvailable?: boolean;
+  visualizeCompatibility?: VisualizeCompatibility;
+  installedNodeId?: string;
   onOpenProjectDirectory?: (path: string) => void;
   onCanvas?: (handle: CanvasHandle | null) => void;
   onError: (e: unknown) => void;
@@ -308,6 +317,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const textAssetJobs = useRef(new Map<string, ReturnType<typeof createResourceUpload>>());
   const textAssetBusy = useRef(new Set<string>());
   const [savingTextAssets, setSavingTextAssets] = useState(new Set<string>());
+  const visualizeSaveJobs = useRef(new Map<string, { body: Record<string, unknown>; matches?: LibraryAsset[]; submitted: boolean; conflict?: boolean }>());
+  const visualizeSaveBusy = useRef(new Set<string>());
+  const [savingVisualizeAssets, setSavingVisualizeAssets] = useState(new Set<string>());
+  const [visualizeSaveSelection, setVisualizeSaveSelection] = useState<string>();
+  const [visualizeSaveChoice, setVisualizeSaveChoice] = useState('');
+  const [inputBindingNodeId, setInputBindingNodeId] = useState<string>();
+  const [visualizeSaveNotice, setVisualizeSaveNotice] = useState('');
   const [running, setRunning] = useState(false);
   const [resourceDocument, setResourceDocument] = useState<{ id: string; version: number; text: string }>();
   const [promptProjectFile, setPromptProjectFile] = useState<{ path: string; name: string }>();
@@ -756,15 +772,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     setSelectionRevision(revision => revision + 1);
     setSelected(ids);
     props.onOpenRun?.(ids.length === 1 ? graphRuns.filter(r => r.nodeId === ids[0]).at(-1) : undefined);
-    if (ids.length === 1) {
-      const selectedNode = g.nodes.find(item => item.id === ids[0]);
-      if (selectedNode?.type === "execution") {
-        setDetailsOpen(true);
-      } else if (selectedNode?.type === "visualize") {
-        setDetailsOpen(!object(selectedNode.content).page);
-      }
-    }
   };
+  useEffect(() => { if (props.installedNodeId && editor.getSnapshot().graph.nodes.some(node => node.id === props.installedNodeId)) selectNodes([props.installedNodeId]); }, [props.installedNodeId]);
   useEffect(()=>{
     const target=props.editExecutionNode;
     if(!target||target.graphId!==g.graphId||target.projectId!==g.projectId)return;
@@ -838,6 +847,44 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         editor.edit(wire.id, { ...object(draft?.content ?? target.content), previewMode: mode });
       }) } : {}),
     };
+  };
+  const saveVisualizeAsset = async (nodeId: string, choice?: string) => {
+    if (readOnly || props.assetsAvailable === false || props.visualizeLibraryAvailable === false || visualizeSaveBusy.current.has(nodeId)) return;
+    visualizeSaveBusy.current.add(nodeId); setSavingVisualizeAssets(new Set(visualizeSaveBusy.current));
+    setVisualizeSaveNotice('');
+    try {
+      let job = visualizeSaveJobs.current.get(nodeId);
+      if (!job) {
+        await visualizeSessions.settle(nodeId);
+        await editor.flush();
+        await editor.refresh();
+        const snapshot = editor.getSnapshot().graph;
+        const source = snapshot.nodes.find(item => item.id === nodeId);
+        const value = object(source?.content ?? null), page = object(value.page), form = object(value.form), viewState = object(value.state);
+        if (!source || source.type !== 'visualize' || !page.resource || !form.resource || !viewState.version) throw Error(t('Generate an interactive page before saving it to the asset library.'));
+        const title = Array.from(String(value.title ?? '').trim() || t('Interactive page')).map(char => char.charCodeAt(0) < 32 || [47, 92, 127].includes(char.charCodeAt(0)) ? '_' : char).join('').slice(0, 220);
+        const name = /[.]owvisualize[.]json$/i.test(title) ? title : title + '.owvisualize.json';
+        job = { submitted: false, body: { name, mode: 'new', expectedContentVersion: source.contentVersion, expectedPageRevision: page.revision, expectedFormVersion: form.version, expectedStateVersion: viewState.version, expectedExecutionRevision: snapshot.executionRevision, expectedLayoutRevision: snapshot.layoutRevision, idempotencyKey: randomId() } };
+        visualizeSaveJobs.current.set(nodeId, job);
+      }
+      const request = props.serviceRequest ?? props.request;
+      if (!job.submitted) {
+        job.matches ??= await request<LibraryAsset[]>('/v1/projects/' + encodeURIComponent(g.projectId) + '/assets/same-name', { name: job.body.name });
+        if (job.matches.length && !choice) { setVisualizeSaveChoice(''); setVisualizeSaveSelection(nodeId); return; }
+        const selected = job.matches.find(asset => asset.id === choice);
+        if (choice && choice !== 'new' && !selected) throw Error(t('Choose an asset or create a new copy.'));
+        if (selected) Object.assign(job.body, { mode: 'update', assetId: selected.id, expectedAssetVersion: selected.current.version });
+        job.submitted = true;
+      }
+      await request(graphPath(g.projectId, g.graphId) + '/visualize/' + encodeURIComponent(nodeId) + '/save-to-library', job.body);
+      visualizeSaveJobs.current.delete(nodeId); setVisualizeSaveSelection(undefined);
+      setVisualizeSaveNotice(t('Saved to asset library · Interactive Visualizations'));
+      props.onAssetsChanged?.(); props.onChanged();
+    } catch (error) {
+      const job = visualizeSaveJobs.current.get(nodeId);
+      if (job) job.conflict = typeof error === 'object' && error !== null && 'status' in error && error.status === 409;
+      throw error;
+    } finally { visualizeSaveBusy.current.delete(nodeId); if (mounted.current) setSavingVisualizeAssets(new Set(visualizeSaveBusy.current)); }
   };
   const saveTextAsset = async (nodeId: string) => {
     if (readOnly || props.assetsAvailable === false || textAssetBusy.current.has(nodeId)) return;
@@ -1155,6 +1202,23 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     job.error = undefined;
     update();
     try {
+      if (!job.replacement && visualizeUploadMime(job.file)) {
+        if (props.visualizeLibraryAvailable === false && !props.temporary) throw Error(t('Upgrade the Workspace to save and install interactive visualizations.'));
+        if (!job.visualize) {
+          if (job.file.size > VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw Error(t('Interactive content exceeds the size limit.'));
+          const pkg = parseVisualizeAssetPackage(await job.file.text(), props.visualizeCompatibility);
+          await editor.flush(); guardLayout([]);
+          const current = editor.getSnapshot().graph;
+          job.visualize = { body: { package: pkg, x: job.position.x - pkg.node.width / 2, y: job.position.y - pkg.node.height / 2, expectedExecutionRevision: current.executionRevision, expectedLayoutRevision: current.layoutRevision, idempotencyKey: job.id } };
+        }
+        const current = editor.getSnapshot().graph;
+        const result = job.visualize.result ??= await props.request<{ nodeId: string; snapshot: GraphSnapshot }>(graphPath(current.projectId, current.graphId) + '/visualize-assets/import', job.visualize.body);
+        if (!mounted.current) return;
+        editor.acceptCommitted(result.snapshot);
+        job.state = 'saved'; job.progress = 100; update();
+        selectNodes([result.nodeId]); latest.current.onChanged();
+        return;
+      }
       const detectedType = importedNodeType(job.file.name, fileMime(job.file));
       const intended = job.replacement?.type === 'file' ? 'file' : detectedType;
       if (job.file.size > FILE_NODE_MAX_BYTES) throw Error(t('File nodes support up to 300 MB.'));
@@ -1214,7 +1278,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       latest.current.onChanged();
     } catch (error) {
       job.state = "failed";
-      job.error = messageOf(error);
+      job.error = errorCode(error) === 'SCHEMA_UNSUPPORTED' ? t('The visualization file version is unsupported by this Workspace.') : messageOf(error);
+      if (errorCode(error) === 'REVISION_CONFLICT') job.visualize = undefined;
       update();
       throw error;
     }
@@ -1225,6 +1290,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (files.length > 1000) throw Error(t('A batch can contain at most 1000 operations.'));
     const jobs: CanvasUploadJob[] = files.map((file,i)=>({id:randomId(),file,position:{x:position.x+40*i,y:position.y+40*i},progress:0,state:'uploading'}));
     setUploads(current=>[...current,...jobs]);
+    if (files.some(file => visualizeUploadMime(file))) {
+      // Visualize installation owns resource identity and history; never create a file placeholder.
+      for (const job of jobs) {
+        try { await resumeUpload(job); } catch (error) { if (errorCode(error) !== 'SCHEMA_UNSUPPORTED') props.onError(error); }
+      }
+      return;
+    }
     if (jobs.length===1) { await resumeUpload(jobs[0]); return; }
     try {
       const operations: Parameters<GraphEditor["command"]>[0] = [];
@@ -1499,7 +1571,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       : state.drafts.some((d) => d.state === "recovery")
         ? t('Recovery pending')
         : state.drafts.some((d) => d.state === "failed")
-          ? t('Save failed')
+          ? state.drafts.some(d => d.state === "failed" && d.errorCode !== "NODE_LOCKED") ? t('Save failed') : t('Waiting to save')
           : state.drafts.some((d) => d.state === "saving")
             ? t('Saving')
             : t('Unsaved')
@@ -1513,7 +1585,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }));
   const previewNavigation: PreviewDialogNavigation = { layers: linkedPreviewLayers, pending: markdownLinkPending, onBack: backMarkdownPreview };
   const hasPreviewRoot = !!(reference || documentNode || promptProjectFile || generatedOutputNode);
-  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly} temporary={props.temporary} expanded={expanded} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setDetailsOpen(true); }}/>;
+  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onOpenStandalone={expanded ? () => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); closePreviewDialogs(); } : undefined} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setDetailsOpen(true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);
@@ -1602,7 +1674,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     preview.click();
     return true;
   };
-  const localNoticeStamp = [pasteState.count, pasteState.error ?? '', ...uploads.map(job => `${job.id}:${job.state}`)].join('\u0000');
+  const localNoticeStamp = [visualizeSaveNotice, pasteState.count, pasteState.error ?? '', ...uploads.map(job => `${job.id}:${job.state}`)].join('\u0000');
   useEffect(() => {
     if (props.toastTarget) props.toastTarget.scrollTop = props.toastTarget.scrollHeight;
   }, [localNoticeStamp, props.toastTarget]);
@@ -1613,6 +1685,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       {pasteState.count > 1 && <span>{t('{count} batches waiting', {count:pasteState.count - 1})}</span>}
       {pasteState.warning && <span>{pasteState.warning}</span>}
     </Toast>
+    {visualizeSaveNotice && <Toast key={visualizeSaveNotice} duration={5000} dismissLabel={t('Close')} onDismiss={() => setVisualizeSaveNotice('')}><span>{visualizeSaveNotice}</span></Toast>}
     {uploads.map((job) => (
       <Toast className="real-upload-status" key={job.id} duration={job.state === 'saved' ? 5000 : null} dismissLabel={job.state === 'uploading' ? undefined : t('Close')} onDismiss={() => setUploads(jobs => jobs.filter(j => j.id !== job.id))}>
         <span>
@@ -1624,12 +1697,45 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               : t('Uploading')}
         </span>
         {job.state === "uploading" && <span className="real-upload-percent" aria-label={t('Upload progress')}>{Math.max(0, Math.min(100, Math.round(job.progress)))}%</span>}
+        {job.state === 'failed' && job.error && <span role="alert">{job.error}</span>}
+        {job.state === 'failed' && (job.visualize || !job.replacement && visualizeUploadMime(job.file)) && <button type="button" onClick={() => act(() => resumeUpload(job))}>{t('Retry')}</button>}
       </Toast>
     ))}
   </>;
   return (
     <MarkdownPreviewProvider onOpenLink={openMarkdownLink} imageRequest={props.serviceRequest ?? props.request} projectId={g.projectId} imageRevision={projectFilesRevision}>
     <section ref={workspaceElement} className="real-workspace" aria-label={t('Work Graph editor')}>
+      {visualizeSaveSelection && (() => {
+        const job = visualizeSaveJobs.current.get(visualizeSaveSelection);
+        if (!job) return null;
+        return <ReferenceDialog label={t('Save interactive page to asset library')} title={t('Save interactive page to asset library')} onClose={() => { if (!savingVisualizeAssets.has(visualizeSaveSelection)) setVisualizeSaveSelection(undefined); }} nativeModal>
+          <form onSubmit={event => { event.preventDefault(); act(() => saveVisualizeAsset(visualizeSaveSelection, visualizeSaveChoice)); }}>
+            <p>{String(job.body.name)}</p><p>{t('An asset with this name exists. Choose explicitly; it will not be overwritten by default.')}</p>
+            <label>{t('Action')}<select autoFocus disabled={job.submitted || savingVisualizeAssets.has(visualizeSaveSelection)} value={visualizeSaveChoice} onChange={event => setVisualizeSaveChoice(event.target.value)}><option value="">{t('Choose…')}</option><option value="new">{t('Keep both (create new asset)')}</option>{job.matches?.map(asset => <option key={asset.id} value={asset.id}>{t('Update')} {asset.name} · v{asset.current.version} · {asset.id}</option>)}</select></label>
+            <button type="submit" disabled={savingVisualizeAssets.has(visualizeSaveSelection) || (!job.submitted && !visualizeSaveChoice)}>{savingVisualizeAssets.has(visualizeSaveSelection) ? t('Saving interactive page…') : job.submitted ? t('Retry original interactive page save') : t('Save')}</button>
+            {!job.submitted && <button type="button" disabled={savingVisualizeAssets.has(visualizeSaveSelection)} onClick={() => { visualizeSaveJobs.current.delete(visualizeSaveSelection); setVisualizeSaveSelection(undefined); }}>{t('Cancel selection')}</button>}
+            {job.conflict && <button type="button" disabled={savingVisualizeAssets.has(visualizeSaveSelection)} onClick={() => { const id = visualizeSaveSelection; visualizeSaveJobs.current.delete(id); setVisualizeSaveSelection(undefined); act(() => saveVisualizeAsset(id)); }}>{t('Read latest page and start a new save')}</button>}
+          </form>
+        </ReferenceDialog>;
+      })()}
+      {inputBindingNodeId && (() => {
+        const target = g.nodes.find(item => item.id === inputBindingNodeId);
+        if (!target) return null;
+        const value = object(target.content), bindings = Array.isArray(value.inputBindings) ? value.inputBindings.map(object) : [];
+        const edges = g.edges.filter(edge => edge.targetId === target.id && edge.kind === 'reference');
+        return <ReferenceDialog label={t('Configure references')} title={t('Configure references')} nativeModal onClose={() => setInputBindingNodeId(undefined)}>
+          <p>{t('Connect predecessors, assign input names, then refresh the page to accept them.')}</p>
+          {edges.map(edge => <label key={edge.id}>{String(object(g.nodes.find(source => source.id === edge.sourceId)?.content ?? {}).title ?? edge.sourceId)}<input aria-label={t('Input name')} defaultValue={String(bindings.find(binding => binding.edgeId === edge.id)?.name ?? '')} disabled={readOnly || target.readOnly} onBlur={event => {
+            const name = event.target.value.trim();
+            const latestState = editor.getSnapshot();
+            const current = object(latestState.drafts.find(draft => draft.nodeId === target.id)?.content ?? latestState.graph.nodes.find(item => item.id === target.id)?.content ?? {});
+            const existing = Array.isArray(current.inputBindings) ? current.inputBindings.map(object).filter(binding => binding.edgeId !== edge.id) : [];
+            act(() => editor.edit(target.id, { ...current, inputBindings: [...existing, ...(name ? [{ name, edgeId: edge.id }] : [])] }));
+          }}/></label>)}
+          {!edges.length && <p>{t('Add a reference connection from a predecessor first.')}</p>}
+          <button type="button" onClick={() => act(async () => { await editor.flush(); setInputBindingNodeId(undefined); })}>{t('Done')}</button>
+        </ReferenceDialog>;
+      })()}
       <div className="workspace-status-hints">
       {props.runtimeUnavailable === true && !props.online && <section className="workspace-disconnected panel" role="status">
         <WifiOff size={40} aria-hidden="true" />
@@ -1861,6 +1967,16 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           initialViewport={readViewport(localStorage, viewportKey)}
           onViewportChange={viewport => saveViewport(localStorage, viewportKey, viewport)}
           theme={props.theme}
+          getNavigationArea={bounds => {
+            const pageWidth = document.documentElement.clientWidth;
+            const sidebar = workspaceElement.current?.closest('.real-layout')?.querySelector<HTMLElement>('.left-sidebar');
+            const sidebarBounds = sidebar?.getBoundingClientRect();
+            const sidebarVisible = sidebar && !sidebar.classList.contains('left-sidebar-collapsed') &&
+              sidebar.getAttribute('aria-hidden') !== 'true' && getComputedStyle(sidebar).visibility !== 'hidden';
+            const left = sidebarVisible && sidebarBounds && sidebarBounds.left <= bounds.x + 1
+              ? Math.max(bounds.x, sidebarBounds.right) : Math.max(0, bounds.x);
+            return { centerX: pageWidth / 2 - bounds.x, left: left - bounds.x, right: Math.min(pageWidth, bounds.x + bounds.width) - bounds.x };
+          }}
           graph={work}
           readOnly={readOnly}
           isNodeLocked={locked}
@@ -1896,29 +2012,31 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             return counts;
           }, {})}
           renderToolbar={n => <div className="node-toolbar" data-canvas-interactive>
-            <NodeTitleInput key={n.id} className="node-title-input" title={t("Node titles can contain up to 32 characters.")} aria-label={n.type === "group" ? t("Group name") : "Node name"} value={n.type === "group" ? groupTitle : String(content.title ?? "")} placeholder={defaultNodeTitle(n.type)} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onValueChange={value => n.type === "group" ? setGroupTitle(value) : edit("title", value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
+            <NodeTitleInput key={n.id} className="node-title-input" title={t("Node titles can contain up to 32 characters.")} aria-label={n.type === "group" ? t("Group name") : t("Node name")} value={n.type === "group" ? groupTitle : String(content.title ?? "")} placeholder={defaultNodeTitle(n.type)} disabled={n.type === 'file' || !canGeometry([n.id]) || n.readonly} onValueChange={value => n.type === "group" ? setGroupTitle(value) : edit("title", value)} onBlur={() => { if (n.type === "group") act(renameGroup); }}
               onKeyDown={e => {
                 if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 e.preventDefault();
                 e.stopPropagation();
                 e.currentTarget.blur();
               }}/>
-            {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Replace media" title="Replace media" disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
-            {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file'} title={typeof content.resourceId === 'string' ? 'Upload again' : 'Upload file (maximum 300 MB)'} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
-            {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label="Edit node" title="Edit node" onClick={() => n.type === "document" ? openDocument(n.id) : setDetailsOpen(true)}><Settings2 size={16}/></button>}
+            {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setDetailsOpen(true)}><Settings2 size={16}/></button>}
+            {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
             {n.type === 'visualize' && latestNodeRuns.get(n.id) && <button className="icon-button" aria-label={t('View run details')} title={t('View run details')} disabled={!props.onOpenRun} onClick={() => props.onOpenRun?.(latestNodeRuns.get(n.id)!)}><FileText size={16}/></button>}
-            {canCopyText && <button className="icon-button" aria-label="Create editable text copy" title="Create editable text copy" disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16}/></button>}
-            {n.type === "execution" && <button className="icon-button" aria-label="Copy execution task" title="Copy execution task (prompt only)" disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16}/></button>}
-            {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label="View generated file" title="View generated file" onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
-            {hasProjectFileSource(content) && <button className="icon-button" aria-label="Copy as resource node" title={props.temporary ? 'Temporary Work Graphs do not support copying project file resources yet' : 'Copy as resource node'} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16}/></button>}
-            {hasProjectFileSource(content) && <button className="icon-button" aria-label="Add to asset library (independent copy)" title="Add to asset library" disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16}/></button>}
-            {n.type === "text" && !isProjectFileReference(content) && <button className="icon-button" aria-label="Save to asset library (independent copy)" title={savingTextAssets.has(n.id) ? "Saving text asset…" : textAssetJobs.current.has(n.id) ? "Retry saving original text copy" : "Save to asset library"} disabled={readOnly || props.assetsAvailable === false || savingTextAssets.has(n.id)} onClick={() => act(() => saveTextAsset(n.id))}><FolderPlus size={16}/></button>}
-            {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <button className="icon-button" aria-label="Save to asset library (independent copy)" title="Save to asset library" disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
+            {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
+            {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
+            {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
+            {canCopyText && <button className="icon-button" aria-label={t("Create editable text copy")} title={t("Create editable text copy")} disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16}/></button>}
+            {n.type === "execution" && <button className="icon-button" aria-label={t("Copy execution task")} title={t("Copy execution task (prompt only)")} disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16}/></button>}
+            {hasProjectFileSource(content) && <button className="icon-button" aria-label={t("Copy as resource node")} title={props.temporary ? t('Temporary Work Graphs do not support copying project file resources yet') : t('Copy as resource node')} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16}/></button>}
+            {hasProjectFileSource(content) && <button className="icon-button" aria-label={t("Add to asset library (independent copy)")} title={t("Add to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16}/></button>}
+            {n.type === 'visualize' && visualizeSaveJobs.current.get(n.id)?.conflict && <button type="button" disabled={savingVisualizeAssets.has(n.id)} onClick={() => { visualizeSaveJobs.current.delete(n.id); act(() => saveVisualizeAsset(n.id)); }}>{t('Read latest page and start a new save')}</button>}
+            {n.type === 'visualize' && <button className="icon-button" aria-label={t('Save interactive page to asset library')} title={!object(content.page).resource ? t('Generate an interactive page before saving it to the asset library.') : props.assetsAvailable === false ? t('Connect an available Workspace first.') : props.visualizeLibraryAvailable === false ? t('Upgrade the Workspace to save and install interactive visualizations.') : savingVisualizeAssets.has(n.id) ? t('Saving interactive page…') : visualizeSaveJobs.current.has(n.id) ? t('Retry original interactive page save') : t('Save interactive page to asset library')} aria-busy={savingVisualizeAssets.has(n.id)} disabled={readOnly || n.readonly || locked(n.id) || !object(content.page).resource || props.assetsAvailable === false || props.visualizeLibraryAvailable === false || savingVisualizeAssets.has(n.id)} onClick={() => act(() => saveVisualizeAsset(n.id))}><FolderPlus size={16}/></button>}
+            {n.type === "text" && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Save to asset library (independent copy)")} title={savingTextAssets.has(n.id) ? t("Saving text asset…") : textAssetJobs.current.has(n.id) ? t("Retry saving original text copy") : t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false || savingTextAssets.has(n.id)} onClick={() => act(() => saveTextAsset(n.id))}><FolderPlus size={16}/></button>}
+            {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <button className="icon-button" aria-label={t("Save to asset library (independent copy)")} title={t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
               const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
             })}><FolderPlus size={16}/></button>}
-            {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label="View node content" title="View node content" onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
             {n.type === 'group' && <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16}/></button>}
-            <button className="icon-button" aria-label="Delete selected node" title="Delete selected node" disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
+            <button className="icon-button" aria-label={t("Delete selected node")} title={t("Delete selected node")} disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
           </div>}
           onUndo={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canUndo ? undefined : () => act(() => travelHistory(false))}
           onRedo={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo ? undefined : () => act(() => travelHistory(true))}
@@ -2036,7 +2154,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               status={running ? t("Saving and submitting…") : node.type === 'visualize' && selectedRun ? runStatusLabels[selectedRun.status] : locked(node.id) ? t("Locked while running") : unavailableReason}
               submitting={running}
               runHint={unavailableReason}
-              additionalWarnings={draft && ["conflict", "failed", "recovery"].includes(draft.state) ? [t(draftNoticeTitle(draft)), t(DRAFT_RECOVERY_NOTICE)] : []}
+              additionalWarnings={draft && ["conflict", "failed", "recovery"].includes(draft.state) ? draftNotices(draft, locked(node.id)).map(notice => t(notice)) : []}
               runLabel={node.type === "execution" ? t("Run") : t("Generate")}
               controls={<div className={node.type === 'image' ? 'image-prompt-settings' : 'prompt-model-settings'}>
                 {node.type==='image' && showModelControls && <>
@@ -2060,14 +2178,16 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               ["conflict", "failed", "recovery"].includes(draft.state) && (
                 <Conflict
                   hideNotice
-                  key={node.id + draft.state}
+                  key={draft.draftId ?? node.id + draft.state}
                   draft={draft}
                   remote={node.content}
                   disabled={readOnly}
+                  locked={locked(node.id) || !!node.readOnly}
                   onError={props.onError}
-                  resolve={(content) =>
-                    act(() => editor.resolve(node.id, content))
-                  }
+                  resolve={content => {
+                    if (content !== undefined) guardLayout([node.id]);
+                    return editor.resolve(node.id, content, draft.draftId);
+                  }}
                 />
               )}
             </PromptEditor>) : null}
@@ -2086,7 +2206,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         />
       </div>
       {reference && <ReferenceDialog key={reference.id} title={reference.title} nativeModal={reference.type === 'visualize'} fitted={reference.type === 'file' || reference.type === 'preview' || reference.type === 'visualize'} navigation={previewNavigation} onClose={closePreviewDialogs}>
-        {reference.type === 'visualize' && referenceWire ? renderVisualize(referenceWire, true) : object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onOpenLink={openMarkdownLink}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <MarkdownPreview text={reference.type === "execution" ? reference.prompt : reference.content} onOpenLink={openMarkdownLink}/>}
+        {reference.type === 'visualize' && referenceWire ? <VisualizeNodePreview owner={visualizeSessions} nodeId={referenceWire.id} contentVersion={referenceWire.contentVersion}>{renderVisualize(referenceWire, true)}</VisualizeNodePreview> : object(referenceContent.source).kind === 'project-file' && ['image','video'].includes(reference.type) ? <CanvasProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onError={props.onError}/> : object(referenceContent.source).kind === 'project-file' && reference.type === 'file' ? <ProjectFilePreview key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(object(referenceContent.source).relativePath)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} download showName={false}/> : object(referenceContent.source).kind === 'project-file' ? <ProjectFileContent key={reference.id + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} source={object(referenceContent.source)} mime={String(referenceContent.mime ?? 'application/octet-stream')} name={reference.title} onOpenLink={openMarkdownLink}/> : reference.type === 'file' && typeof referenceContent.resourceId === 'string' ? <ResourceFilePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} name={reference.title} mime={typeof referenceContent.mime === 'string' ? referenceContent.mime : ''} showName={false}/> : reference.type === "preview" ? <PreviewNode key={reference.id + ':' + projectFilesRevision} graph={g} nodeId={reference.id} request={props.request} onError={props.onError} {...previewModeProps(referenceWire!)}/> : reference.type !== "text" && typeof referenceContent.resourceId === "string" ? <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={referenceContent.resourceId} version={Number(referenceContent.resourceVersion)} mime={typeof referenceContent.mime === "string" ? referenceContent.mime : undefined} name={reference.title} onError={props.onError}/> : <MarkdownPreview text={reference.type === "execution" ? reference.prompt : reference.content} onOpenLink={openMarkdownLink}/>}
       </ReferenceDialog>}
       {generatedOutputNode && typeof generatedOutput.resourceId === "string" && <ReferenceDialog key={generatedOutputNode.id} title={String(generatedOutput.name ?? "Generated file")} navigation={previewNavigation} onClose={closePreviewDialogs}>
         <CanvasResourcePreview request={props.request} projectId={g.projectId} graphId={g.graphId} resourceId={generatedOutput.resourceId} version={Number(generatedOutput.resourceVersion)} mime={typeof generatedOutput.mime === "string" ? generatedOutput.mime : undefined} name={String(generatedOutput.name ?? "Generated file")} onError={props.onError}/>
@@ -2103,7 +2223,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         initialPreview={documentPreviewId === documentId || (documentWire?.type !== "text" && typeof object(documentWire?.content ?? {}).resourceId === "string")}
         node={{ ...documentNode, readonly: documentNode.readonly || (documentNode.type !== "text" && locked(documentNode.id)) }}
         navigation={previewNavigation}
-        onClose={closePreviewDialogs}
+        onClose={() => { setDetailsOpen(false); closePreviewDialogs(); }}
         onError={props.onError}
         onOpenLink={openMarkdownLink}
         imageRequest={props.serviceRequest ?? props.request}
@@ -2126,7 +2246,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           const id = await create("document", documentNode.content, { x: documentNode.x + 50, y: documentNode.y + 50 }, { title: documentNode.title + " copy" });
           return { ...documentNode, id, nodeId: id, readonly: false };
         }}
-      >{state.drafts.filter(d => d.nodeId === documentNode.id && ["conflict", "failed", "recovery"].includes(d.state)).map(d => <Conflict key={d.nodeId + d.state} draft={d} remote={documentWire?.content ?? {}} disabled={readOnly} resolve={content => act(() => editor.resolve(d.nodeId, content))} onError={props.onError}/>)}</DocumentDialog>}
+      >{state.drafts.filter(d => d.nodeId === documentNode.id && ["conflict", "failed", "recovery"].includes(d.state)).map(d => <Conflict key={d.draftId ?? d.nodeId + d.state} draft={d} remote={documentWire?.content ?? {}} disabled={readOnly} locked={locked(d.nodeId) || !!documentWire?.readOnly} resolve={content => { if (content !== undefined) guardLayout([d.nodeId]); return editor.resolve(d.nodeId, content, d.draftId); }} onError={props.onError}/>)}</DocumentDialog>}
       <input
         hidden
         type="file"
@@ -2171,8 +2291,9 @@ function RunResubmitDialog({ title, action, disabled, preserveOption, defaultPre
     <div className="button-row"><button type="button" onClick={onClose}>{t('Cancel')}</button><button type="button" className="primary-button" disabled={disabled} onClick={() => onConfirm(preserveOption && preserve)}>{t('Confirm {action}', { action })}</button></div>
   </section></div>;
 }
-function ReferenceDialog({ title, onClose, children, fitted=false, nativeModal=false, navigation }: { title: string; onClose(): void; children: ReactNode; fitted?:boolean; nativeModal?:boolean; navigation?: PreviewDialogNavigation }) {
+function ReferenceDialog({ title, label, onClose, children, fitted=false, nativeModal=false, navigation }: { title: string; label?: string; onClose(): void; children: ReactNode; fitted?:boolean; nativeModal?:boolean; navigation?: PreviewDialogNavigation }) {
   const dialog = useRef<HTMLElement>(null);
+  const { t } = useI18n();
   const Surface = nativeModal ? 'dialog' : 'section';
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2181,7 +2302,7 @@ function ReferenceDialog({ title, onClose, children, fitted=false, nativeModal=f
     dialog.current?.focus();
     return () => { native?.close(); if (previous?.isConnected) previous.focus(); };
   }, [nativeModal]);
-  return <div className="modal-backdrop reference-preview-backdrop" onClick={onClose}><Surface className={'reference-preview panel' + (fitted ? ' reference-preview-fitted' : '')} role="dialog" aria-modal="true" aria-label="Reference content preview" tabIndex={-1} ref={element => { dialog.current = element; }} onCancel={e => { e.preventDefault(); onClose(); }} onClick={e => { e.stopPropagation(); if (nativeModal && e.target === e.currentTarget) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) onClose(); } }} onKeyDown={e => {
+  return <div className="modal-backdrop reference-preview-backdrop" onClick={onClose}><Surface className={'reference-preview panel' + (fitted ? ' reference-preview-fitted' : '')} role="dialog" aria-modal="true" aria-label={label ?? "Reference content preview"} tabIndex={-1} ref={element => { dialog.current = element; }} onCancel={e => { e.preventDefault(); onClose(); }} onClick={e => { e.stopPropagation(); if (nativeModal && e.target === e.currentTarget) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) onClose(); } }} onKeyDown={e => {
     e.stopPropagation();
     if (e.key === "Escape" || (e.code === "Space" && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !(e.target as Element).closest('button,a[href],video,audio,input,textarea,select,[contenteditable="true"]'))) { e.preventDefault(); onClose(); }
     if (e.key === "Tab") {
@@ -2190,7 +2311,7 @@ function ReferenceDialog({ title, onClose, children, fitted=false, nativeModal=f
       if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog.current)) { e.preventDefault(); first?.focus(); }
     }
-  }}><PreviewDialogHeading title={title} navigation={navigation} onClose={onClose} closeLabel="Close reference preview"/><MarkdownPreviewProvider expandableImages><PreviewDialogLayers navigation={navigation}>{fitted ? children : <div className="reference-preview-body">{children}</div>}</PreviewDialogLayers></MarkdownPreviewProvider></Surface></div>;
+  }}><PreviewDialogHeading title={title} navigation={navigation} onClose={onClose} closeLabel={label ? t("Close") : "Close reference preview"}/><MarkdownPreviewProvider expandableImages><PreviewDialogLayers navigation={navigation}>{fitted ? children : <div className="reference-preview-body">{children}</div>}</PreviewDialogLayers></MarkdownPreviewProvider></Surface></div>;
 }
 function ExternalLinkConfirmDialog({url,onClose,onOpen}: {url:string;onClose():void;onOpen():void}) {
   const {t}=useI18n();
@@ -2203,13 +2324,22 @@ function ExternalLinkConfirmDialog({url,onClose,onOpen}: {url:string;onClose():v
   </section></div>;
 }
 function draftNoticeTitle(draft: Draft): string {
-  return draft.state === "recovery" ? "Recover unsaved draft" : draft.state === "failed" ? "Save failed" : "Body version conflict";
+  return draft.state === "recovery" ? "Recover unsaved draft" : draft.state === "failed" ? draft.errorCode === "NODE_LOCKED" ? "Waiting to save" : "Save failed" : "Body version conflict";
 }
 const DRAFT_RECOVERY_NOTICE = "Review the latest Workspace content first. Keeping local content or merging still requires version validation; nothing is force-overwritten and no run is restarted automatically.";
+function draftNotices(draft: Draft, locked: boolean): string[] {
+  const notice = draft.state === 'failed'
+    ? draft.errorCode === 'NODE_LOCKED'
+      ? locked ? 'Your changes are kept locally. Wait for the task to finish, then retry saving.' : 'The task has finished. Retry saving your local changes. Saving does not restart the task.'
+      : 'Retry saving your changes, or discard them and use the saved version. Saving does not start a run.'
+    : DRAFT_RECOVERY_NOTICE;
+  return [draftNoticeTitle(draft), notice, ...(draft.error && draft.errorCode !== 'NODE_LOCKED' ? [draft.error] : [])];
+}
 function Conflict({
   draft,
   remote,
   disabled,
+  locked,
   resolve,
   onError,
   hideNotice = false,
@@ -2217,45 +2347,58 @@ function Conflict({
   draft: Draft;
   remote: Json;
   disabled: boolean;
-  resolve: (content?: Json) => void;
+  locked: boolean;
+  resolve: (content?: Json) => Promise<void>;
   onError: (error: unknown) => void;
   hideNotice?: boolean;
 }) {
+  const { t } = useI18n();
   const [merged, setMerged] = useState(JSON.stringify(draft.content, null, 2));
+  const [busy, setBusy] = useState(false);
+  const [comparisonOpen, setComparisonOpen] = useState(false);
+  const pending = useRef(false);
+  const compare = draft.state !== 'failed';
+  const saveDisabled = disabled || locked || busy;
+  const recover = async (content?: Json) => {
+    if (pending.current || disabled || (content !== undefined && locked)) return;
+    pending.current = true; setBusy(true);
+    try { await resolve(content); }
+    catch (error) { onError(error); }
+    finally { pending.current = false; setBusy(false); }
+  };
   return (
-    <section aria-label="Body conflict and draft recovery">
-      {!hideNotice && <><h3>{draftNoticeTitle(draft)}</h3><p>{DRAFT_RECOVERY_NOTICE}</p></>}
-      <div className="real-conflict">
-        <label>
-          Local draft
-          <textarea
-            value={merged}
-            onChange={(e) => setMerged(e.target.value)}
-          />
-        </label>
-        <label>
-          Latest Workspace content
-          <textarea readOnly value={JSON.stringify(remote, null, 2)} />
-        </label>
+    <section className="real-draft-recovery" aria-label={t('Body conflict and draft recovery')} aria-busy={busy}>
+      {!hideNotice && <div className="real-draft-notices" role="status">{draftNotices(draft, locked).map((notice, index) => index === 0 ? <h3 key={notice}>{t(notice)}</h3> : <p key={notice}>{t(notice)}</p>)}</div>}
+      <div className="real-draft-actions">
+        <button type="button" disabled={disabled || busy} onClick={() => void recover()}>
+          {t('Use saved version')}
+        </button>
+        <button type="button" disabled={saveDisabled} onClick={() => void recover(draft.content)}>
+          {t(compare ? 'Recover local content and validate' : 'Retry saving')}
+        </button>
+        {compare && comparisonOpen && <button type="button" disabled={saveDisabled} onClick={() => {
+          try { void recover(JSON.parse(merged)); }
+          catch (error) { onError(error); }
+        }}>{t('Save manual merge')}</button>}
       </div>
-      <button disabled={disabled} onClick={() => resolve()}>
-        Use Workspace content
-      </button>
-      <button disabled={disabled} onClick={() => resolve(draft.content)}>
-        Recover local content and validate
-      </button>
-      <button
-        disabled={disabled}
-        onClick={() => {
-          try {
-            resolve(JSON.parse(merged));
-          } catch (e) {
-            onError(e);
-          }
-        }}
-      >
-        Save manual merge
-      </button>
+      {compare && <details className="real-draft-comparison" onToggle={event => setComparisonOpen(event.currentTarget.open)}>
+        <summary>{t('Compare and merge node content')}</summary>
+        <div className="real-conflict">
+          <label>
+            {t('Local draft')}
+            <textarea
+              value={merged}
+              disabled={saveDisabled}
+              spellCheck={false}
+              onChange={(e) => setMerged(e.target.value)}
+            />
+          </label>
+          <label>
+            {t('Latest Workspace content')}
+            <textarea readOnly value={JSON.stringify(remote, null, 2)} />
+          </label>
+        </div>
+      </details>}
     </section>
   );
 }

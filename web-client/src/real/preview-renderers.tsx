@@ -2,6 +2,7 @@ import { MarkdownPreview } from './MarkdownPreview';
 import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useNodeViewport } from '../canvas/NodeViewport';
 import { VideoPreview } from './VideoPreview';
+import { AudioPreview } from './AudioPreview';
 import { codeMarkdown, parseCsv, previewFormat, previewImageMime } from './preview-formats';
 import { buildHtmlPreviewDocument, HTML_PREVIEW_SANDBOX, HTML_PREVIEW_PERMISSIONS } from './preview-html';
 import type { PreviewRendererDefinition, PreviewRendererProps } from './preview-registry';
@@ -64,6 +65,7 @@ export const builtInPreviewRenderers: readonly PreviewRendererDefinition[] = [
   {id:'core.text',label:'Plain text',matches:file=>file.mime.split(';')[0].trim().toLowerCase().startsWith('text/') && previewFormat(file.name,file.mime)==='hex' && !file.name.toLowerCase().endsWith('.bin'),input:'text',modes:['text','hex'],defaultMode:'text'},
   {id:'core.image',label:'Image',matches:file=>previewFormat(file.name,file.mime)==='image',input:'blob',Component:ImagePreview,modes:['rendered','hex'],defaultMode:'rendered'},
   {id:'core.video',label:'Video',matches:file=>previewFormat(file.name,file.mime)==='video',input:'blob',Component:VideoPreview,layout:'fill',modes:['rendered','hex'],defaultMode:'rendered'},
+  {id:'core.audio',label:'Audio',matches:file=>previewFormat(file.name,file.mime)==='audio',input:'blob',Component:AudioPreview,layout:'fill',modes:['rendered','hex'],defaultMode:'rendered'},
   ...([
     ['html','Web page','text',HtmlPreview],['svg','SVG','blob',SvgPreview],['markdown','Markdown','text',MarkdownPreview],
     ['code','Markdown','text',CodePreview],['csv','Table','text',CsvPreview],['pdf','PDF','blob',PdfPreview],

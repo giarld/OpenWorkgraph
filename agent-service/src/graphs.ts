@@ -9,8 +9,8 @@ import { canonicalJson, Repositories } from './persistence/repositories.js';
 import { previewEdgeError } from '@openworkgraph/protocol';
 import { PluginRegistry } from './plugins.js';
 import type { Resources } from './resources.js';
-import { validateStoredVisualizeContent, validateVisualizeTransition, visualizeChecked, visualizeResourceLinks } from './visualize-content.js';
-import { validateVisualizeNodeContent, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
+import { normalizeVisualizeMetadata, validateStoredVisualizeContent, validateVisualizeProjectAssetAccess, validateVisualizeTransition, visualizeChecked, visualizePageAssetData, visualizeResourceLinks } from './visualize-content.js';
+import { validateVisualizeNodeContent, visualizeGraphContent, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
 const BUILTINS=new Set(['text','image','document','video','file','preview','execution','group','visualize']);
 export function assertProjectWritable(db:DatabaseSync,id:string):void {
   const row=db.prepare('SELECT state FROM projects WHERE id=?').get(id);
@@ -53,6 +53,7 @@ export class Graphs {
     const outputNames=new Map(this.db.prepare("SELECT o.node_id,r.name FROM execution_outputs o JOIN nodes n ON n.id=o.node_id JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version JOIN canvas_resources r ON r.id=json_extract(v.content,'$.resourceId') AND r.graph_id=n.graph_id WHERE n.graph_id=?").all(scope.graphId).map(row=>[String(row['node_id']),String(row['name'])]));
     const asNode=(row:Record<string,unknown>):Node=>{
       let content=groups.has(String(row['id']))?{title:groups.get(String(row['id']))!}:JSON.parse(String(row['content'])) as Json;
+      if(row['type']==='visualize'&&row['schema_version']===1)content=normalizeVisualizeMetadata(this.db,scope,content) as unknown as Json;
       const name=outputNames.get(String(row['id']));
       // Presentation fallback for immutable legacy versions, including hidden outputs.
       if(row['read_only']&&name&&content&&typeof content==='object'&&!Array.isArray(content)&&(typeof content['title']!=='string'||!content['title'].trim()))content={...content,title:name};
@@ -297,6 +298,11 @@ export class Graphs {
       const scope=this.db.prepare('SELECT graph_id,project_id FROM graphs g JOIN nodes n ON n.graph_id=g.id WHERE n.id=?').get(String(node['id']))!;
       const stored=validateStoredVisualizeContent(this.db,{serviceId:this.serviceId,projectId:String(scope['project_id']),graphId:String(scope['graph_id'])},content);
       const previous=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(String(node['id']),Number(node['current_version']))!['content']));
+      const resourceScope={projectId:String(scope['project_id']),graphId:String(scope['graph_id'])};
+      const formChanged=canonicalJson(previous.form??null)!==canonicalJson((stored.content.form??null) as unknown as Json);
+      const stateChanged=canonicalJson(previous.state??null)!==canonicalJson((stored.content.state??null) as unknown as Json);
+      validateVisualizeProjectAssetAccess(this.db,resourceScope,{form:formChanged?stored.content.form?.data??null:null,state:stateChanged?stored.content.state?.data??null:null});
+      if(stored.page&&canonicalJson(previous.page?.resource??null)!==canonicalJson(stored.content.page!.resource as unknown as Json))validateVisualizeProjectAssetAccess(this.db,resourceScope,visualizePageAssetData(stored.page));
       validateVisualizeTransition(visualizeChecked(()=>validateVisualizeNodeContent(previous)),stored.content,stored.page);
     }
   }
@@ -363,7 +369,8 @@ export class Graphs {
   retainResources(scope:GraphScope,nodeId:string,version:number,content:Json):void {
     this.db.prepare("DELETE FROM canvas_resource_references WHERE owner_kind='node' AND node_id=?").run(nodeId);
     const nodeType=String(this.db.prepare('SELECT type FROM nodes WHERE id=?').get(nodeId)?.['type']);
-    for(const link of resourceLinks(content,nodeType)){
+    const retainedContent=nodeType==='visualize'?normalizeVisualizeMetadata(this.db,scope,content) as unknown as Json:content;
+    for(const link of resourceLinks(retainedContent,nodeType)){
       if(!this.db.prepare('SELECT 1 FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id WHERE r.id=? AND r.graph_id=? AND v.version=?').get(link.resourceId,scope.graphId,link.version))throw new ServiceError('INPUT_BLOCKED','资源不属于本图或版本不存在。');
       this.db.prepare('INSERT OR IGNORE INTO node_resource_history(node_id,node_version,resource_id,resource_version) VALUES(?,?,?,?)').run(nodeId,version,link.resourceId,link.version);
       this.db.prepare("INSERT INTO canvas_resource_references(id,resource_id,resource_version,graph_id,owner_kind,node_id) VALUES(?,?,?,?,'node',?)").run(randomUUID(),link.resourceId,link.version,scope.graphId,nodeId);
@@ -407,6 +414,10 @@ export class Graphs {
     const known=plugin.state==='available';
     if(node.type==='visualize'&&node.schemaVersion===1){
       const stored=validateStoredVisualizeContent(this.db,scope,node.content);
+      if(!options.visualizeSnapshot){
+        validateVisualizeProjectAssetAccess(this.db,scope,{form:stored.content.form?.data??null,state:stored.content.state?.data??null});
+        if(stored.page)validateVisualizeProjectAssetAccess(this.db,scope,visualizePageAssetData(stored.page));
+      }
       if(!options.visualizeSnapshot)validateVisualizeTransition(null,stored.content,stored.page);
       node={...node,width:node.width??VISUALIZE_DEFAULT_SIZE.width,height:node.height??VISUALIZE_DEFAULT_SIZE.height};
     }
@@ -456,7 +467,16 @@ export class Graphs {
     return this.repo.idempotent(principal+':graph.command:'+command.graphId,command.idempotencyKey,command as unknown as Json,()=>{
       command={...command,operations:limitNodeTitleOperations(command.operations)};
       const graph=lifecycle?this.scope(command):this.writable(command);
-      const historyBefore=this.history.capture(command);
+      // Page saves remain durable node versions, without scanning/copying the whole graph history.
+      const interactionOnly=command.operations.every(op=>{
+        if(op.type!=='node.content')return false;
+        const node=this.node(command,op.nodeId);
+        if(node['type']!=='visualize')return false;
+        const previous=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(op.nodeId,Number(node['current_version']))!['content'])) as Json;
+        return !!previous && typeof previous==='object' && !Array.isArray(previous) && !!previous['page']
+          && canonicalJson(visualizeGraphContent(previous))===canonicalJson(visualizeGraphContent(op.content));
+      });
+      const historyBefore=interactionOnly?null:this.history.capture(command);
       if(lifecycle)assertProjectWritable(this.db,command.projectId);
       if(command.operations.some(op=>op.type==='node.delete'||op.type==='edge.create'||op.type==='edge.delete'))this.assertChainTopologyEditable(command,command.operations);
       const types=new Map(this.db.prepare('SELECT id,type FROM nodes WHERE graph_id=? AND deleted=0').all(command.graphId).map(row=>[String(row['id']),String(row['type'])]));
@@ -508,7 +528,10 @@ export class Graphs {
         case 'graph.archive':case 'graph.trash':this.lifecycle(command,op);break;
         default:throw new ServiceError('INVALID_REQUEST','不支持的图命令。');
       }}
-      this.db.prepare('UPDATE graphs SET execution_revision=execution_revision+?,layout_revision=layout_revision+? WHERE id=?').run(Number(execution),Number(layout),command.graphId);this.history.record(command,historyBefore,lifecycle);this.event(command);return this.snapshot(command) as unknown as Json;
+      this.db.prepare('UPDATE graphs SET execution_revision=execution_revision+?,layout_revision=layout_revision+? WHERE id=?').run(Number(execution),Number(layout),command.graphId);
+      if(historyBefore)this.history.record(command,historyBefore,lifecycle);
+      else this.history.advanceInteraction(command,Number(graph['execution_revision']),Number(graph['layout_revision']));
+      this.event(command);return this.snapshot(command) as unknown as Json;
     }) as unknown as GraphSnapshot;
   }
 }

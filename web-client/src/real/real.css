@@ -279,10 +279,36 @@
   overflow-wrap: anywhere;
   font-size: 12px;
 }
+.real-draft-recovery {
+  min-width: 0;
+  max-height: min(300px, 35vh);
+  overflow: auto;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  container-type: inline-size;
+}
+.real-draft-notices h3 { margin: 0 0 8px; font-size: 13px; }
+.real-draft-notices p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .real-conflict {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.real-draft-recovery .real-conflict label { display: flex; flex-direction: column; min-width: 0; gap: 6px; margin: 0; }
+.real-draft-recovery .real-conflict textarea { display: block; min-width: 0; width: 100%; height: 112px; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas); font-size: 11px; line-height: 1.5; resize: vertical; }
+.real-draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.real-draft-comparison { margin-top: 12px; }
+.real-draft-comparison summary { cursor: pointer; color: var(--muted); }
+.real-draft-comparison[open] summary { margin-bottom: 8px; }
+.real-draft-recovery .real-draft-actions button { flex: 1 1 130px; min-width: 0; max-width: 100%; min-height: 36px; margin: 0; padding: 8px 10px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--fill); white-space: normal; overflow-wrap: anywhere; }
+.real-draft-recovery .real-draft-actions button:hover:not(:disabled) { background: var(--panel); }
+.real-draft-recovery :is(button, textarea):focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+@container (max-width: 360px) {
+  .real-conflict { grid-template-columns: minmax(0, 1fr); }
+  .real-draft-actions { flex-direction: column; }
+  .real-draft-recovery .real-draft-actions button { flex-basis: auto; min-height: 44px; }
 }
 .workgraph-save-status { position: relative; }
 .real-toolbar .workgraph-save-trigger { display: inline-flex; align-items: center; gap: 4px; margin: 0 -5px; padding: 2px 5px; min-height: 24px; border: 0; border-radius: 5px; background: transparent; font-size: 11px; color: var(--muted); }
@@ -437,7 +463,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-toolbar,
 .real-service-panel,
 .workgraph-notification,
-.workgraph-toast-viewport > *,
+.workgraph-toast,
 .real-workspace .graph-main-menu,
 .real-workspace .graph-recent-menu,
 .real-workspace .workgraph-save-menu,
@@ -465,12 +491,15 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 
 .real-sidebar-open { position: absolute; top: 16px; left: 16px; z-index: 44; }
 .sidebar-closed .real-toolbar { left: 62px; }
-.workgraph-toast-viewport { display: grid; gap: 8px; width: max-content; max-width: calc(100% - 32px); max-height: min(420px, calc(100% - 96px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; pointer-events: none; }
-.workgraph-toast-viewport > * { pointer-events: auto; padding: 10px 14px; margin: 0; border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
+.workgraph-toast-viewport { display: grid; justify-items: center; gap: 8px; width: max-content; max-width: calc(100% - 32px); max-height: min(420px, calc(100% - 96px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; pointer-events: none; }
+.workgraph-toast-viewport > * { min-width: 0; max-width: 100%; pointer-events: auto; padding: 10px 14px; margin: 0; border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .real-toast-queue { position: absolute; top: 72px; left: 50%; transform: translateX(-50%); z-index: 110; }
 .real-pending-request-toast { display: grid; gap: 8px; }
 .real-pending-request-toast button { justify-self: start; }
 .workgraph-toast-dismiss { min-width: 32px; margin-inline-start: 8px; padding-inline: 9px; font-weight: 600; }
+.real-app .workgraph-toast button { background: transparent; }
+.real-app .workgraph-toast button:hover:not(:disabled), .real-app .workgraph-toast button:focus-visible { background: color-mix(in srgb, var(--fill) 48%, transparent); }
+.real-app .workgraph-toast .workgraph-toast-dismiss { border-color: transparent; text-align: center; }
 .workgraph-notices { position: absolute; top: 68px; left: 50%; transform: translateX(-50%); z-index: 45; max-height: min(240px, 40%); }
 .workgraph-toast { animation: workgraph-toast-enter 220ms cubic-bezier(.2,.8,.2,1) both; }
 .workgraph-toast[data-phase=exit] { animation: workgraph-toast-exit 180ms ease-in both; pointer-events: none; }
@@ -604,8 +633,8 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .library-card { background: var(--panel); border: 1px solid transparent; border-radius: 20px; padding: 20px; min-width: 0; }
 .library-card:hover, .library-card:focus-within { background: var(--fill); border-color: var(--stroke); }
 .library-card:has(.library-card-check:checked) { background: var(--fill); border-color: var(--active); }
-.library-card { position: relative; padding-left: 46px; }
-.library-card-check { position: absolute; left: 18px; top: 25px; width: 16px; height: 16px; accent-color: var(--text); }
+.library-card { position: relative; isolation: isolate; padding-left: 46px; }
+.library-card-check { position: absolute; z-index: 1; left: 18px; top: 25px; width: 16px; height: 16px; accent-color: var(--text); }
 .real-app input.library-card-check { width: 16px; min-width: 16px; height: 16px; padding: 0; margin: 0; }
 .library-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .real-app .library-primary { background: var(--text); color: var(--canvas); }
@@ -617,10 +646,13 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 }
 .real-app .library-card-open { display: flex; flex-direction: column; gap: 12px; width: 100%; min-height: 105px; border: 0; padding: 0; background: transparent; }
 .real-app .library-card-open:hover:not(:disabled) { background: transparent; }
+/* Extend the native open button across the card while keeping controls above it. */
+.library-card-open::after { content: ''; position: absolute; inset: 0; border-radius: 20px; }
+.library-card-open:focus-visible::after { outline: 2px solid var(--active); outline-offset: 2px; }
 .library-card-open strong { font-size: 20px; overflow-wrap: anywhere; }
 .library-card footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .library-card footer > div { display: flex; gap: 4px; }
-.real-app .library-card footer button { border: 0; padding: 6px; font-size: 12px; background: transparent; }
+.real-app .library-card footer button { position: relative; z-index: 1; border: 0; padding: 6px; font-size: 12px; background: transparent; }
 .real-app .library-card footer button:hover:not(:disabled) { background: var(--panel); }
 .library-empty { text-align: center; color: var(--muted); padding: 60px 20px; }
 .library-empty p { overflow-wrap: anywhere; }
@@ -633,6 +665,10 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .library-dialog label { margin-bottom: 16px; }
 .library-dialog-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
 .library-dialog-actions button { margin: 0; }
+.workgraph-import-dialog h2 { margin: 0 0 16px; font-size: 18px; }
+.workgraph-import-dialog p + p { margin-top: 8px; }
+.workgraph-import-dialog label { display: grid; gap: 8px; margin-top: 16px; font-size: 14px; }
+.workgraph-import-dialog select { width: 100%; min-width: 0; }
 .real-app .graph-menu-dismiss { position: fixed; inset: 0; border: 0; background: transparent; z-index: 59; }
 .graph-main-menu { position: absolute; top: 62px; left: 16px; z-index: 61; width: 220px; padding: 6px; max-height: calc(100dvh - 80px); overflow: auto; }
 .graph-recent-menu { position: fixed; z-index: 63; width: max-content; max-width: min(392px, calc(100vw - 16px)); max-height: min(320px, calc(100dvh - 16px)); overflow: auto; padding: 6px; }

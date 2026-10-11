@@ -5,6 +5,7 @@ import { graphPath, type Request } from './contracts';
 import type { TemporaryCanvasStore } from './temporary-store';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
+import { VISUALIZE_ASSET_MIME, VISUALIZE_LIBRARY_MAX_JSON_BYTES, parseVisualizeAssetPackage, validateVisualizeAssetPackageBytes } from '../../../packages/protocol/src/visualize-library';
 
 export interface TemporaryServiceBinding {
   serviceId: string;
@@ -42,13 +43,14 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
     guard();
     const input = body as Record<string, unknown>;
     if (!input || typeof input.idempotencyKey !== 'string' || !input.idempotencyKey) throw failure('INVALID_REQUEST', translate("Resource operations require an idempotency key."));
-    const save = action === 'save-to-library';
-    const id = save ? input.resourceId : input.assetId;
-    const version = input.expectedVersion;
+    const visualize = action === 'visualize-save';
+    const save = action !== 'copy-asset';
+    const id = visualize ? input.nodeId : save ? input.resourceId : input.assetId;
+    const version = visualize ? input.expectedContentVersion : input.expectedVersion;
     if (typeof id !== 'string' || !id || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1 || (save && (typeof input.name !== 'string' || !input.name.trim()))) throw failure('INVALID_REQUEST', translate("The resource identity, version, or name is invalid."));
     const key = action + ':' + input.idempotencyKey;
     // Store only a digest of session identity; never persist authentication tokens.
-    const signature = digest(JSON.stringify([binding!.serviceId, binding!.projectId, binding!.sessionId, graphId, action, id, version, save ? input.name : null]));
+    const signature = digest(JSON.stringify([binding!.serviceId, binding!.projectId, binding!.sessionId, graphId, action, id, version, visualize ? input : save ? input.name : null]));
     const running = pending.get(key);
     if (running) {
       if (running.signature !== signature) throw failure('IDEMPOTENCY_CONFLICT', translate("The parameters for this idempotency key changed."));
@@ -65,12 +67,12 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
         const blob = await send<Blob>(assetPath + '/versions/' + version + '/content', undefined, 'BLOB');
         return store.finishServiceOperation(graphId, key, signature, undefined, guard, { name: asset.name, blob: new Blob([blob], { type: asset.current.mime }) });
       }
-      const resource = await store.readResource(graphId, id, version);
+      const resource = visualize ? { name: String(input.name), blob: new Blob([JSON.stringify(await store.request(local + '/visualize/' + encodeURIComponent(id) + '/library-package', input))], { type: VISUALIZE_ASSET_MIME }) } : await store.readResource(graphId, id, version);
       const bytes = new Uint8Array(await resource.blob.arrayBuffer());
       guard();
       const detected = sniffResourceMime(bytes);
       const declared = resource.blob.type;
-      const mime = detected === 'text/plain' && ['text/plain', 'text/markdown', 'text/csv', 'image/svg+xml', 'application/json', 'application/xml', 'text/xml', 'text/yaml', 'text/x-yaml', 'application/yaml', 'application/x-yaml'].includes(declared) ? declared : detected;
+      const mime = visualize ? VISUALIZE_ASSET_MIME : detected === 'text/plain' && ['text/plain', 'text/markdown', 'text/csv', 'image/svg+xml', 'application/json', 'application/xml', 'text/xml', 'text/yaml', 'text/x-yaml', 'application/yaml', 'application/x-yaml'].includes(declared) ? declared : detected;
       const base = remote + '/uploads';
       const job = digest(key + ':' + signature);
       const started = await send<Upload>(base, { name: input.name, mime, bytes: bytes.length, sha256: bytesToHex(sha256(bytes)), idempotencyKey: job + '-start' });
@@ -88,13 +90,31 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
         if (status.received !== offset + chunk.length || status.bytes !== bytes.length) throw failure('REVISION_CONFLICT', translate("The upload progress does not match the submitted chunk."));
       }
       // Replay this exact finish even when its previous response was lost.
-      const result = await send(uploadPath + '/finish', { mode: 'new', name: input.name, idempotencyKey: job + '-finish' });
+      const result = await send(uploadPath + '/finish', { mode: visualize ? input.mode : 'new', name: input.name, ...(visualize && input.mode === 'update' ? { assetId: input.assetId, expectedVersion: input.expectedAssetVersion } : {}), idempotencyKey: job + '-finish' });
       return store.finishServiceOperation(graphId, key, signature, result, guard);
     })();
     pending.set(key, { signature, promise });
     try { return await promise; } finally { pending.delete(key); }
   }
   const request: Request = async <T>(path: string, body?: unknown, method?: string): Promise<T> => {
+    const visualizeSave = path.startsWith(local + '/visualize/') && /^[/]visualize[/]([^/]+)[/]save-to-library$/.exec(path.slice(local.length));
+    if (visualizeSave && body !== undefined) return await transfer('visualize-save', { ...body as Record<string, unknown>, nodeId: decodeURIComponent(visualizeSave[1]) }) as T;
+    if (path === local + '/visualize-assets/install' && body !== undefined) {
+      guard();
+      const scopedBody = { ...body as Record<string, unknown>, sourceScope: { serviceId: binding!.serviceId, projectId: binding!.projectId, sessionId: binding!.sessionId } };
+      const prior = await store.request<T | undefined>(path + '-result', scopedBody);
+      guard(); if (prior !== undefined) return prior;
+      const input = body as { assetId: string; expectedAssetVersion: number };
+      const assetPath = remote + '/assets/' + encodeURIComponent(input.assetId);
+      const asset = await send<{ deleted: boolean; current: { version: number; bytes: number; presentation?: { kind: string } } }>(assetPath);
+      if (asset.deleted || asset.current.version !== input.expectedAssetVersion) throw Object.assign(failure('REVISION_CONFLICT', translate('The asset version changed. Refresh and select it again.')), { status: 409 });
+      if (asset.current.presentation?.kind !== 'visualize' || asset.current.bytes > VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw failure('INVALID_REQUEST', translate('Interactive visualization installation is unavailable.'));
+      const blob = await send<Blob>(assetPath + '/versions/' + input.expectedAssetVersion + '/content', undefined, 'BLOB');
+      if (blob.size > VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw failure('INVALID_REQUEST', translate('Interactive content exceeds the size limit.'));
+      const pkg = await validateVisualizeAssetPackageBytes(parseVisualizeAssetPackage(await blob.text()));
+      guard();
+      return store.request<T>(path, { ...scopedBody, package: pkg, assertCurrent: guard }, method);
+    }
     if (path === '/v1/models') throw failure('TEMPORARY_MODELS_UNAVAILABLE', translate("Temporary Work Graphs do not use the Workspace model catalog."));
     if (path === local + '/runs' || path === local + '/input-preview') {
       guard();

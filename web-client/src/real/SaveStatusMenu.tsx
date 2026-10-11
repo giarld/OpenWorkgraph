@@ -78,7 +78,7 @@ export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve
           const preview = ['prompt', 'text', 'summary'].map(key => typeof content[key] === 'string' ? content[key] : '').filter(Boolean).join('\n\n');
           const key = draft.draftId ?? draft.nodeId + ':' + index;
           const saving = draft.state === 'saving';
-          const status = saving ? t('Saving') : draft.state === 'conflict' ? t('Conflict') : draft.state === 'failed' ? t('Save failed') : t('Unsaved');
+          const status = saving ? t('Saving') : draft.state === 'conflict' ? t('Conflict') : draft.state === 'failed' ? t(draft.errorCode === 'NODE_LOCKED' ? 'Waiting to save' : 'Save failed') : t('Unsaved');
           return <section key={key} role="group" aria-label={title} className="workgraph-save-entry">
             <div className="workgraph-save-entry-heading"><FileText size={14} aria-hidden="true"/><strong title={title}>{title}</strong><span>{status}</span></div>
             {preview ? <div className="workgraph-save-preview">{preview}</div> : <p className="workgraph-save-note">{t('This change contains node settings. Copy the content to inspect the complete version.')}</p>}

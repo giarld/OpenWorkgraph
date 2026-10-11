@@ -13,7 +13,7 @@ export interface InputBudget { maxItemBytes: number; maxTotalBytes: number; maxR
 export interface PreparedRepresentation { state: 'processing' | 'ready' | 'failed'; resourceSha256: string; representationVersion: number | null; text: string | null; contentHash: string | null }
 export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<InputBudget>; readRepresentation?: (resource: CanvasResourceVersion) => PreparedRepresentation | null }
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
-export interface InputSource { edgeId: string; sourceNodeId: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; form?: VisualizeFormSnapshot; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
+export interface InputSource { edgeId: string; sourceNodeId: string; sourceNodeTitle?: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; form?: VisualizeFormSnapshot; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
 export interface InputPreview { graphId: string; nodeId: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles: ProjectFileInput[]; sources: InputSource[]; issues: InputIssue[]; canSubmit: boolean; predecessorCount: number; totalBytes: number }
 export type BuildInputOptions = { expectedExecutionRevision?: number; skills?: import('@openworkgraph/protocol').FrozenSkill[]; features?: import('@openworkgraph/protocol').VisualizeFeatureSelection[]; visualizeGeneration?: import('@openworkgraph/protocol').VisualizeGenerationContext } & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute,{type:'codex'}> }
@@ -50,7 +50,7 @@ export class InputPreparation {
       const bindings = new Map(content.inputBindings.map(binding => [binding.edgeId, binding.name]));
       const edges = new Set(preview.sources.map(source => source.edgeId));
       if (content.inputBindings.some(binding => !edges.has(binding.edgeId))) throw new ServiceError('INPUT_BLOCKED', '输入绑定必须指向当前节点的参考连线。');
-      const inputs = preview.sources.map(source => ({ name: bindings.get(source.edgeId) ?? source.edgeId, edgeId: source.edgeId, sourceNodeId: source.sourceNodeId, contentVersion: source.contentVersion, resources: source.resourceIndexes.map(index => preview.resources[index]!), ...(source.projectFileIndexes.length ? { projectFiles: source.projectFileIndexes.map(index => preview.projectFiles[index]!) } : {}), ...(source.form ? { form: source.form } : {}), ...(source.preview ? { preview: source.preview } : {}) }));
+      const inputs = preview.sources.map(source => ({ name: bindings.get(source.edgeId) ?? source.edgeId, edgeId: source.edgeId, sourceNodeId: source.sourceNodeId, sourceNodeTitle: source.sourceNodeTitle ?? '', contentVersion: source.contentVersion, resources: source.resourceIndexes.map(index => preview.resources[index]!), ...(source.projectFileIndexes.length ? { projectFiles: source.projectFileIndexes.map(index => preview.projectFiles[index]!) } : {}), ...(source.form ? { form: source.form } : {}), ...(source.preview ? { preview: source.preview } : {}) }));
       if (new Set(inputs.map(input => input.name)).size !== inputs.length) throw new ServiceError('INPUT_BLOCKED', '输入绑定名称与未命名参考连线标识冲突。');
       const digest = createHash('sha256').update(canonicalJson({ graphId, nodeId, inputs } as unknown as Json)).digest('hex');
       this.db.exec('RELEASE visualize_input_read');
@@ -128,6 +128,10 @@ export class InputPreparation {
       catch (error) { issue(id,error instanceof Error ? error.message : 'Invalid source content'); continue; }
       if (info.state !== 'available' || !info.contract) { issue(id,info.reason ?? 'Missing contract','PLUGIN_UNAVAILABLE'); continue; }
       const audit: InputSource = {edgeId:String(source['edge_id']),sourceNodeId:id,contentVersion:Number(source['current_version']),resourceIndexes:[],projectFileIndexes:[],...(preview ? {preview} : {})};
+      if (visualize) {
+        const sourceTitle = readField(info.content, 'title');
+        audit.sourceNodeTitle = typeof sourceTitle === 'string' ? sourceTitle : '';
+      }
       result.sources.push(audit);
       if (source['type'] === 'visualize') {
         try {

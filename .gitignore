@@ -61,8 +61,10 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
-# Generated from the root README by agent-service prepack.
+# Generated from root documentation by agent-service prepack.
 /agent-service/README.md
+/agent-service/README.en.md
+/agent-service/assets/readme/
 
 # Yarn Integrity file
 .yarn-integrity

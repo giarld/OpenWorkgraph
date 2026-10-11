@@ -1,4 +1,5 @@
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
+import { ImportWorkGraphDialog } from './ImportWorkGraphDialog';
 import { ProgressDialog } from '../components/ProgressDialog';
 import { Moon, Sun, PanelLeftClose, PanelLeftOpen, Settings, Settings2, Bell, Check, Layers, Download, Pencil, Trash2, Upload, Plus, RotateCcw, Server, ChevronRight, CheckCircle2, Unplug, WifiOff, CircleAlert, Copy, Archive } from "lucide-react";
 import { ArrowLeft, ChevronLeft, FolderPlus } from "lucide-react";
@@ -39,6 +40,7 @@ import { groupLibraryGraphs } from './library-graphs';
 import { createWorkGraphArchive, readWorkGraphFile, workGraphArchiveFilename } from './workgraph-archive';
 import { ManagementPanel } from "./ManagementPanel";
 import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePlacement } from "./ResourcesPanel";
+import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES } from '../../../packages/protocol/src/visualize-library';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
 import { SkillsLibrary } from './SkillsLibrary';
 import { runsForDetail, RunsPanel } from "./RunsPanel";
@@ -112,6 +114,8 @@ export function RealApp() {
   });
   const [page, setPage] = useState<'editor' | 'library'>(() => location.hash === '#workgraphs' ? 'library' : 'editor');
   const importInput = useRef<HTMLInputElement>(null);
+  const importPickerGuard = useRef<(() => void) | undefined>(undefined);
+  const [graphImport, setGraphImport] = useState<{ file: File; projectId: string; guard(): void }>();
   const [selectedCards, setSelectedCards] = useState<string[]>([]);
   const [libraryProjectId, setLibraryProjectId] = useState('');
   const enterLibrary = useRef(() => {});
@@ -251,6 +255,7 @@ export function RealApp() {
   const restored = useRef<Promise<Connection[]> | undefined>(undefined);
   const editor = useRef<GraphEditor | undefined>(undefined);
   const canvas = useRef<CanvasHandle | null>(null);
+  const [installedNodeId, setInstalledNodeId] = useState<string>();
   const attachCanvas = useCallback((handle: CanvasHandle | null) => { canvas.current = handle; }, []);
   const projectFilePlacements = useRef(new Map<string, {
     editor: GraphEditor;
@@ -267,8 +272,11 @@ export function RealApp() {
     setToastItems(items => items.filter(item => item.id !== id));
   }, []);
   const onError = useCallback((e: unknown) => {
-    if (!isLifecycleCancellation(e)) enqueueToast(messageOf(e));
-  }, [enqueueToast]);
+    if (!isLifecycleCancellation(e)) {
+      const message = messageOf(e);
+      enqueueToast(message === 'The visualization file version is unsupported by this Workspace.' ? t('The visualization file version is unsupported by this Workspace.') : message);
+    }
+  }, [enqueueToast, t]);
   const local = useTemporaryCanvases(onError);
   const changed = useCallback(() => setRefresh((n) => n + 1), []);
   const serviceRefreshers = useRef(new Map<string, (created?: GraphSnapshot) => void>());
@@ -521,6 +529,7 @@ export function RealApp() {
   }
   useEffect(() => { setSelectedCards([]); setCardRename(undefined); setCardPurge(undefined); setCardPurgeTitle(''); setCreating(false); }, [serviceId, connection?.generation, libraryProjectId, temporary, filter]);
   useEffect(() => { setLibraryProjectId(''); }, [serviceId, temporary]);
+  useEffect(() => { setGraphImport(undefined); }, [serviceId, connection?.generation, connection?.session.id, libraryProjectId, temporary, filter, page]);
   const online =
     connection?.status === "paired" && current?.eventStatus === "connected";
   const statusConnection = connection ?? connections.find(c => c.serviceId === activeService);
@@ -632,6 +641,35 @@ export function RealApp() {
     const placementEditor = editor.current;
     const target = placementEditor.getSnapshot().graph;
     if (target.serviceId !== graph.serviceId || target.projectId !== graph.projectId || target.graphId !== graph.graphId) throw new LifecycleCancelledError();
+    if (asset.current.presentation?.kind === 'visualize') {
+      if (connection?.info.capabilities.visualizeLibrary?.status !== 'available') throw Error(t('Upgrade the Workspace to save and install interactive visualizations.'));
+      const guard = captureCanvasSelection();
+      const installRequest = localMode ? localBridge!.request : request;
+      const handle = canvas.current;
+      const assetId = asset.id, assetVersion = asset.current.version;
+      let body: { assetId: string; expectedAssetVersion: number; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string } | undefined;
+      let committed: { nodeId: string; snapshot: GraphSnapshot } | undefined;
+      let running: Promise<void> | undefined;
+      const install = async () => {
+        guard(); if (editor.current !== placementEditor) throw new LifecycleCancelledError();
+        if (!body) {
+          if (asset.current.bytes > VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw Error(t('Interactive content exceeds the size limit.'));
+          const blob = await installRequest<Blob>('/v1/projects/' + encodeURIComponent(target.projectId) + '/assets/' + encodeURIComponent(assetId) + '/versions/' + assetVersion + '/content', undefined, 'BLOB');
+          guard(); if (blob.size > VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw Error(t('Interactive content exceeds the size limit.'));
+          const pkg = parseVisualizeAssetPackage(await blob.text(), connection?.info.visualizeCompatibility);
+          const size = { width: pkg.node.width, height: pkg.node.height };
+          const position = dropPosition ? { x: dropPosition.x - size.width / 2, y: dropPosition.y - size.height / 2 } : handle.getPlacementPosition(size);
+          await placementEditor.flush(); guard();
+          const current = placementEditor.getSnapshot().graph;
+          body = { assetId, expectedAssetVersion: assetVersion, ...position, expectedExecutionRevision: current.executionRevision, expectedLayoutRevision: current.layoutRevision, idempotencyKey: randomId() };
+        }
+        committed ??= await installRequest<{ nodeId: string; snapshot: GraphSnapshot }>(graphPath(target.projectId, target.graphId) + '/visualize-assets/install', body);
+        guard(); if (editor.current !== placementEditor) throw new LifecycleCancelledError();
+        placementEditor.acceptCommitted(committed.snapshot); setInstalledNodeId(committed.nodeId); canvasChanged();
+      };
+      return { complete: async () => { throw Error(t('Interactive visualization installation is unavailable.')); }, fail: async () => undefined,
+        installVisualize: () => { if (running) return running; running = install().finally(() => { running = undefined; }); return running; } };
+    }
     const size = { width: 300, height: 220 };
     const position = dropPosition ? { x: dropPosition.x - size.width / 2, y: dropPosition.y - size.height / 2 } : canvas.current.getPlacementPosition(size);
     const nodeId = randomId();
@@ -955,13 +993,38 @@ export function RealApp() {
         <label>{t('Enter the Work Graph name to confirm')}<input autoFocus value={cardPurgeTitle} onChange={e => setCardPurgeTitle(e.target.value)}/></label>
         <div className="graph-confirm-actions"><button disabled={busy || cardPurgeTitle !== cardPurge.title}>{t('Confirm permanent deletion')}</button><button type="button" onClick={() => { setCardPurge(undefined); setCardPurgeTitle(''); }}>{t('Cancel')}</button></div>
       </form></div>}
+      {graphImport && !localMode && <ImportWorkGraphDialog fileName={graphImport.file.name} workspace={connection?.runtimeName || connection?.address || ''}
+        projects={current?.projects ?? []} initialProjectId={graphImport.projectId} disabled={busy || !online}
+        onCancel={() => setGraphImport(undefined)} onConfirm={targetProjectId => {
+          if (busy || !online) return;
+          const attempt = graphImport;
+          setGraphImport(undefined);
+          act(async () => {
+            attempt.guard();
+            const bundle = await readWorkGraphFile(attempt.file); attempt.guard();
+            const target = dataRef.current[serviceId]?.projects.find(p => p.projectId === targetProjectId);
+            if (target?.state !== 'active' || target.availability === 'unavailable') throw new LifecycleCancelledError();
+            const created = await request<GraphSnapshot>('/v1/projects/' + encodeURIComponent(targetProjectId) + '/graphs/import', { bundle, idempotencyKey: randomId() }, undefined, { journal: 'memory' });
+            attempt.guard(); setProjectId(created.projectId); setGraphId(created.graphId);
+            if (libraryProjectId) setLibraryProjectId(created.projectId);
+            setFilter('active'); canvasChanged();
+          });
+        }}/>}
       <input ref={importInput} aria-label={t('Import Work Graph file')} type="file" accept=".zip,application/zip,application/vnd.openworkgraph.graph+zip" hidden onChange={event => {
         const file = event.target.files?.[0]; event.target.value = '';
-        if (file) act(async () => {
-          const guard = captureCanvasSelection();
+        const pickerGuard = importPickerGuard.current;
+        importPickerGuard.current = undefined;
+        if (!file || busy || !canvasOnline) return;
+        const guard = pickerGuard ?? captureCanvasSelection();
+        try { guard(); } catch (error) { onError(error); return; }
+        if (!localMode) {
+          setGraphImport({ file, projectId: libraryProjectId, guard });
+          return;
+        }
+        act(async () => {
           const bundle = await readWorkGraphFile(file); guard();
-          const created = localMode ? await local.store.importGraph(bundle) : await request<GraphSnapshot>('/v1/projects/' + libraryTargetProject!.projectId + '/graphs/import', { bundle, idempotencyKey: randomId() }, undefined, { journal:'memory' });
-          guard(); selectGraph(created.graphId); if (!localMode) setProjectId(created.projectId); setFilter('active'); canvasChanged();
+          const created = await local.store.importGraph(bundle);
+          guard(); local.select(created.graphId); setFilter('active'); canvasChanged();
         });
       }}/>
       <header className="real-header topbar-right">
@@ -1200,7 +1263,7 @@ export function RealApp() {
               {filter !== 'trashed' && selectedLibraryGraphs.length > 0 && <button disabled={busy || !canvasOnline} onClick={() => {
                 setConfirmTrashGraphs(selectedLibraryGraphs);
               }}>{t('Delete selected ({count})', { count: selectedLibraryGraphs.length })}</button>}
-              <button disabled={busy || !canvasOnline || !canvasProjectActive} title={localMode ? undefined : libraryTargetProject?.name} onClick={() => importInput.current?.click()}><Upload size={16}/>{t('Import Work Graph')}</button>
+              <button disabled={busy || !canvasOnline || (!localMode && !current?.projects.some(p => p.state === 'active' && p.availability !== 'unavailable'))} onClick={() => { importPickerGuard.current = captureCanvasSelection(); importInput.current?.click(); }}><Upload size={16}/>{t('Import Work Graph')}</button>
               <button disabled={busy || !canvasOnline || !canvasProjectActive} className="library-primary" onClick={() => setCreating(true)}><Plus size={16}/>{t('New Work Graph')}</button>
             </div>
               {!runtimeDisconnected && <div className="library-groups">
@@ -1411,6 +1474,9 @@ export function RealApp() {
                 modelsAvailable={localMode ? !!localBridge?.capabilities.models : !!online}
                 modelRefreshToken={modelRevision}
                 assetsAvailable={assetsAvailable}
+                visualizeLibraryAvailable={connection?.info.capabilities.visualizeLibrary?.status === 'available'}
+                visualizeCompatibility={localMode ? undefined : connection?.info.visualizeCompatibility}
+                installedNodeId={installedNodeId}
                 executionReason={executionUnavailableReason(!!online, localMode, connection?.info.capabilities?.execution)}
                 imageReason={executionUnavailableReason(!!online, localMode, connection?.info.capabilities?.imageGeneration)}
                 graph={graph}

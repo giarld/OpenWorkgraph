@@ -39,6 +39,7 @@ import {
   clampZoom,
   connectionPath,
   fitBounds,
+  navigationCenterX,
   inputPort,
   chainInputPort,
   chainOutputPort,
@@ -56,6 +57,7 @@ import {
   type ResizeCorner,
   type Size,
   type Viewport,
+  type NavigationArea,
 } from "./geometry";
 import "./canvas.css";
 import { ShortcutsDialog } from "./ShortcutsDialog";
@@ -121,6 +123,8 @@ export interface CanvasProps {
   onViewportChange?(viewport: Viewport): void;
   locateNodeId?: string | null;
   focusPanelNodeId?: string | null;
+  /** Page center and unobscured horizontal bounds, relative to the canvas. */
+  getNavigationArea?(canvasBounds: Rect): NavigationArea;
   tool?: "select" | "pan";
   theme?: "light" | "dark";
   backgroundMode?: "lines" | "dots" | "blank";
@@ -500,6 +504,19 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       cancelViewportAnimation();
       writeViewport(v);
     }
+    function navigationArea() {
+      const canvas = root.current?.getBoundingClientRect();
+      return canvas && current.current.props.getNavigationArea?.({
+        x: canvas.left, y: canvas.top, width: canvas.width, height: canvas.height,
+      });
+    }
+    function navigationX(worldCenter: number, worldWidth: number, k: number, padding = 16) {
+      const area = navigationArea();
+      const screenCenter = area
+        ? navigationCenterX(worldWidth * k, area, padding)
+        : current.current.size.width / 2;
+      return screenCenter - worldCenter * k;
+    }
     useEffect(() => {
       const canvas = root.current;
       if (!canvas) return;
@@ -513,7 +530,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         const bounds = panel.getBoundingClientRect(), canvasBounds = canvas.getBoundingClientRect();
         const centerX = (bounds.left + bounds.width / 2 - canvasBounds.left - viewport.x) / viewport.k;
         const top = (bounds.top - canvasBounds.top - viewport.y) / viewport.k;
-        const next = { x: size.width / 2 - centerX, y: size.height / 2 - top, k: 1 };
+        const next = { x: navigationX(centerX, bounds.width / viewport.k, 1), y: size.height / 2 - top, k: 1 };
         const pending = viewportAnimation.current?.target;
         if (pending && pending.k === next.k && Math.abs(pending.x - next.x) < 0.01 && Math.abs(pending.y - next.y) < 0.01) return;
         animateViewport(next, 140);
@@ -536,14 +553,11 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     }
     function locate(id: string) {
       const n = current.current.props.graph.nodes.find((n) => n.id === id);
-      if (n)
-        animateViewport(
-          centerOn(
-            { x: n.x + n.width / 2, y: n.y + n.height / 2 },
-            current.current.size,
-            Math.min(1, fitBounds(n, current.current.size).k),
-          ),
-        );
+      if (!n) return;
+      const area = navigationArea(), size = current.current.size;
+      const k = Math.min(1, fitBounds(n, { ...size, width: area ? area.right - area.left : size.width }).k);
+      const next = centerOn({ x: n.x + n.width / 2, y: n.y + n.height / 2 }, size, k);
+      animateViewport({ ...next, x: navigationX(n.x + n.width / 2, n.width, k, 64) });
     }
     function fit() {
       animateViewport(
@@ -569,7 +583,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       const selected = props.graph.nodes.filter(node => props.selectedIds.includes(node.id));
       if (!selected.length) return;
       const bounds = boundsOf(selected);
-      animateViewport(centerOn({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, size, 1));
+      const next = centerOn({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }, size, 1);
+      animateViewport({ ...next, x: navigationX(bounds.x + bounds.width / 2, bounds.width, 1) });
     }
     useImperativeHandle(ref, () => ({
       fit,
@@ -598,18 +613,24 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         "[data-node-id]",
       ) ?? []).find((el) => el.dataset.nodeId === n.id)
         ?.querySelector<HTMLElement>(".owg-node-panel");
-      const panelHeight = panel
-        ? panel.getBoundingClientRect().height / current.current.viewport.k
+      const panelBounds = panel?.getBoundingClientRect();
+      const panelHeight = panelBounds
+        ? panelBounds.height / current.current.viewport.k
         : 338;
-      const panelWidth = Math.max(n.width, 600),
+      const panelWidth = panelBounds ? panelBounds.width / current.current.viewport.k : Math.max(n.width, 600);
+      const panelX = panelBounds && root.current
+        ? (panelBounds.left - root.current.getBoundingClientRect().left - current.current.viewport.x) / current.current.viewport.k
+        : n.x;
+      const left = Math.min(n.x, panelX),
         bounds = {
-          x: n.x + (n.width - panelWidth) / 2,
+          x: left,
           y: n.y - 24,
-          width: panelWidth,
+          width: Math.max(n.x + n.width, panelX + panelWidth) - left,
           height: n.height + 24 + 16 + panelHeight,
         };
+      const area = navigationArea();
       const available = {
-        width: Math.max(1, size.width - 60),
+        width: Math.max(1, (area ? area.right - area.left : size.width) - 60),
         height: Math.max(1, size.height - 240),
       };
       const k = Math.min(1, fitBounds(bounds, available, 0).k);
@@ -618,7 +639,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         available,
         k,
       );
-      animateViewport({ ...next, x: next.x + 30, y: next.y + 130 });
+      animateViewport({ ...next, x: navigationX(bounds.x + bounds.width / 2, bounds.width, k, 30), y: next.y + 130 });
     }, [props.focusPanelNodeId, props.graph.id, size.width, size.height]);
 
     useEffect(() => {

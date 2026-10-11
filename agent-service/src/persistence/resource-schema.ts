@@ -41,3 +41,18 @@ CREATE TRIGGER no_new_deleted_asset_reference BEFORE INSERT ON asset_references 
 CREATE TRIGGER asset_reference_added AFTER INSERT ON asset_references BEGIN UPDATE assets SET unreferenced_since=NULL WHERE id=NEW.asset_id; END;
 CREATE TRIGGER asset_reference_removed AFTER DELETE ON asset_references BEGIN UPDATE assets SET unreferenced_since=NULL WHERE id=OLD.asset_id; END;
 `;
+
+/** Derived, immutable presentation belongs to an asset version. */
+export const ASSET_PRESENTATION_SCHEMA = `
+CREATE TABLE asset_version_presentations (
+  asset_id TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind='visualize'),
+  title TEXT NOT NULL, logo_sha256 TEXT NOT NULL CHECK(length(logo_sha256)=64),
+  input_names TEXT NOT NULL CHECK(json_valid(input_names) AND json_type(input_names)='array'),
+  uses_cdn INTEGER NOT NULL CHECK(uses_cdn IN (0,1)),
+  logo_svg TEXT NOT NULL CHECK(length(CAST(logo_svg AS BLOB))<=8192),
+  PRIMARY KEY(asset_id,version),
+  FOREIGN KEY(asset_id,version) REFERENCES asset_versions(asset_id,version) ON DELETE CASCADE
+) STRICT;
+CREATE TRIGGER asset_presentation_immutable BEFORE UPDATE ON asset_version_presentations
+BEGIN SELECT RAISE(ABORT,'immutable asset version presentation'); END;
+`;
