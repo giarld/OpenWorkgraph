@@ -2,6 +2,7 @@ import type { BuiltinFeatureCandidate, SkillCandidates, SkillCandidate as Protoc
 import { isVisualizeFeatureSelection, type VisualizeFeatureSelection } from "../../../packages/protocol/src/visualize";
 import { legacySkillMentions } from "../../../packages/protocol/src/skills";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowUp,
   AtSign,
@@ -147,7 +148,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const mentionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingCaret = useRef<number | undefined>(undefined);
   const [mention, setMention] = useState<MentionState | null>(null);
-  const [mentionTop, setMentionTop] = useState(0);
+  const [mentionPosition, setMentionPosition] = useState<{ top: number; left?: number; right?: number; maxHeight?: number; transform?: string }>({ top: 0 });
   const [availableSkills, setAvailableSkills] = useState<ProtocolSkillCandidate[] | null>(null);
   const [skillRefresh, setSkillRefresh] = useState(0);
   const referenceIdentities = JSON.stringify(skillReferences.map(ref => [ref.source, ref.skillId]));
@@ -178,16 +179,43 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     { text: runHint && !runHint.startsWith(t("In progress")) ? runHint : "", warning: false },
     { text: inputChanged ? t("Input updated · The next run will use the new content") : "", warning: true },
   ].filter((notice, index, all) => notice.text && all.findIndex(item => item.text === notice.text) === index);
+  const mentionLayer = inputRef.current?.element?.closest<HTMLElement>('.owg-fixed-node-panel');
   const updateMentionPosition = () => {
-    if (inputRef.current) setMentionTop(inputRef.current.caretTop() - 6);
+    const input = inputRef.current;
+    if (!input?.element) return;
+    const top = input.caretTop() - 6;
+    const canvas = mentionLayer?.closest('.owg-canvas');
+    if (!mentionLayer || !canvas) { setMentionPosition({ top }); return; }
+    // Keep suggestions outside the scrolling prompt, in the editor's screen-space layer.
+    const inputBounds = input.element.parentElement!.getBoundingClientRect();
+    const layerBounds = mentionLayer.getBoundingClientRect(), canvasBounds = canvas.getBoundingClientRect();
+    const caretY = inputBounds.top + top;
+    const belowY = caretY + (parseFloat(getComputedStyle(input.element).lineHeight) || 22) + 12;
+    const above = Math.max(0, caretY - canvasBounds.top - 8);
+    const below = Math.max(0, canvasBounds.bottom - belowY - 8);
+    const menuHeight = Math.min(220, (mentionMenuRef.current?.scrollHeight ?? 220) + 2);
+    const upward = above >= menuHeight || above >= below;
+    setMentionPosition({ top: (upward ? caretY : belowY) - layerBounds.top,
+      left: inputBounds.left - layerBounds.left + 8, right: layerBounds.right - inputBounds.right + 8,
+      maxHeight: Math.max(1, Math.min(220, upward ? above : below)), transform: upward ? 'translateY(-100%)' : 'none' });
   };
+  const renderMentionMenu = (menu: ReactNode) => mentionLayer ? createPortal(menu, mentionLayer) : menu;
   useLayoutEffect(() => {
     if (!mention || !inputRef.current) return;
     updateMentionPosition();
     const observer = new ResizeObserver(updateMentionPosition);
     observer.observe(inputRef.current.element!);
-    return () => observer.disconnect();
-  }, [mention, value]);
+    const moved = new MutationObserver(updateMentionPosition);
+    const scrolled = (event: Event) => {
+      if (!(event.target instanceof Node) || !mentionMenuRef.current?.contains(event.target)) updateMentionPosition();
+    };
+    if (mentionLayer) {
+      observer.observe(mentionLayer);
+      moved.observe(mentionLayer, { attributes: true, attributeFilter: ['style'] });
+      mentionLayer.addEventListener('scroll', scrolled, true);
+    }
+    return () => { observer.disconnect(); moved.disconnect(); mentionLayer?.removeEventListener('scroll', scrolled, true); };
+  }, [mention, value, mentionLayer]);
   useLayoutEffect(() => {
     const menu = mentionMenuRef.current;
     if (!menu || !mention?.items.length) return;
@@ -387,7 +415,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
             e.preventDefault(); if (!disabled && !runDisabled && !submitting) onRun();
           }
         }}/>
-      {mention && <div ref={mentionMenuRef} className="prompt-mention-menu" style={{ top: mentionTop }} role="listbox" aria-label={t(skillEnabled || featureSelectionEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
+      {mention && renderMentionMenu(<div ref={mentionMenuRef} className="prompt-mention-menu" style={mentionPosition} role="listbox" aria-label={t(skillEnabled || featureSelectionEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
         {!mention.loadingGroups.length && !mention.failedGroups.length && !mention.items.length && <div className="prompt-mention-empty">{skillEnabled || featureSelectionEnabled || references.length ? t("No matching suggestions") : mention.query.trim() ? t("No matching project files") : t("Enter a file or directory name…")}</div>}
         {mentionGroups.map(group => {
           const items = mention.items.filter(item => mentionGroup(item) === group);
@@ -409,7 +437,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
           <span className="prompt-mention-path">{item.kind === "reference" ? "" : item.kind === "skill" || item.kind === "builtin-feature" ? item.description : item.relativePath}</span>
         </button></div>; })}
         </div>; })}
-      </div>}
+      </div>)}
     </div>
     {children}
     <div className="prompt-status-row">

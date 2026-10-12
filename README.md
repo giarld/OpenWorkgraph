@@ -19,6 +19,7 @@ OpenWorkgraph 是基于无限画布思想的软件开发工作流产品，同时
 在仓库根目录构建协议包和 Agent Service：
 
 ```sh
+npm ci --include=dev
 npm run build
 ```
 
@@ -33,9 +34,12 @@ node agent-service/dist/cli.js start
 在仓库根目录构建 Web Client，并通过 Vite Preview 在 `http://127.0.0.1:4173` 运行生产构建：
 
 ```sh
-npm --prefix web-client run build
+npm --prefix web-client ci --include=dev
+npm run build:web
 npm --prefix web-client run preview -- --host 127.0.0.1 --port 4173
 ```
+
+Web Client 使用独立的依赖和锁文件，根目录的 `npm ci` 不会安装 Web 依赖。首次构建须执行上述 Web 安装命令；`--include=dev` 确保安装 TypeScript、Vite 等构建工具。仅构建 Web 无需先运行 Agent Service 构建。
 
 打开 Web Client 后，填写运行时地址并点击“生成客户端码”。在运行时所在机器执行以下命令，输入浏览器显示的 8 位客户端码，核对来源和公钥指纹后确认；浏览器会轮询批准状态，完成私钥证明和通讯凭据交换后自动连接：
 

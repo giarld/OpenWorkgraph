@@ -116,8 +116,10 @@ export function validateVisualizeBridgeResponse(value: unknown): VisualizeBridge
       case 'updateForm': keys(result, ['form', 'revisions']); snapshot(result.form, true); validateVisualizeRevisions(result.revisions); break;
       case 'createSuccessors': keys(result, ['nodeIds', 'edgeIds', 'form', 'revisions']); snapshot(result.form, true); validateVisualizeRevisions(result.revisions); if (![result.nodeIds, result.edgeIds].every(value => Array.isArray(value) && value.length <= 32 && value.every(id => text(id)))) fail('Invalid successor identities'); break;
       case 'exportAsset':
-        keys(result, ['assetId', 'assetVersion', 'resourceId', 'resourceVersion', 'nodeId', 'edgeId', 'mime', 'bytes', 'revisions']);
-        if (!['assetId', 'resourceId', 'nodeId', 'edgeId'].every(key => text(result[key])) || !integer(result.assetVersion, 1) || !integer(result.resourceVersion, 1) || !integer(result.bytes, 1) || !text(result.mime, 128)) fail('Invalid exported asset');
+        keys(result, ['resourceId', 'resourceVersion', 'nodeId', 'edgeId', 'mime', 'bytes', 'revisions'], ['assetId', 'assetVersion']);
+        if (!['resourceId', 'nodeId', 'edgeId'].every(key => text(result[key])) || !integer(result.resourceVersion, 1) || !integer(result.bytes, 1) || !text(result.mime, 128)) fail('Invalid exported asset');
+        // Old persisted receipts may still contain the former library identity.
+        if ((result.assetId !== undefined || result.assetVersion !== undefined) && (!text(result.assetId) || !integer(result.assetVersion, 1))) fail('Invalid legacy exported asset');
         validateVisualizeRevisions(result.revisions); break;
       case 'requestLayout': keys(result, ['size', 'layoutRevision']); validateVisualizeSize(result.size, 'manual', { width: 1e9, height: 1e9 }); if (!integer(result.layoutRevision)) fail('Invalid layout revision'); break;
     }

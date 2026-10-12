@@ -1,5 +1,7 @@
 import { limitNodeTitle } from '../../../packages/protocol/src/node-title';
 import { NodeViewport } from './NodeViewport';
+import { EditorPanel } from './EditorPanel';
+import { editorFreeArea } from './editor-panel-layout';
 import {
   forwardRef,
   memo,
@@ -39,6 +41,7 @@ import {
   clampZoom,
   connectionPath,
   fitBounds,
+  editorViewport,
   navigationCenterX,
   inputPort,
   chainInputPort,
@@ -317,18 +320,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
             }
           />
         ))}
-      {props.renderPanel && (
-        <div
-          className="owg-node-panel"
-          data-canvas-interactive
-          style={{
-            top: node.height + 16,
-            width: Math.max(node.width, 600),
-          }}
-        >
-          {props.renderPanel(node)}
-        </div>
-      )}
+
     </div>
   );
 });
@@ -364,6 +356,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     const viewportAnimation = useRef<{ frame: number; target: Viewport; kind: 'zoom' | 'navigate' } | null>(null);
     const zoomRangePointer = useRef<{ id: number; x: number; y: number; value: number; dragging: boolean } | null>(null);
     const publishedViewport = useRef(viewport);
+    const emittedViewports = useRef(new WeakSet<Viewport>());
     const [viewportAnimating, setViewportAnimating] = useState(false);
     function cancelViewportAnimation() {
       if (viewportAnimation.current) cancelAnimationFrame(viewportAnimation.current.frame);
@@ -428,7 +421,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     useEffect(() => {
       // A controlled viewport supplied externally takes precedence over motion.
       const supplied = props.viewport, published = publishedViewport.current;
-      if (supplied && viewportAnimation.current &&
+      // React may return an earlier emitted frame after a newer frame has been
+      // published. That feedback is not an external navigation request.
+      if (supplied && !emittedViewports.current.has(supplied) && viewportAnimation.current &&
         (supplied.x !== published.x || supplied.y !== published.y || supplied.k !== published.k)) cancelViewportAnimation();
     }, [props.viewport]);
     useEffect(() => {
@@ -455,6 +450,24 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     const toolbarNode = props.selectedIds.length === 1 && !gesture
       ? nodeById.get(props.selectedIds[0])
       : undefined;
+    const panelNode = props.selectedIds.length === 1 ? nodeById.get(props.selectedIds[0])
+      : props.focusPanelNodeId ? nodeById.get(props.focusPanelNodeId) : undefined;
+    const panelContent = panelNode && props.renderPanel?.(panelNode);
+    const hasPanel = !!panelContent;
+    const nav = navigationArea();
+    const panelWidth = Math.max(1, Math.min(832, (nav ? nav.right - nav.left : size.width) - 32));
+    const panelCenter = nav ? navigationCenterX(panelWidth, nav, 16) : size.width / 2;
+    const editorArea = { x: nav?.left ?? 0, y: 0,
+      width: nav ? nav.right - nav.left : size.width, height: size.height };
+    const panelArea = { x: editorArea.x + 16, y: 16,
+      // Keep the panel and its outer resize arc above the bottom tools.
+      width: Math.max(1, editorArea.width - 32), height: Math.max(1, size.height - 104) };
+    const defaultPanelBounds = { x: panelCenter - panelWidth / 2,
+      y: size.height - 464, width: panelWidth, height: 360 };
+    const panelVisible = !!panelNode && intersects(panelNode, {
+      x: (editorArea.x - viewport.x) / viewport.k, y: -viewport.y / viewport.k,
+      width: editorArea.width / viewport.k, height: size.height / viewport.k,
+    });
     const dropGroups = new Set<string>();
     if (gesture?.kind === 'move' && gesture.moved) {
       const moving = new Set(gesture.nodes.map(n => n.id));
@@ -497,6 +510,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       const next = { ...v, k: clampZoom(v.k) };
       current.current.viewport = next;
       publishedViewport.current = next;
+      emittedViewports.current.add(next);
       setLocalViewport(next);
       current.current.props.onViewportChange?.(next);
     }
@@ -525,14 +539,16 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         if (!(target instanceof HTMLElement) ||
           !target.matches('textarea:not(:disabled):not([readonly]),input:not(:disabled):not([readonly]),[contenteditable="true"]')) return;
         const panel = target.closest<HTMLElement>('.owg-node-panel');
-        const { viewport, size } = current.current;
-        if (!panel || viewport.k >= 0.9) return;
-        const bounds = panel.getBoundingClientRect(), canvasBounds = canvas.getBoundingClientRect();
-        const centerX = (bounds.left + bounds.width / 2 - canvasBounds.left - viewport.x) / viewport.k;
-        const top = (bounds.top - canvasBounds.top - viewport.y) / viewport.k;
-        const next = { x: navigationX(centerX, bounds.width / viewport.k, 1), y: size.height / 2 - top, k: 1 };
-        const pending = viewportAnimation.current?.target;
-        if (pending && pending.k === next.k && Math.abs(pending.x - next.x) < 0.01 && Math.abs(pending.y - next.y) < 0.01) return;
+        const { viewport, size, props } = current.current;
+        const node = props.graph.nodes.find(n => n.id === panel?.dataset.panelNodeId);
+        if (!panel || !node) return;
+        const nav = navigationArea();
+        const panelRect = panel.getBoundingClientRect(), canvasRect = canvas.getBoundingClientRect();
+        const area = editorFreeArea({ x: nav?.left ?? 0, y: 80,
+          width: nav ? nav.right - nav.left : size.width, height: Math.max(1, size.height - 160) },
+          { x: panelRect.x - canvasRect.x, y: panelRect.y - canvasRect.y, width: panelRect.width, height: panelRect.height });
+        const next = editorViewport(node, viewportAnimation.current?.target ?? viewport, area, nav?.centerX ?? size.width / 2);
+        if (!next) return;
         animateViewport(next, 140);
       };
       // Native textareas emit input; rich prompts also report custom edits
@@ -600,48 +616,6 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     useEffect(() => {
       if (props.locateNodeId) locate(props.locateNodeId);
     }, [props.locateNodeId, props.graph.id]);
-    useEffect(() => {
-      if (!props.focusPanelNodeId) return;
-      const n = current.current.props.graph.nodes.find(
-        (n) => n.id === props.focusPanelNodeId,
-      );
-      if (!n) return;
-      // Measure the mounted composer in world units: its height depends on
-      // font metrics and content, not a fixed 338px estimate. Only refocus on
-      // opening or canvas resize; editing must preserve manual pan/zoom.
-      const panel = Array.from(root.current?.querySelectorAll<HTMLElement>(
-        "[data-node-id]",
-      ) ?? []).find((el) => el.dataset.nodeId === n.id)
-        ?.querySelector<HTMLElement>(".owg-node-panel");
-      const panelBounds = panel?.getBoundingClientRect();
-      const panelHeight = panelBounds
-        ? panelBounds.height / current.current.viewport.k
-        : 338;
-      const panelWidth = panelBounds ? panelBounds.width / current.current.viewport.k : Math.max(n.width, 600);
-      const panelX = panelBounds && root.current
-        ? (panelBounds.left - root.current.getBoundingClientRect().left - current.current.viewport.x) / current.current.viewport.k
-        : n.x;
-      const left = Math.min(n.x, panelX),
-        bounds = {
-          x: left,
-          y: n.y - 24,
-          width: Math.max(n.x + n.width, panelX + panelWidth) - left,
-          height: n.height + 24 + 16 + panelHeight,
-        };
-      const area = navigationArea();
-      const available = {
-        width: Math.max(1, (area ? area.right - area.left : size.width) - 60),
-        height: Math.max(1, size.height - 240),
-      };
-      const k = Math.min(1, fitBounds(bounds, available, 0).k);
-      const next = centerOn(
-        { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
-        available,
-        k,
-      );
-      animateViewport({ ...next, x: navigationX(bounds.x + bounds.width / 2, bounds.width, k, 30), y: next.y + 130 });
-    }, [props.focusPanelNodeId, props.graph.id, size.width, size.height]);
-
     useEffect(() => {
       setDraft({});
       setPendingLayout({});
@@ -1505,6 +1479,11 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             />
           )}
         </div>
+        {hasPanel && panelNode && <EditorPanel nodeId={panelNode.id} title={panelNode.title}
+          titlePrefix={props.renderTitlePrefix?.(panelNode)}
+          area={panelArea} defaultBounds={defaultPanelBounds} visible={panelVisible}>
+          {panelContent}
+        </EditorPanel>}
         <div
           className={
             "owg-zoom-controls" +

@@ -199,9 +199,10 @@ export interface VisualizeHostContext {
 }
 /** Full form/state replacements. Refresh is explicit and preserves current form/state. */
 export interface VisualizeBridgeMethods {
+  /** Creates a resource node directly; optional asset fields only occur in legacy receipts. */
   exportAsset: {
     params: { name: string; mime: string; bytes: number };
-    result: { assetId: string; assetVersion: number; resourceId: string; resourceVersion: number; nodeId: string; edgeId: string; mime: string; bytes: number; revisions: VisualizeExpectedRevisions };
+    result: { assetId?: string; assetVersion?: number; resourceId: string; resourceVersion: number; nodeId: string; edgeId: string; mime: string; bytes: number; revisions: VisualizeExpectedRevisions };
   };
   initialize: { params: Record<string, never>; result: VisualizeHostContext };
   readInputs: { params: { refresh: boolean }; result: { inputs: VisualizeInputSnapshot; inputsChanged: boolean; inputError?: VisualizeProtocolError } };

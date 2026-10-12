@@ -688,6 +688,89 @@
 .owg-node-panel {
   max-width: none;
 }
+.owg-fixed-node-panel {
+  --owg-editor-radius: 18px;
+  bottom: auto;
+  transform: none;
+  z-index: 20;
+  overflow: visible;
+  pointer-events: auto;
+  overscroll-behavior: contain;
+}
+.owg-editor-panel-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.owg-editor-panel-content > .prompt-panel {
+  width: 100%;
+  border-radius: var(--owg-editor-radius);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.owg-editor-panel-content .prompt-input {
+  flex: 1;
+  min-height: 70px;
+  display: flex;
+  flex-direction: column;
+}
+.owg-editor-panel-content .prompt-panel .prompt-text-input {
+  height: auto;
+  flex: 1;
+  min-height: 70px;
+}
+.owg-panel-target {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 12px 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--canvas-muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.owg-panel-target-label { flex: none; }
+.owg-panel-target-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.owg-panel-target:active { cursor: grabbing; }
+.owg-panel-target:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; border-radius: 4px; }
+.owg-panel-resize {
+  position: absolute;
+  right: -10px;
+  bottom: -10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 0;
+  color: var(--canvas-muted);
+}
+.owg-panel-resize svg {
+  position: absolute;
+  inset: 0;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+}
+.owg-fixed-node-panel:hover .owg-panel-resize,
+.owg-fixed-node-panel:focus-within .owg-panel-resize,
+.owg-fixed-node-panel[data-panel-dragging] .owg-panel-resize { opacity: 1; }
+.owg-panel-resize:hover,
+.owg-panel-resize:active { background: transparent; color: var(--canvas-text); }
+.owg-canvas .owg-panel-resize:focus-visible { outline: none; }
+.owg-panel-resize:focus-visible { color: var(--canvas-active); }
 .owg-zoom-controls {
   left: 20px;
   bottom: 20px;

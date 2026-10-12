@@ -14,10 +14,19 @@
 
 导入时在目标项目全部工作图（包括归档和回收站）中检查同名。名称未占用时保持原名；冲突时依次使用 `原名 (1)`、`原名 (2)`，直到找到首个可用名称。浏览器临时工作图与工作空间项目使用同一规则。
 
-首次从仓库根目录运行 `npm ci` 和 `npm run build`，构建协议与运行时（Web 类型检查和集成测试引用这些产物），再在本目录运行：
+仅构建 Web 时，在仓库根目录执行：
 
 ```sh
-npm ci
+npm --prefix web-client ci --include=dev
+npm run build:web
+```
+
+Web 使用独立依赖和锁文件，根目录的 `npm ci` 不会安装本目录的依赖；`--include=dev` 确保安装 Vite、TypeScript 等构建工具。生产构建无需协议或工作空间编译产物。
+
+完整 Web 类型检查和集成测试引用协议与工作空间编译产物，须先从仓库根目录运行 `npm ci --include=dev` 和 `npm run build`，再在本目录运行：
+
+```sh
+npm ci --include=dev
 npm run dev
 npm run typecheck
 npm test

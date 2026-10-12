@@ -42,7 +42,8 @@ export function NodeOutline({ nodes, selected, search, selectionRevision, onSele
   useLayoutEffect(() => {
     if (!selectedId) return;
     const item = items.current.get(selectedId);
-    if (!item) return;
+    // Hidden sidebar tabs still share the active tab's scroll container.
+    if (!item || item.getClientRects().length === 0) return;
     const container = scrollContainer(item);
     if (!container) return;
     const containerBounds = container.getBoundingClientRect();

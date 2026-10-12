@@ -43,6 +43,7 @@ import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePla
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES } from '../../../packages/protocol/src/visualize-library';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
 import { SkillsLibrary } from './SkillsLibrary';
+import { RememberedSidebarContent } from './RememberedSidebarContent';
 import { runsForDetail, RunsPanel } from "./RunsPanel";
 import { createRunNotifications } from "./notifications";
 import { RunNotifications } from "./RunNotifications";
@@ -1113,7 +1114,7 @@ export function RealApp() {
             <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{t('Project files')}</button>
             <button className="icon-button sidebar-collapse" aria-label={t('Collapse sidebar')} onClick={() => setLeftOpen(false)}><PanelLeftClose size={18}/></button>
           </div>
-          <div className="sidebar-content">
+          <RememberedSidebarContent viewKey={JSON.stringify([localMode ? 'local' : serviceId, tab === 'skills' ? '' : graph?.projectId ?? project?.projectId ?? '', tab === 'canvas' || tab === 'assets' ? graph?.graphId ?? '' : '', tab])}>
           <div ref={setNodeSidebar} className={tab !== "canvas" ? "real-hidden" : "real-node-sidebar"}/>
           {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''}/>}
           {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position) => { void placeProjectFile(path, position).catch(onError); }}/>}
@@ -1145,7 +1146,7 @@ export function RealApp() {
               <p>{t('Select a target Work Graph to view the asset library.')}</p>
             ))}
 {tab === 'assets' && !assetsAvailable && <p className="muted">{t('Connect a Workspace and select an active project to browse the asset library. Drag local files into the Work Graph or import them from the Add node menu.')}</p>}
-          </div>
+          </RememberedSidebarContent>
           <footer className="sidebar-footer">
             <button className="sidebar-library-link" aria-label={t('Work Graph library')} onClick={() => navigate(() => { enterLibrary.current(); showPage('library'); })}>
               <Layers size={18} aria-hidden="true"/><span>{t('Work Graph library')}</span>

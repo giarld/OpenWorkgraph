@@ -34,6 +34,24 @@ p { margin: 0 0 12px; }
 a { color: var(--link); }
 button, input, select, textarea { font: inherit; color: var(--text); max-width: 100%; accent-color: var(--active); }
 button, input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); padding: 9px 12px; min-height: 44px; }
+/* Render single-select pickers in the iframe's top layer so their anchors follow
+   the work graph transform and the iframe's rendering-density zoom. Native OS
+   popups can use untransformed coordinates in this combination. Keep the select
+   element itself, including browser keyboard, form and change-event behavior. */
+@supports (appearance: base-select) {
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"], select:not([multiple])[size="0"]) {
+    appearance: base-select;
+    &::picker(select) {
+      appearance: base-select;
+      font: inherit; color: var(--text); background: var(--panel);
+      border: 1px solid var(--stroke); border-radius: 8px;
+      max-height: 280px; overflow: auto;
+    }
+    option { padding: 6px 12px; }
+    option:checked, option:hover, option:focus { background: var(--fill); }
+    option:disabled { color: var(--muted); }
+  }
+}
 button { cursor: pointer; background: var(--fill); font-weight: 600; }
 button:hover:not(:disabled), .visualize-secondary:hover:not(:disabled) { background: var(--panel); border-color: var(--active); }
 .visualize-primary { background: var(--text); color: var(--panel); border-color: var(--text); }

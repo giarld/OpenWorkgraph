@@ -1,10 +1,10 @@
 {
   "name": "openworkgraph-web-client",
   "private": true,
-  "version": "0.4.10",
+  "version": "0.4.13",
   "type": "module",
   "scripts": {
-    "prebuild": "node ../scripts/check-versions.mjs --quiet",
+    "prebuild": "node ../scripts/check-versions.mjs --quiet && node ../scripts/check-web-dependencies.mjs",
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json --noEmit && vite build",

@@ -1,7 +1,7 @@
 import type { BundleResource, GraphScope, GraphSnapshot, Json, VisualizeStoredNode } from '../../../packages/protocol/src/index';
 import { bytesBase64 } from '../../../packages/protocol/src/graph-binary';
 import { collectVisualizeAssetReferences } from '../../../packages/protocol/src/visualize-assets';
-import { buildVisualizeToolTemplate, sha256VisualizeLibraryBytes, VISUALIZE_ASSET_MIME, VISUALIZE_LIBRARY_MAX_DECODED_BYTES, VISUALIZE_LIBRARY_MAX_RESOURCES } from '../../../packages/protocol/src/visualize-library';
+import { buildVisualizeToolTemplate, sha256VisualizeLibraryBytes, visualizeAssetFilename, VISUALIZE_ASSET_MIME, VISUALIZE_LIBRARY_MAX_DECODED_BYTES, VISUALIZE_LIBRARY_MAX_RESOURCES } from '../../../packages/protocol/src/visualize-library';
 import { translate } from '../i18n/translate';
 import { graphPath, type Request } from './contracts';
 import { randomId } from '../adapter/random';
@@ -9,7 +9,7 @@ import type { RangeBlob } from '../adapter/transport';
 
 export function visualizeDownloadFilename(title: string): string {
   const name = (title.trim() || translate('Interactive page')).replace(/[\/\\\u0000-\u001f\u007f]/g, '_').slice(0, 220);
-  return /\.owvisualize\.json$/i.test(name) ? name : name + '.owvisualize.json';
+  return visualizeAssetFilename(name);
 }
 
 /** Export a portable tool template without creating or changing a library asset. */

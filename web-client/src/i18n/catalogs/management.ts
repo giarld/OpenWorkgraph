@@ -232,7 +232,7 @@ export const managementZhCN: Record<string, string> = {
   "Reading original image…": "正在读取原图…",
   "Preview image: {name}": "预览图片：{name}",
   "Preview video: {name}": "预览视频：{name}",
-  "Videos": "视频",
+  "Audio & Video": "音视频",
   "Thumbnail unavailable; click to preview": "缩略图暂不可用，点击预览",
   "Loading thumbnail…": "加载缩略图…",
   "Preview: {name}": "预览：{name}",

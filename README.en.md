@@ -19,6 +19,7 @@ Open the [official OpenWorkgraph editor](https://workgraph.giarld.com/) and foll
 Build the protocol package and Agent Service from the repository root:
 
 ```sh
+npm ci --include=dev
 npm run build
 ```
 
@@ -33,9 +34,12 @@ node agent-service/dist/cli.js start
 Build Web Client from the repository root, then serve the production build with Vite Preview at `http://127.0.0.1:4173`:
 
 ```sh
-npm --prefix web-client run build
+npm --prefix web-client ci --include=dev
+npm run build:web
 npm --prefix web-client run preview -- --host 127.0.0.1 --port 4173
 ```
+
+Web Client has separate dependencies and a lockfile; running `npm ci` at the root does not install them. Run the Web installation command above before the first build. `--include=dev` installs build tools such as TypeScript and Vite. Building only Web does not require an Agent Service build.
 
 After opening Web Client, enter the Workspace address and click “Generate client code.” Run the following command on the machine hosting the Workspace, using the 8-digit client code shown in the browser. Verify the origin and public key fingerprint before approving. The browser polls for approval, proves possession of the private key, exchanges communication credentials, and then connects automatically:
 

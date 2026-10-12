@@ -154,6 +154,34 @@ export function validateVisualizeConfiguration(previous: Json | undefined, next:
   if (previous !== undefined && ['page', 'form', 'state'].some(field => canonical(old?.[field as keyof VisualizeNodeContent] ?? null) !== canonical(content[field as keyof VisualizeNodeContent] ?? null)))
     throw Error(translate('Ordinary edits cannot replace the visualization page, business form, or view state.'));
 }
+/** Configuration edits compare only fields the editor owns. Runtime snapshots
+ * remain authoritative even when a page saves state while a draft is open. */
+export function sameVisualizeConfiguration(a: Json, b: Json): boolean {
+  const configuration = (value: Json) => Object.fromEntries(Object.entries(validateVisualizeNodeContent(value)).filter(([key]) => !['page', 'form', 'state'].includes(key)));
+  return canonical(configuration(a)) === canonical(configuration(b));
+}
+export function mergeVisualizeConfiguration(base: Json, edited: Json, current: Json): Json {
+  validateVisualizeConfiguration(base, edited);
+  const latest = validateVisualizeNodeContent(current);
+  const merged = { ...(edited as Record<string, Json>) };
+  for (const field of ['page', 'form', 'state'] as const) {
+    delete merged[field];
+    if (latest[field] !== undefined) merged[field] = structuredClone(latest[field]) as unknown as Json;
+  }
+  return merged;
+}
+/** Only the target's interaction saves may be reconciled during generation
+ * submission. Other nodes remain inputs, and a changed page is a new source. */
+export function sameVisualizeGenerationInputs(a: GraphSnapshot, b: GraphSnapshot, nodeId: string): boolean {
+  const snapshot = (graph: GraphSnapshot) => ({
+    serviceId: graph.serviceId, projectId: graph.projectId, graphId: graph.graphId, archived: graph.archived, trashed: graph.trashed,
+    edges: graph.edges,
+    nodes: graph.nodes.map(({ x, y, width, height, contentVersion, ...node }) => node.id !== nodeId
+      ? { ...node, contentVersion }
+      : { ...node, content: Object.fromEntries(Object.entries(validateVisualizeNodeContent(node.content)).filter(([key]) => !['form', 'state'].includes(key))) }),
+  });
+  return canonical(snapshot(a)) === canonical(snapshot(b));
+}
 const portableMime = (bytes: Uint8Array, declared: string) => {
   const detected = sniffResourceMime(bytes);
   const mime = declared.toLowerCase();

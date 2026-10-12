@@ -1,5 +1,7 @@
 export const componentsZhCN: Record<string, string> = {
-  "Asset saved to the library and added to the Work Graph.": "资产已保存到资产库并添加到工作图。",
+  "Move prompt editor": "移动提示词编辑区",
+  "Resize prompt editor": "调整提示词编辑区大小",
+  "Output added to the Work Graph.": "输出已添加到工作图。",
   "Work Graph": "工作图",
   "Pasted text": "粘贴文本",
   "Node connections": "节点连线",

@@ -761,7 +761,8 @@ pre {
   outline: none;
 }
 .prompt-panel:has(.prompt-text-input:focus-visible) {
-  box-shadow: 0 0 0 2px var(--active), 0 8px 24px #00000012;
+  border-color: var(--muted);
+  box-shadow: 0 8px 24px #00000012;
 }
 .prompt-panel footer {
   display: flex;

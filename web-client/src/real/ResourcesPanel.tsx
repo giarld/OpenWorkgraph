@@ -1,7 +1,7 @@
 import { useNodeViewport } from '../canvas/NodeViewport';
 import { VisualizeAssetLogo } from './VisualizeAssetLogo';
 import { VisualizeAssetPreview } from './VisualizeAssetPreview';
-import { VISUALIZE_ASSET_MIME } from '../../../packages/protocol/src/visualize-library';
+import { isVisualizeAssetFilename, visualizeAssetFilename, VISUALIZE_ASSET_MIME } from '../../../packages/protocol/src/visualize-library';
 import { RefreshIcon } from '../components/RefreshIcon';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ImagePreviewMetadata } from './ImagePreviewMetadata';
@@ -109,13 +109,14 @@ export function isConfirmedResourceConflict(error: unknown): boolean {
 type ResourceOperation = { label: string; run: () => Promise<void>; canEnd?: () => boolean; refreshOnSuccess?: boolean };
 
 /** A filename marks an upload candidate; only Workspace validation assigns presentation. */
-export function visualizeUploadMime(file: File): string | undefined { return /[.]owvisualize[.]json$/i.test(file.name) ? VISUALIZE_ASSET_MIME : undefined; }
+export function visualizeUploadMime(file: File): string | undefined { return isVisualizeAssetFilename(file.name) ? VISUALIZE_ASSET_MIME : undefined; }
 /** Retains original request bodies and keys after ALL failures, including an
  * unknown commit result. Retry this job; never substitute a new finish key. */
 export function createResourceUpload(request: ResourceRequest, projectId: string, file: File, target: Target, mimeOverride?: string) {
   const base = projectPath(projectId) + '/uploads';
-  const start = { name: file.name, mime: mimeOverride ?? fileMime(file), bytes: file.size, idempotencyKey: key() };
-  const finish = { ...target, idempotencyKey: key() };
+  const mime = mimeOverride ?? fileMime(file);
+  const start = { name: mime === VISUALIZE_ASSET_MIME ? visualizeAssetFilename(file.name) : file.name, mime, bytes: file.size, idempotencyKey: key() };
+  const finish = { ...target, name: mime === VISUALIZE_ASSET_MIME ? visualizeAssetFilename(target.name) : target.name, idempotencyKey: key() };
   let status: UploadStatus | undefined;
   let chunk: { data: string; offset: number; idempotencyKey: string } | undefined;
   let finishing = false;
@@ -464,7 +465,7 @@ function AssetPreviewDialog({ request, path, asset, onClose, onError }: { reques
   </section></div>, document.body);
 }
 
-function AssetDownloadButton({ request, path, name, ready, onError }: { request: ResourceRequest; path: string; name: string; ready: boolean; onError: (error: unknown) => void }) {
+function AssetDownloadButton({ request, path, name, ready, onError, visualize = false }: { request: ResourceRequest; path: string; name: string; ready: boolean; onError: (error: unknown) => void; visualize?: boolean }) {
   const { t } = useI18n();
   const [downloading, setDownloading] = useState(false);
   const running = useRef(false);
@@ -489,7 +490,7 @@ function AssetDownloadButton({ request, path, name, ready, onError }: { request:
       const url = URL.createObjectURL(new Blob([blob], { type: 'application/octet-stream' }));
       urls.current.add(url);
       const anchor = document.createElement('a');
-      anchor.href = url; anchor.download = name.replaceAll(/[\\/]/g, '_');
+      anchor.href = url; anchor.download = (visualize ? visualizeAssetFilename(name) : name).replaceAll(/[\\/]/g, '_');
       document.body.append(anchor); anchor.click(); anchor.remove();
       setTimeout(() => { if (urls.current.delete(url)) URL.revokeObjectURL(url); }, 1000);
     } catch (error) {
@@ -521,6 +522,17 @@ function AssetMenu({ name, open, onToggle, onClose, children }: { name: string; 
   </div>;
 }
 
+const ASSET_GROUPS_STORAGE_KEY = 'openworkgraph:asset-library-collapsed-groups:v1';
+function readCollapsedAssetGroups(): Record<string, boolean> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ASSET_GROUPS_STORAGE_KEY) ?? 'null');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      return Object.fromEntries(['visualize', 'images', 'videos', 'texts', 'files'].filter(id => saved[id] === true).map(id => [id, true]));
+    }
+  } catch { /* Invalid or unavailable preferences use expanded groups. */ }
+  return {};
+}
+
 export function ResourcesPanel(props: ResourcesPanelProps) { return <ResourcesPanelScope key={JSON.stringify([props.projectId, props.ownerProjectId ?? props.projectId, props.graphId])} {...props} />; }
 function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectId, ownerProjectId = projectId, projects = [], graphId, readOnly, onPlace, onError }: ResourcesPanelProps) {
   const { t } = useI18n();
@@ -539,7 +551,11 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   }, []);
   const [uploadProjectId, setUploadProjectId] = useState(ownerProjectId);
   const [uploadShared, setUploadShared] = useState(false);
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(readCollapsedAssetGroups);
+  useEffect(() => {
+    try { localStorage.setItem(ASSET_GROUPS_STORAGE_KEY, JSON.stringify(collapsed)); }
+    catch { /* Group controls remain available without browser storage. */ }
+  }, [collapsed]);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [refresh, setRefresh] = useState(0);
@@ -620,7 +636,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   }
   function chooseFile(file: File) {
     void execute({ label: t('Check for assets with the same name'), run: async () => {
-      const matches = await request<LibraryAsset[]>(projectPath(uploadProjectId) + '/assets/same-name', { name: file.name });
+      const matches = await request<LibraryAsset[]>(projectPath(uploadProjectId) + '/assets/same-name', { name: visualizeUploadMime(file) ? visualizeAssetFilename(file.name) : file.name });
       // The same-name endpoint is already restricted to the target library project.
       // Its real project ID may differ from a browser bridge's routing alias.
       if (mounted.current) { setSelection({ file, matches, projectId: uploadProjectId, shared: uploadShared }); setChoice(''); setUploadOpen(false); }
@@ -683,9 +699,9 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
   const groups = [
     { id: 'visualize', label: t('Interactive Visualizations'), Icon: PanelsTopLeft, items: assets.filter(isVisualizeLibraryAsset) },
     { id: 'images', label: t('Images'), Icon: Image, items: ordinaryAssets.filter(a => a.current.mime.startsWith('image/')) },
-    { id: 'videos', label: t('Videos'), Icon: FileVideo, items: ordinaryAssets.filter(a => a.current.mime.startsWith('video/')) },
+    { id: 'videos', label: t('Audio & Video'), Icon: FileVideo, items: ordinaryAssets.filter(a => /^(audio|video)\//.test(a.current.mime)) },
     { id: 'texts', label: t('Documents'), Icon: FileText, items: ordinaryAssets.filter(a => a.current.mime.startsWith('text/') || a.current.mime === 'application/pdf') },
-    { id: 'files', label: t('Other files'), Icon: File, items: ordinaryAssets.filter(a => !a.current.mime.startsWith('image/') && !a.current.mime.startsWith('video/') && !a.current.mime.startsWith('text/') && a.current.mime !== 'application/pdf') },
+    { id: 'files', label: t('Other files'), Icon: File, items: ordinaryAssets.filter(a => !/^(image|audio|video|text)\//.test(a.current.mime) && a.current.mime !== 'application/pdf') },
   ];
   const availableProjects = projects.filter(p => p.state === 'active');
   return <section className="ow-resources-panel" aria-label={t('Asset library')} aria-busy={busy}>
@@ -714,14 +730,14 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
             cancelDrag.current = beginAssetDrag(event.dataTransfer, { request, projectId, graphId }, position => { if (dragAllowed.current && mounted.current) mutate(asset, 'copy', position); });
             setOpenAssetMenu(undefined); setUploadOpen(false);
           }} onDragEnd={() => { cancelDrag.current?.(); cancelDrag.current = undefined; }}>
-          {group.id === 'visualize' ? <VisualizeAssetLogo key={base + ':' + asset.id + ':' + asset.current.version + ':' + asset.current.presentation?.logoSha256} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.current.presentation?.title || asset.name} logoSha256={asset.current.presentation?.logoSha256} onPreview={() => setPreview(asset)} /> : group.id === 'images' || group.id === 'videos' ? <AssetThumbnail key={base + ':' + asset.current.version} video={group.id === 'videos'} thumbnailRevision={group.id === 'videos' ? videoCoverRevisions[videoCoverKey(asset)] : undefined} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : group.id === 'texts' ? <TextThumbnail request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} mime={asset.current.mime} onPreview={() => setPreview(asset)} /> : <button className="ow-assets-file-preview" onClick={() => setPreview(asset)} aria-label={t('Preview: {name}', { name: asset.name })}><File size={22} /><span>{asset.name}</span></button>}
+          {group.id === 'visualize' ? <VisualizeAssetLogo key={base + ':' + asset.id + ':' + asset.current.version + ':' + asset.current.presentation?.logoSha256} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.current.presentation?.title || asset.name} logoSha256={asset.current.presentation?.logoSha256} onPreview={() => setPreview(asset)} /> : group.id === 'images' || asset.current.mime.startsWith('video/') ? <AssetThumbnail key={base + ':' + asset.current.version} video={group.id === 'videos'} thumbnailRevision={group.id === 'videos' ? videoCoverRevisions[videoCoverKey(asset)] : undefined} request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} onPreview={() => setPreview(asset)} /> : group.id === 'texts' ? <TextThumbnail request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} mime={asset.current.mime} onPreview={() => setPreview(asset)} /> : <button className="ow-assets-file-preview" onClick={() => setPreview(asset)} aria-label={t('Preview: {name}', { name: asset.name })}><File size={22} /><span>{asset.name}</span></button>}
           <span className="ow-assets-type-badge">{assetTypeLabel(asset)}</span>
           <AssetSharingBadge asset={asset} ownerProjectId={ownerProjectId} />
           <div className="ow-assets-quick-actions" role="group" aria-label={t('Quick actions: {name}', { name: asset.name })}>
             {!asset.deleted && <button type="button" disabled={disabled} aria-label={t('Copy independently to Work Graph: {name}', { name: asset.name })} title={t('Copy independently to Work Graph')} onClick={() => mutate(asset, 'copy')}><Plus size={18} aria-hidden="true" /></button>}
             {!asset.deleted && asset.projectId === ownerProjectId && <button type="button" disabled={disabled} aria-label={t('Delete asset: {name}', { name: asset.name })} title={t('Delete asset')} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}><Trash2 size={16} aria-hidden="true" /></button>}
           </div>
-          <div className="ow-assets-card-details"><AssetFilename name={asset.name} bytes={asset.current.bytes} /><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={event => { if (isVisualizeLibraryAsset(asset)) event.currentTarget.closest('.ow-assets-card')?.querySelector<HTMLButtonElement>('.ow-assets-thumbnail')?.focus(); setPreview(asset); }}>{t('Preview')}</button><AssetDownloadButton request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} ready={ready} onError={onError} />{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}>{t('Delete')}</button></>}</AssetMenu></div>
+          <div className="ow-assets-card-details"><AssetFilename name={asset.name} bytes={asset.current.bytes} /><AssetMenu name={asset.name} open={openAssetMenu === asset.id} onToggle={() => setOpenAssetMenu(v => v === asset.id ? undefined : asset.id)} onClose={() => setOpenAssetMenu(undefined)}><button onClick={event => { if (isVisualizeLibraryAsset(asset)) event.currentTarget.closest('.ow-assets-card')?.querySelector<HTMLButtonElement>('.ow-assets-thumbnail')?.focus(); setPreview(asset); }}>{t('Preview')}</button><AssetDownloadButton request={request} path={base + '/assets/' + encodeURIComponent(asset.id) + '/versions/' + asset.current.version} name={asset.name} ready={ready} onError={onError} visualize={isVisualizeLibraryAsset(asset)} />{asset.deleted ? asset.projectId === ownerProjectId && <button disabled={disabled} onClick={() => mutate(asset, 'restore')}>{t('Restore')}</button> : <button disabled={disabled} onClick={() => mutate(asset, 'copy')}>{t('Copy independently to Work Graph')}</button>}{!asset.deleted && asset.projectId === ownerProjectId && <><button disabled={disabled} onClick={() => mutate(asset, 'share')}>{asset.shared ? t('Stop sharing') : t('Share')}</button><button disabled={disabled} onClick={() => setConfirmation({ text: t('Move “{name}” to deleted assets? Work Graph copies are unaffected.', { name: asset.name }), run: () => mutate(asset, 'delete') })}>{t('Delete')}</button></>}</AssetMenu></div>
         </li>)}</ul>}
       </React.Fragment>)}
       {(page > 0 || assets.length === 100) && <nav className="ow-assets-pagination" aria-label={t('Asset pagination')}><button aria-label={t('Previous page')} disabled={page === 0 || loading} onClick={() => setPage(v => v - 1)}><ChevronLeft size={16} /></button><span>{t('Page {page}', { page: page + 1 })}</span><button aria-label={t('Next page')} disabled={assets.length < 100 || loading} onClick={() => setPage(v => v + 1)}><ChevronRight size={16} /></button></nav>}

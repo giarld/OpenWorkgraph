@@ -251,8 +251,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
           }
           else if (request.method === "readInputs") setChanged((response.result as { inputsChanged: boolean }).inputsChanged);
           else if (["saveState", "updateForm", "createSuccessors", "requestLayout", "exportAsset"].includes(request.method)) {
-            setNotice(t(request.method === "createSuccessors" ? "Successors created. Run them manually when ready." : request.method === "exportAsset" ? "Asset saved to the library and added to the Work Graph." : "Saved"));
-            if (request.method === "exportAsset") current.onAssetsChanged?.();
+            setNotice(t(request.method === "createSuccessors" ? "Successors created. Run them manually when ready." : request.method === "exportAsset" ? "Output added to the Work Graph." : "Saved"));
             current.onChanged();
           }
         }

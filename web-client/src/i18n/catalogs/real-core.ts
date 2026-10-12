@@ -1,6 +1,7 @@
 import { zhCN } from '../messages';
 
 export const realCoreZhCN: Record<string, string> = {
+  'The visualization configuration changed. Review the latest content before saving.': '可视化交互节点的配置已变化，请核对最新内容后再保存。',
   'Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.': '请连接工作空间并导入临时工作图，再手动提交交互页面生成。',
   'Page generation requires a visualization node.': '生成交互页面需要可视化交互节点。',
   'Visualization nodes can only submit page generation tasks.': '可视化交互节点仅支持提交页面生成任务。',

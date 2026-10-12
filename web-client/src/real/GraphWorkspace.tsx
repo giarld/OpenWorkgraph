@@ -1,6 +1,6 @@
 import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
 import { VisualizeNodePreview } from './VisualizeNodePreview';
-import { openVisualizeStandalone, visualizeStandaloneUrl } from './visualize-download';
+import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandaloneUrl } from './visualize-download';
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
 import { NodeTitleInput } from '../components/NodeTitleInput';
@@ -862,8 +862,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         const source = snapshot.nodes.find(item => item.id === nodeId);
         const value = object(source?.content ?? null), page = object(value.page), form = object(value.form), viewState = object(value.state);
         if (!source || source.type !== 'visualize' || !page.resource || !form.resource || !viewState.version) throw Error(t('Generate an interactive page before saving it to the asset library.'));
-        const title = Array.from(String(value.title ?? '').trim() || t('Interactive page')).map(char => char.charCodeAt(0) < 32 || [47, 92, 127].includes(char.charCodeAt(0)) ? '_' : char).join('').slice(0, 220);
-        const name = /[.]owvisualize[.]json$/i.test(title) ? title : title + '.owvisualize.json';
+        const name = visualizeDownloadFilename(String(value.title ?? ''));
         job = { submitted: false, body: { name, mode: 'new', expectedContentVersion: source.contentVersion, expectedPageRevision: page.revision, expectedFormVersion: form.version, expectedStateVersion: viewState.version, expectedExecutionRevision: snapshot.executionRevision, expectedLayoutRevision: snapshot.layoutRevision, idempotencyKey: randomId() } };
         visualizeSaveJobs.current.set(nodeId, job);
       }

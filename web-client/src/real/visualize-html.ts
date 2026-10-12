@@ -163,6 +163,9 @@ function bootstrap(config: Bootstrap): void {
   }, { passive: false, capture: true });
   if (config.expanded) window.addEventListener('keydown', event => {
     if (event.key !== 'Escape' || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    // The select's top-layer picker handles Escape after event dispatch. Let it
+    // close before a later Escape dismisses the expanded viewer.
+    if (CSS.supports('selector(select:open)') && document.querySelector('select:open')) return;
     event.preventDefault();
     window.parent.postMessage({ channel: 'openworkgraph.visualize', version: 1, sessionId: config.sessionId, nodeId: config.nodeId, type: 'view-event', event: 'dismiss' }, config.hostOrigin);
   });

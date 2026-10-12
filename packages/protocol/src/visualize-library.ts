@@ -6,6 +6,12 @@ import { normalizeVisualizePageLogo } from './visualize-logo.js';
 import { checkedVisualizeJson, validateVisualizeForm, validateVisualizeNodeContent, validateVisualizePagePackage, validateVisualizeSize, VisualizeValidationError } from './visualize-validation.js';
 
 export const VISUALIZE_ASSET_MIME = 'application/vnd.openworkgraph.visualize+json' as const;
+export const VISUALIZE_ASSET_EXTENSION = '.owgv' as const;
+const visualizeAssetSuffix = /(?:[.]owgv|[.]owvisualize[.]json)$/i;
+/** Extensions only identify candidates; package validation remains mandatory. */
+export function isVisualizeAssetFilename(name: string): boolean { return visualizeAssetSuffix.test(name); }
+/** Always emit the dedicated extension, including when re-exporting legacy files. */
+export function visualizeAssetFilename(name: string): string { return name.replace(visualizeAssetSuffix, '') + VISUALIZE_ASSET_EXTENSION; }
 export const VISUALIZE_LIBRARY_FORMAT = 'openworkgraph.visualize-asset' as const;
 export const VISUALIZE_LIBRARY_VERSION = 1 as const;
 export const VISUALIZE_LIBRARY_MIN_VERSION = 1 as const;

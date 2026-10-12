@@ -7,7 +7,7 @@ import type { ImageRoute } from '../../../packages/protocol/src/index';
 import { graphPath, errorCode, messageOf } from "./contracts";
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
-import { validateVisualizeConfiguration } from './temporary-store';
+import { mergeVisualizeConfiguration, sameVisualizeConfiguration, sameVisualizeGenerationInputs, validateVisualizeConfiguration } from './temporary-store';
 import { registerClipboardRequest, takeVisualizePasteIntents, createVisualizePasteWorkflow } from './graph-clipboard';
 export type SaveState =
   "saved" | "dirty" | "saving" | "failed" | "conflict" | "recovery";
@@ -16,6 +16,8 @@ export interface Draft {
   draftId?: string;
   nodeId: string;
   baseVersion: number;
+  /** Original visualize configuration, for safe rebasing across runtime saves. */
+  baseContent?: Json;
   content: Json;
   state: SaveState;
   error?: string;
@@ -30,7 +32,7 @@ export interface EditorState {
 }
 export interface CommandReceipt { before: GraphSnapshot; after: GraphSnapshot; operations: GraphOperation[] }
 type CommandBody = { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; operations: GraphOperation[] };
-type PendingCommand = { operations: GraphOperation[]; epoch: number; body?: CommandBody; before?: GraphSnapshot; resolve: (graph: GraphSnapshot) => void; reject: (error: unknown) => void };
+type PendingCommand = { operations: GraphOperation[]; epoch: number; body?: CommandBody; before?: GraphSnapshot; visualizeDraft?: Draft; resolve: (graph: GraphSnapshot) => void; reject: (error: unknown) => void };
 export const COMMAND_MAX_ATTEMPTS = 3;
 /** Service snapshots are authoritative. Drafts never become server state without CAS acknowledgement. */
 export class GraphEditor {
@@ -172,6 +174,7 @@ export class GraphEditor {
       draftId: this.writerId + ':' + randomId(),
       nodeId,
       baseVersion: prior?.baseVersion ?? node.contentVersion,
+      ...(node.type === 'visualize' ? { baseContent: structuredClone(prior?.baseContent ?? node.content) } : {}),
       content: structuredClone(content),
       state: "dirty",
     };
@@ -266,7 +269,7 @@ export class GraphEditor {
       return pending;
     };
   }
-  private prepareQueuedCommand(operations: GraphOperation[]): () => Promise<GraphSnapshot> {
+  private prepareQueuedCommand(operations: GraphOperation[], visualizeDraft?: Draft): () => Promise<GraphSnapshot> {
     const captured = structuredClone(limitNodeTitleOperations(operations));
     let pending: Promise<GraphSnapshot> | undefined;
     let completed: GraphSnapshot | undefined;
@@ -278,7 +281,7 @@ export class GraphEditor {
       try { this.writable(); } catch (error) { return Promise.reject(error); }
       let entry!: PendingCommand;
       pending = new Promise<GraphSnapshot>((resolve, reject) => {
-        entry = { operations: captured, epoch: this.commandEpoch, body, before: original, resolve, reject };
+        entry = { operations: captured, epoch: this.commandEpoch, body, before: original, visualizeDraft, resolve, reject };
         this.commands.push(entry);
       }).then(result => { completed = result; return result; })
         .finally(() => { body = entry.body; original = entry.before; pending = undefined; });
@@ -346,6 +349,14 @@ export class GraphEditor {
             if (command.epoch !== this.commandEpoch || this.commands[0] !== command)
               throw Error(translate("The connection changed. Run the operation again."));
             const g = this.confirmed;
+            if (!command.body && command.visualizeDraft) {
+              const draft = command.visualizeDraft;
+              const node = g.nodes.find(n => n.id === draft.nodeId);
+              if (!node || node.readOnly || node.type !== 'visualize') throw Error(translate('The original node was deleted or is read-only. The draft was kept for copying.'));
+              if (draft.baseContent === undefined || !sameVisualizeConfiguration(draft.baseContent, node.content))
+                throw Object.assign(Error(translate('The visualization configuration changed. Review the latest content before saving.')), { code: 'REVISION_CONFLICT' });
+              command.operations = limitNodeTitleOperations([{ type: 'node.content', nodeId: draft.nodeId, expectedContentVersion: node.contentVersion, content: mergeVisualizeConfiguration(draft.baseContent, draft.content, node.content) }]);
+            }
             command.before ??= structuredClone(g);
             command.body ??= { idempotencyKey: randomId(), expectedExecutionRevision: g.executionRevision, expectedLayoutRevision: g.layoutRevision, operations: command.operations };
             try {
@@ -419,11 +430,11 @@ export class GraphEditor {
         try {
           const node = this.confirmed.nodes.find(n => n.id === draft.nodeId);
           if (!node || node.readOnly) throw Error(translate('The original node was deleted or is read-only. The draft was kept for copying.'));
-          if (node.type === 'visualize') validateVisualizeConfiguration(node.content, draft.content);
+          if (node.type === 'visualize') validateVisualizeConfiguration(draft.baseContent ?? node.content, draft.content);
           const result = await this.prepareQueuedCommand([{
             type: 'node.content', nodeId: draft.nodeId,
             expectedContentVersion: draft.baseVersion, content: draft.content,
-          }])();
+          }], node.type === 'visualize' ? structuredClone(draft) : undefined)();
           if (epoch !== this.connectionEpoch)
             throw Error(translate("The connection changed. Read the Workspace state before restoring the draft."));
           ++this.readSequence;
@@ -439,6 +450,7 @@ export class GraphEditor {
                       {
                         ...d,
                         baseVersion: accepted?.contentVersion ?? d.baseVersion,
+                        ...(accepted?.type === 'visualize' ? { baseContent: structuredClone(accepted.content), content: mergeVisualizeConfiguration(d.baseContent ?? draft.content, d.content, accepted.content) } : {}),
                         state: "dirty" as const,
                       },
                     ],
@@ -494,7 +506,12 @@ export class GraphEditor {
     }
     if (!node || node.readOnly)
       throw Error(translate("The original node was deleted or is read-only. The draft was kept for copying."));
-    if (node.type === 'visualize') validateVisualizeConfiguration(node.content, content);
+    if (node.type === 'visualize') {
+      // An explicit recovery choice may retain an old runtime snapshot or use
+      // the displayed latest one, but cannot author a new page/form/state.
+      try { content = mergeVisualizeConfiguration(selected.content, content, node.content); }
+      catch { content = mergeVisualizeConfiguration(node.content, content, node.content); }
+    }
     const draftId = this.writerId + ':' + randomId();
     this.emit({
       drafts: this.state.drafts.map((d) =>
@@ -503,6 +520,7 @@ export class GraphEditor {
               draftId,
               nodeId,
               baseVersion: node.contentVersion,
+              ...(node.type === 'visualize' ? { baseContent: structuredClone(node.content) } : {}),
               content: structuredClone(content),
               state: "dirty",
             }
@@ -524,30 +542,43 @@ export class GraphEditor {
     if (node.type === 'visualize' && kind !== 'visualize_generation') throw Error(translate('Visualization nodes can only submit page generation tasks.'));
     if (kind === 'visualize_generation' && node.type !== 'visualize') throw Error(translate('Page generation requires a visualization node.'));
     if (g.serviceId === 'browser-local' && kind === 'visualize_generation') throw Object.assign(Error(translate('Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.')), { code: 'TEMPORARY_SERVICE_REQUIRED' });
-    const preview = await this.request<{
-      canSubmit: boolean;
-      issues: { reason: string }[];
-    }>(graphPath(g.projectId, g.graphId) + "/input-preview", { nodeId });
-    if (!preview.canSubmit)
-      throw Error(preview.issues.map((i) => i.reason).join("；"));
-    if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
-    // No deferred auto-run: edits made while preview was in flight abort this click.
-    if (
-      epoch !== this.connectionEpoch ||
-      this.state.drafts.length ||
-      this.state.graph.executionRevision !== g.executionRevision
-    )
-      throw Error(translate("Inputs or the connection changed during preview. Click Run again."));
-    this.writable();
-    return this.request<Run>(graphPath(g.projectId, g.graphId) + "/runs", {
-      nodeId,
-      kind,
-      idempotencyKey: randomId(),
-      expectedExecutionRevision: g.executionRevision,
-      ...(modelOverride ? { modelOverride } : {}),
-      ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
-      ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
-    });
+    const visualize = kind === 'visualize_generation';
+    const changed = () => Error(translate("Inputs or the connection changed during preview. Click Run again."));
+    for (let attempt = 0; attempt < (visualize ? COMMAND_MAX_ATTEMPTS : 1); attempt++) {
+      if (visualize) {
+        await this.refresh();
+        if (epoch !== this.connectionEpoch || this.state.drafts.length || !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
+      }
+      this.writable();
+      if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
+      const current = visualize ? this.state.graph : g;
+      const preview = await this.request<{
+        canSubmit: boolean;
+        issues: { reason: string }[];
+      }>(graphPath(current.projectId, current.graphId) + "/input-preview", { nodeId });
+      if (!preview.canSubmit) throw Error(preview.issues.map((i) => i.reason).join("；"));
+      if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
+      // Local edits and changed generation inputs always abort this click.
+      if (epoch !== this.connectionEpoch || this.state.drafts.length || visualize && !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
+      if (this.state.graph.executionRevision !== current.executionRevision) {
+        if (visualize && attempt + 1 < COMMAND_MAX_ATTEMPTS) continue;
+        throw changed();
+      }
+      this.writable();
+      try {
+        return await this.request<Run>(graphPath(current.projectId, current.graphId) + "/runs", {
+          nodeId, kind, idempotencyKey: randomId(), expectedExecutionRevision: current.executionRevision,
+          ...(modelOverride ? { modelOverride } : {}),
+          ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
+          ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
+        });
+      } catch (error) {
+        // Only a definite revision rejection can start a fresh submission.
+        // Unknown results are returned to the caller without another Run.
+        if (!visualize || errorCode(error) !== 'REVISION_CONFLICT' || attempt + 1 === COMMAND_MAX_ATTEMPTS) throw error;
+      }
+    }
+    throw changed();
   }
   dispose() {
     clearTimeout(this.timer);

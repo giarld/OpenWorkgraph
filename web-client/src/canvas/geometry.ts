@@ -23,6 +23,20 @@ export function navigationCenterX(width: number, area: NavigationArea, padding =
 export interface Viewport extends Point {
   k: number;
 }
+/** Keep the edited node readable while fitting above the screen-space composer. */
+export function editorViewport(node: Rect, current: Viewport, area: Rect, centerX: number, force = false): Viewport | null {
+  const fitting = clampZoom(Math.min(Math.max(1, area.width - 48) / Math.max(1, node.width),
+    Math.max(1, area.height - 72) / Math.max(1, node.height + 24)));
+  const comfortable = clampZoom(Math.min(1, fitting, 480 / Math.max(1, node.width)));
+  const acceptable = current.k >= comfortable * 0.8 && current.k <= comfortable * 1.25 && current.k <= fitting;
+  if (!force && acceptable) return null;
+  const k = force && acceptable ? current.k : comfortable;
+  return {
+    x: navigationCenterX(node.width * k, { left: area.x, right: area.x + area.width, centerX }, 24) - (node.x + node.width / 2) * k,
+    y: area.y + area.height / 2 - (node.y + (node.height - 24) / 2) * k,
+    k,
+  };
+}
 export const MIN_ZOOM = 0.05;
 export const MAX_ZOOM = 5;
 export function clampZoom(k: number): number {
