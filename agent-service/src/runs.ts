@@ -127,6 +127,7 @@ export class Runs {
   }
   submit(request: SubmitRun, principal = 'local', holdExecution = false): Run {
     if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
+    if (request.agent && ['image_generation'].includes(request.kind)) throw new ServiceError('INVALID_REQUEST', 'Image routes cannot select a generic AgentPlugin');
     return this.repo.idempotent(principal + ':run.submit', request.idempotencyKey, json(request), () => {
       if (request.serviceId !== this.serviceId) throw new ServiceError('SERVICE_MISMATCH', 'Wrong service');
       if (this.repo.setting('acceptingRuns') !== true) throw new ServiceError('MAINTENANCE', 'Service is not accepting runs');
@@ -141,6 +142,7 @@ export class Runs {
       const context: RunContext = { runId: randomUUID(), projectId: request.projectId, graphId: request.graphId, nodeId: request.nodeId, kind: request.kind, baseVersion: Number(row.current_version), canonicalPath: String(row.canonical_path), publicationVersion:request.kind === 'execution' ? 2 : 1 };
       if (this.dependencies.validate) sync(this.dependencies.validate(request, context));
       const snapshot = sync(this.dependencies.freeze(request, context));
+      if (request.agent && (!snapshot.agent || snapshot.agent.backendId !== request.agent.backendId || snapshot.agent.configRevision !== request.agent.configRevision || snapshot.agent.schemaVersion !== request.agent.schemaVersion)) throw new ServiceError('INPUT_BLOCKED', 'Frozen AgentPlugin identity does not match submission');
       const hasImage = Array.isArray(snapshot?.resources) && snapshot.resources.some(item=>item.kind==='image' && item.resource) || Array.isArray(snapshot?.projectFiles) && snapshot.projectFiles.some(item=>item.kind==='image');
       if (!snapshot || (!snapshot.prompt?.trim() && !(request.kind==='image_generation' && hasImage)) || !snapshot.inputDigest || snapshot.executionRevision !== request.expectedExecutionRevision || !Array.isArray(snapshot.resources) || snapshot.projectFiles !== undefined && !Array.isArray(snapshot.projectFiles)) throw new ServiceError('INPUT_BLOCKED', 'Invalid frozen input snapshot');
       const route = request.kind==='image_generation' ? request.imageRoute ?? {type:'codex' as const} : undefined;

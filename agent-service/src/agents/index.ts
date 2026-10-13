@@ -1,0 +1,18 @@
+/** Stable in-process author entry. No database or private transport is required. */
+export * from './contracts.js';
+export { AGENT_PLUGIN_API_VERSION } from '@openworkgraph/protocol';
+export { AgentRegistry } from './registry.js';
+export { normalizeConfiguration, validateConfigurationSchema } from './configuration.js';
+export { AgentDiscovery } from './discovery.js';
+export { AgentSettingsStore, CodexAgentSettingsBinding } from './settings.js';
+export { assertFrozenAgent } from './freezing.js';
+export { AgentOperations } from './operations.js';
+export type { AgentOperation, AgentOperationPhase } from './operations.js';
+export { AgentHostTools } from './host-tools.js';
+export type { AgentHostTool, AgentToolCall, AgentToolResult } from './host-tools.js';
+export { agentGuidance } from './guidance.js';
+export { AgentError } from './errors.js';
+export { AgentControl } from './control.js';
+export { createCodexPlugin } from './codex.js';
+export type { CodexPluginOptions } from './codex.js';
+export type { RunContextRequest } from '../run-context.js';

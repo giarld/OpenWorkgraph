@@ -10,6 +10,7 @@ import { graphPath, messageOf, errorCode, type Request } from "./contracts";
 import { randomId } from "../adapter/random";
 import { useI18n } from "../i18n/I18nProvider";
 import { coordinateVisualizePresentation, type VisualizePresentationStatus } from './visualize-presentation';
+import { useVisualizeDetail } from './use-visualize-detail';
 import "./VisualizeNode.css";
 
 type Bridge = Awaited<ReturnType<typeof openVisualizeBridge>>;
@@ -106,7 +107,9 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   const attach = useRef<() => void>(() => undefined);
   const pushCapabilities = useRef<() => void>(() => undefined);
   const pushVisibility = useRef<() => void>(() => undefined);
-  const [visible, setVisible] = useState(!!props.expanded);
+  const compact = useVisualizeDetail(box, !!props.expanded);
+  const [intersecting, setIntersecting] = useState(!!props.expanded);
+  const visible = intersecting && !compact;
   const [entered, setEntered] = useState(!!props.expanded);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [pageReady, setPageReady] = useState(false);
@@ -114,16 +117,26 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   const [awaitingViewport, setAwaitingViewport] = useState(false);
   const visibleRef = useRef(visible); visibleRef.current = visible;
   useEffect(() => {
-    if (props.expanded) { setVisible(true); setEntered(true); return; }
+    if (props.expanded) { setIntersecting(true); return; }
     const observer = new IntersectionObserver(entries => {
-      const active = entries.some(entry => entry.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0);
-      setVisible(active); if (active) setEntered(true);
+      const active = entries.some(entry => entry.isIntersecting);
+      setIntersecting(active);
     }, { root: box.current?.closest('.owg-canvas') ?? null });
     if (box.current) observer.observe(box.current);
     return () => observer.disconnect();
   }, [props.expanded]);
+  useEffect(() => { if (visible) setEntered(true); }, [visible]);
   const [document, setDocument] = useState<string>();
   const [logoSvg, setLogoSvg] = useState(VISUALIZE_DEFAULT_LOGO_SVG);
+  // Small nodes need only their stored logo; do not open a bridge or load page assets.
+  useEffect(() => {
+    if (!compact || !intersecting || (!props.online && !props.temporary)) return;
+    let live = true;
+    void props.owner.request<VisualizeStoredNode>(graphPath(props.owner.scope.projectId, props.owner.scope.graphId) + '/visualize/' + encodeURIComponent(props.nodeId)).then(stored => {
+      if (live) setLogoSvg(validateVisualizeLogoSvg(stored.page?.logoSvg) === null ? stored.page!.logoSvg! : VISUALIZE_DEFAULT_LOGO_SVG);
+    }).catch(() => { if (live) setLogoSvg(VISUALIZE_DEFAULT_LOGO_SVG); });
+    return () => { live = false; };
+  }, [compact, intersecting, props.owner, props.nodeId, props.pageRevision, props.online, props.temporary]);
   const [empty, setEmpty] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -362,31 +375,28 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   const disconnected = !props.online && !props.temporary;
   const pageStatus = error || pageLoadError ? 'error' : refreshing ? 'loading' : !visible ? 'paused' : !pageReady ? waitingForConnection || disconnected ? 'waiting' : 'loading' : changed ? 'refresh' : missingInputNames.length ? 'inputs' : 'ready';
   const pageStatusText = t(pageStatus === 'error' ? 'Page load error' : pageStatus === 'waiting' ? 'Waiting to load' : pageStatus === 'loading' ? 'Page loading' : pageStatus === 'paused' ? 'Page paused' : pageStatus === 'refresh' ? 'Page needs refresh' : pageStatus === 'inputs' ? 'Page needs inputs' : 'Page ready');
-  return <div ref={box} className={"ow-visualize-node" + (props.expanded ? " ow-visualize-expanded" : "")} data-visualize-active={visible} data-canvas-interactive={empty ? undefined : true}>
+  const statusText = [pageStatusText, disconnected && t("Workspace disconnected · Saved page remains visible"), props.readOnly && t("Read-only"), notice, missingInputNames.length > 0 && t("Reconnect inputs: {names}", { names: missingInputNames.join('、') })].filter(Boolean).join(' · ');
+  return <div ref={box} className={"ow-visualize-node" + (props.expanded ? " ow-visualize-expanded" : "")} data-visualize-active={visible} data-visualize-compact={compact} data-canvas-draggable={compact ? true : undefined} data-canvas-interactive={empty || compact ? undefined : true}>
+    {compact && <div className="ow-visualize-compact-logo" aria-hidden="true"><img src={'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(logoSvg)} alt="" draggable={false}/></div>}
     {empty ? <button type="button" onClick={props.onOpenPrompt}>{t("Open prompt to generate an interactive page")}</button> : <>
       <div className="ow-visualize-status" role="status" aria-label={t('Node page status')} data-page-status={pageStatus}>
         <span className="ow-visualize-status-message" data-canvas-draggable={props.expanded ? undefined : true}>
           <img className="ow-visualize-node-logo" src={'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(logoSvg)} width={24} height={24} alt="" aria-hidden="true" draggable={false} />
-          <span className="ow-visualize-status-copy">
-          {pageStatusText}
+          <span className="ow-visualize-status-copy" title={statusText}>
+          {statusText}
           </span>
         </span>
+        {missingInputNames.length > 0 && props.onOpenInputs && <button className="ow-visualize-configure-inputs" type="button" disabled={props.readOnly} onPointerDown={event => event.stopPropagation()} onClick={props.onOpenInputs}>{t("Configure references")}</button>}
+        {props.onOpenStandalone && <button className="ow-visualize-header-action ow-visualize-view-standalone" type="button" aria-label={t("View in a separate page")} title={t("View in a separate page")} onClick={props.onOpenStandalone}>
+          <ExternalLink size={18} strokeWidth={1.75} aria-hidden="true"/>
+        </button>}
         {!props.expanded && props.onOpenContent && <button className="ow-visualize-header-action ow-visualize-view-content" type="button" aria-label={t("View node content")} title={t("View node content")} onClick={props.onOpenContent}>
           <Maximize size={16} aria-hidden="true"/>
-        </button>}
-        {props.expanded && props.onOpenStandalone && <button className="ow-visualize-header-action ow-visualize-view-standalone" type="button" aria-label={t("View in a separate page")} title={t("View in a separate page")} onClick={props.onOpenStandalone}>
-          <ExternalLink size={18} strokeWidth={1.75} aria-hidden="true"/>
         </button>}
         <button className="ow-visualize-header-action ow-visualize-refresh-page" type="button" aria-label={t("Refresh page")} title={t("Refresh the page and accept the latest inputs")} aria-busy={refreshLocked} disabled={refreshLocked || (!props.online && !props.temporary)} onClick={reload}>
           <RefreshCw ref={refreshIcon} size={18} strokeWidth={1.75} aria-hidden="true" className={spinning ? "is-spinning" : undefined} style={spinCycles === undefined ? undefined : { animationIterationCount: spinCycles }} onAnimationEnd={stopRefreshAnimation}/>
         </button>
       </div>
-      {(disconnected || props.readOnly || notice || missingInputNames.length > 0) && <div className="ow-visualize-feedback" role="status">
-        {disconnected && <span>{t("Workspace disconnected · Saved page remains visible")}</span>}
-        {props.readOnly && <span>{t("Read-only")}</span>}
-        {notice && <span>{notice}</span>}
-        {missingInputNames.length > 0 && <span>{t("Reconnect inputs: {names}", { names: missingInputNames.join('、') })}{props.onOpenInputs && <button type="button" disabled={props.readOnly} onPointerDown={event => event.stopPropagation()} onClick={props.onOpenInputs}>{t("Configure references")}</button>}</span>}
-      </div>}
       {error ? <div role="alert">{error}<button type="button" disabled={refreshLocked || (!props.online && !props.temporary)} onClick={reload}>{t("Reload page")}</button></div> : document && (visible || frameLoaded) ? <iframe ref={iframe} title={t("Interactive page")} tabIndex={0} sandbox={VISUALIZE_HTML_SANDBOX} allow={VISUALIZE_HTML_PERMISSIONS} referrerPolicy="no-referrer" srcDoc={document} onLoad={() => attach.current()}/> : <p role="status">{t("Loading interactive page…")}</p>}
     </>}
   </div>;

@@ -2,7 +2,7 @@ import type { Json } from './index.js';
 import type { VisualizeBridgeRequest, VisualizeBridgeResponse, VisualizeCapabilityUpdate, VisualizeExpectedRevisions, VisualizeProtocolError } from './visualize.js';
 import { VISUALIZE_BRIDGE_VERSION, VISUALIZE_ERROR_CODES, isVisualizeFeatureSelection } from './visualize.js';
 import { checkedVisualizeJson, validateVisualizeSize, VisualizeValidationError } from './visualize-validation.js';
-import { isSkillName } from './skills.js';
+import { isSkillIdentity, isSkillName } from './skills.js';
 
 export const VISUALIZE_BRIDGE_REQUEST_BYTES = 2_097_152;
 export const VISUALIZE_BRIDGE_RESPONSE_BYTES = 50_331_648;
@@ -63,9 +63,18 @@ export function validateVisualizeBridgeRequest(value: unknown): VisualizeBridgeR
         if (successor.type === 'text') { if (typeof successor.text !== 'string' || successor.text.length > 1_048_576) fail('Invalid successor text'); continue; }
         const prompt = record(successor.prompt); keys(prompt, ['text', 'skillReferences', 'features', 'files']);
         if (typeof prompt.text !== 'string' || prompt.text.length > 1_048_576 || !Array.isArray(prompt.skillReferences) || prompt.skillReferences.length > 64 || !Array.isArray(prompt.features) || prompt.features.length > 1 || prompt.features.some(feature => !isVisualizeFeatureSelection(feature)) || !Array.isArray(prompt.files) || prompt.files.length > 64) fail('Invalid successor prompt');
+        let mentionEnd = 0;
+        const promptText = prompt.text as string;
         for (const value of prompt.skillReferences as unknown[]) {
-          const skill = record(value); keys(skill, ['skillId', 'source', 'name', 'start', 'end']);
-          if (!text(skill.skillId, 256) || typeof skill.source !== 'string' || !['openworkgraph', 'codex'].includes(skill.source) || !isSkillName(skill.name) || !integer(skill.start) || !integer(skill.end) || Number(skill.end) <= Number(skill.start) || Number(skill.end) > (prompt.text as string).length || (prompt.text as string).slice(Number(skill.start), Number(skill.end)) !== '$' + skill.name) fail('Invalid skill identity or mention range');
+          const skill = record(value); keys(skill, ['skillId', 'source', 'name', 'start', 'end'], ['backendId']);
+          // Backend/skill IDs are opaque graph data. Registry membership and
+          // execution eligibility are checked by the host when starting a Run.
+          if (!isSkillIdentity(skill as unknown) || !isSkillName(skill.name) || !integer(skill.start) || !integer(skill.end) ||
+            Number(skill.start) < mentionEnd || Number(skill.end) <= Number(skill.start) || Number(skill.end) > promptText.length ||
+            promptText.slice(Number(skill.start), Number(skill.end)) !== '$' + skill.name ||
+            (Number(skill.start) > 0 && !/\s/.test(promptText[Number(skill.start) - 1]!)) ||
+            (Number(skill.end) < promptText.length && !/[\s.,!?;，。！？；]/.test(promptText[Number(skill.end)]!))) fail('Invalid skill identity or mention range');
+          mentionEnd = Number(skill.end);
         }
         for (const value of prompt.files as unknown[]) { const file = record(value); keys(file, ['relativePath']); if (!text(file.relativePath, 4096) || /^(?:[/\\]|[A-Za-z]:)/.test(file.relativePath) || file.relativePath.split(/[/\\]/).some(part => !part || part === '.' || part === '..') || /[\u0000-\u001f]/.test(file.relativePath)) fail('Invalid project-relative file identity'); }
       }

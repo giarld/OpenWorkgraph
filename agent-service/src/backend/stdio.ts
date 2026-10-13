@@ -34,6 +34,9 @@ export class StdioRpc {
   private failureKind: TransportFailure["kind"] | null = null; private exitCode: number | null = null; private exitSignal: string | null = null;
   private observedFrameBytes: number | undefined;
   private spawnCode: TransportFailure['spawnCode'];
+  private drained = false;
+  private readonly closed: Promise<void>;
+  private resolveClosed!: () => void;
   private pending = new Map<RpcId, { resolve(value: any): void; reject(error: Error): void; timer: NodeJS.Timeout; method: string }>();
   onNotification: (method: string, params: any) => void = () => {};
   onRequest: (id: RpcId, method: string, params: any) => void = id => this.reject(id);
@@ -41,8 +44,15 @@ export class StdioRpc {
   get isClosed(): boolean { return this.stopped; }
   /** Exit is stronger evidence than a broken stdio pipe: this child can no longer run a turn. */
   get isExited(): boolean { return this.exited; }
+  get isDrained(): boolean { return this.drained; }
+  async waitForClose(timeoutMs = 3000): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try { await Promise.race([this.closed, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new BackendError('TIMEOUT', 'Backend stdio drain unconfirmed')), timeoutMs); })]); }
+    finally { if (timer) clearTimeout(timer); }
+  }
   get failure(): TransportFailure | null { return this.failureKind ? { kind: this.failureKind, ...(this.spawnCode ? { spawnCode: this.spawnCode } : {}), ...(this.exited ? { exitCode: this.exitCode, exitSignal: this.exitSignal } : {}), ...(this.observedFrameBytes !== undefined ? { observedFrameBytes: this.observedFrameBytes } : {}) } : null; }
   constructor(private readonly options: StdioOptions) {
+    this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     const command = codexCommand(options);
     this.child = spawn(command.executable, command.args, { cwd: options.cwd, env: options.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true });
     this.child.stderr.resume(); // Drain, but never persist credentials/backend diagnostics.
@@ -50,7 +60,9 @@ export class StdioRpc {
       if (['ENOENT', 'EACCES', 'EPERM', 'ENOEXEC'].includes(error.code ?? '')) this.spawnCode = error.code as TransportFailure['spawnCode'];
       this.fail('spawn_error');
     });
-    this.child.on('exit', (code, signal) => { this.exited = true; this.exitCode = code; this.exitSignal = signal; this.fail('process_exit'); });
+    this.child.on('exit', (code, signal) => { this.exited = true; this.exitCode = code; this.exitSignal = signal; });
+    // exit can precede the last stdout frame. Only close proves stdio drained.
+    this.child.on('close', (code, signal) => { this.exited = true; this.exitCode = code; this.exitSignal = signal; this.drained = true; this.fail('process_exit'); this.resolveClosed(); });
     this.child.stdin.on('error', () => this.fail('stdin_error'));
     this.child.stdout.on('data', (chunk: Buffer) => {
       const decoded = this.decoder.write(chunk); this.buffer += decoded; this.bufferBytes += Buffer.byteLength(decoded);

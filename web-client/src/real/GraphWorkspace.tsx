@@ -38,6 +38,7 @@ import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, formatFi
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
 import { readViewport, saveViewport, viewportStorageKey } from "./viewport-storage";
+import { nodeEditorStorageKey, readNodeEditorState, saveNodeEditorState } from './node-editor-storage';
 import { primaryModifier } from "../canvas/primary-modifier";
 import { markdownLinkTarget } from './markdown-link-target';
 import { markdownImageCache } from './markdown-image-cache';
@@ -206,7 +207,7 @@ export interface GraphWorkspaceProps {
   assetsAvailable?: boolean;
   executionReason?: string;
   imageReason?: string;
-  onOpenRun?: (run?: Run) => void;
+  onOpenRun?: (run?: Run, visible?: boolean) => void;
   onRunSubmitted?: (run: Run) => void;
   theme?: "light" | "dark";
   sidebarTarget?: HTMLElement | null;
@@ -309,6 +310,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     return () => previous?.focus();
   },[confirmUndoRunIds]);
   const submittedNodeKeys = useRef(new Set<string>());
+  const [submittedRunDetails, setSubmittedRunDetails] = useState<Run[]>([]);
   const [generatedOutputNodeId, setGeneratedOutputNodeId] = useState<string>();
   const resourceSaveKeys = useRef(new Map<string, string>());
   const projectFileSaveKeys = useRef(new Map<string, string>());
@@ -329,7 +331,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const [promptProjectFile, setPromptProjectFile] = useState<{ path: string; name: string }>();
   const [documentId, setDocumentId] = useState<string>();
   const [documentPreviewId, setDocumentPreviewId] = useState<string>();
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [nodeEditorStates, setNodeEditorStates] = useState(() => new Map<string, boolean>());
+  const nodeEditorKey = (id: string) => nodeEditorStorageKey(!!props.temporary, props.graph.serviceId, props.graph.projectId, props.graph.graphId, id);
+  const nodeEditorOpen = (id: string) => nodeEditorStates.get(nodeEditorKey(id)) ?? readNodeEditorState(nodeEditorKey(id));
+  const setNodeEditorOpen = (id: string, open: boolean) => {
+    const key = nodeEditorKey(id);
+    saveNodeEditorState(key, open);
+    setNodeEditorStates(previous => previous.get(key) === open ? previous : new Map(previous).set(key, open));
+  };
   const [createMenu, setCreateMenu] = useState<{ world: { x: number; y: number }; screen: { x: number; y: number }; connection?: { nodeId: string; port: "input" | "output" }; preferAbove?: boolean }>();
   const createMenuElement = useRef<HTMLDivElement>(null);
   const [createMenuPosition, setCreateMenuPosition] = useState<{ left: number; top: number }>();
@@ -746,6 +755,15 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     () => props.runs.filter(r => r.serviceId === g.serviceId && r.projectId === g.projectId && r.graphId === g.graphId),
     [props.runs, g.serviceId, g.projectId, g.graphId],
   );
+  useEffect(() => {
+    setSubmittedRunDetails(previous => {
+      const pending = previous.filter(submitted => submitted.serviceId === g.serviceId
+        && submitted.projectId === g.projectId && submitted.graphId === g.graphId
+        && !graphRuns.some(run => run.nodeId === submitted.nodeId
+          && BigInt(run.submissionSequence ?? '0') >= BigInt(submitted.submissionSequence ?? '0')));
+      return pending.length === previous.length ? previous : pending;
+    });
+  }, [submittedRunDetails, graphRuns, g.serviceId, g.projectId, g.graphId]);
   const activeChainBatches = new Set(graphRuns.filter(run => run.chainBatch && !["succeeded", "failed", "cancelled", "interrupted"].includes(run.status)).map(run => run.chainBatch!));
   const activeChainNodeIds = new Set(graphRuns.filter(run => run.chainBatch && activeChainBatches.has(run.chainBatch)).map(run => run.nodeId));
   const pendingVisualizeCandidateNodeIds = new Set(graphRuns.filter(run => run.hasPendingGenerationCandidate && g.nodes.some(node => node.id === run.nodeId && node.type === 'visualize')).map(run => run.nodeId));
@@ -770,14 +788,33 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const selectNodes = (ids: string[]) => {
     setConfirmRunNodeId(undefined);
     setSelectionRevision(revision => revision + 1);
+    if (ids.length !== 1 || selected.length !== 1 || selected[0] !== ids[0]) {
+      const snapshot = editor.getSnapshot();
+      const target = ids.length === 1 ? snapshot.graph.nodes.find(item => item.id === ids[0]) : undefined;
+      const targetContent = object(snapshot.drafts.find(item => item.nodeId === target?.id)?.content ?? target?.content ?? {});
+      const editable = target?.schemaVersion === 1 && !isProjectFileReference(targetContent)
+        && ['text', 'image', 'execution', 'visualize', 'document'].includes(target.type);
+      const hasContent = typeof targetContent.resourceId === 'string' || (target?.type === 'visualize'
+        ? typeof object(targetContent.page).revision === 'number'
+        : String(targetContent[target?.type === 'execution' ? 'prompt' : 'text'] ?? '').trim().length > 0);
+      const open = Boolean(target && editable && (nodeEditorOpen(target.id) ?? !hasContent));
+      if (target && editable) setNodeEditorOpen(target.id, open);
+      if (documentId && documentPreviewId !== documentId) {
+        ++documentEpoch.current;
+        setDocumentId(undefined);
+      }
+      if (open && target?.type === 'document') openDocument(target.id);
+    }
     setSelected(ids);
-    props.onOpenRun?.(ids.length === 1 ? graphRuns.filter(r => r.nodeId === ids[0]).at(-1) : undefined);
+  };
+  const dismissNodeEditor = () => {
+    if (selected.length === 1) setNodeEditorOpen(selected[0], false);
   };
   useEffect(() => { if (props.installedNodeId && editor.getSnapshot().graph.nodes.some(node => node.id === props.installedNodeId)) selectNodes([props.installedNodeId]); }, [props.installedNodeId]);
   useEffect(()=>{
     const target=props.editExecutionNode;
     if(!target||target.graphId!==g.graphId||target.projectId!==g.projectId)return;
-    setSelected([target.nodeId]);setDetailsOpen(true);canvas.current?.locate(target.nodeId);
+    setSelected([target.nodeId]);setNodeEditorOpen(target.nodeId, true);canvas.current?.locate(target.nodeId);
   },[props.editExecutionNode,g.graphId,g.projectId]);
   const progress = useRunProgress(props.request, graphRuns, props.online, props.refreshToken);
   const submittedPrompts = useRunPrompts(props.request, graphRuns, props.online, props.refreshToken);
@@ -800,7 +837,26 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       run ? submittedPrompts[run.id] : undefined,
     ])] as const;
   })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
-  const selectedRun = graphRuns.filter(r => r.nodeId === node?.id).at(-1);
+  const snapshotRun = node ? latestNodeRuns.get(node.id) : undefined;
+  // Submission responses arrive before the next Workspace snapshot. Keep their
+  // details visible while the execution editor closes, then follow server state.
+  const submittedRun = node ? submittedRunDetails.find(run => run.serviceId === g.serviceId
+    && run.projectId === g.projectId && run.graphId === g.graphId && run.nodeId === node.id) : undefined;
+  const selectedRun = submittedRun && (!snapshotRun
+    || BigInt(submittedRun.submissionSequence ?? '0') > BigInt(snapshotRun.submissionSequence ?? '0'))
+    ? submittedRun : snapshotRun;
+  const runnableNodeSelected = Boolean(node && selected.length === 1 && node.schemaVersion === 1
+    && !isProjectFileReference(node.content) && ["text", "image", "execution", "visualize"].includes(node.type));
+  const editorVisible = runnableNodeSelected && !!nodeEditorOpen(node!.id);
+  const runNeedsAttention = Boolean(selectedRun && (!["succeeded", "cancelled", "interrupted"].includes(selectedRun.status)
+    || selectedRun.hasPendingGenerationCandidate));
+  const openRunCallback = useRef(props.onOpenRun);
+  useEffect(() => { openRunCallback.current = props.onOpenRun; }, [props.onOpenRun]);
+  useEffect(() => {
+    const visible = runnableNodeSelected && (runNeedsAttention || editorVisible);
+    openRunCallback.current?.(visible ? selectedRun : undefined, visible);
+  }, [g.serviceId, g.projectId, g.graphId, node?.id, runnableNodeSelected, editorVisible, runNeedsAttention,
+    selectedRun?.id, selectedRun?.status, selectedRun?.hasPendingGenerationCandidate, selectionRevision]);
   const inputChanged = useInputChanges(props.request, selectedRun, props.online, g.executionRevision);
   const draft = state.drafts.find((d) => d.nodeId === node?.id);
   const content = object(draft?.content ?? node?.content ?? {});
@@ -1190,7 +1246,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       ...(connection ? [{ type: "edge.create" as const, edge: { id: randomId(), sourceId: connection.port === "output" ? connection.nodeId : id, targetId: connection.port === "output" ? id : connection.nodeId, kind: "reference" as const } }] : []),
     ]);
     selectNodes([id]);
-    setDetailsOpen(true);
+    setNodeEditorOpen(id, true);
     return id;
   };
   const resumeUpload = async (job: CanvasUploadJob, prepareOnly = false): Promise<Parameters<GraphEditor["command"]>[0] | undefined> => {
@@ -1457,6 +1513,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const openDocument = (id: string, preview = false) => {
     const target = editor.getSnapshot().graph.nodes.find(n => n.id === id);
     if (!target) return;
+    if (target.type === 'document' && !preview) setNodeEditorOpen(id, true);
     const c = object(target.content), epoch = ++documentEpoch.current;
     if (target.type === "text" || typeof c.resourceId !== "string") { setDocumentPreviewId(preview ? id : undefined); setDocumentId(id); return; }
     act(async () => {
@@ -1509,8 +1566,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     try {
       const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : node.type === "visualize" ? "visualize_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined, preserveHistoricalOutputs);
       submittedNodeKeys.current.add(JSON.stringify([g.serviceId, g.projectId, g.graphId, node.id]));
+      setSubmittedRunDetails(previous => [...previous.filter(run => run.nodeId !== submitted.nodeId), submitted]);
       props.onRunSubmitted?.(submitted);
-      if (node.type === "execution") setDetailsOpen(false);
+      if (node.type === "execution") setNodeEditorOpen(node.id, false);
       props.onChanged();
       if (node.type === "execution") await editor.refresh();
     }
@@ -1584,7 +1642,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }));
   const previewNavigation: PreviewDialogNavigation = { layers: linkedPreviewLayers, pending: markdownLinkPending, onBack: backMarkdownPreview };
   const hasPreviewRoot = !!(reference || documentNode || promptProjectFile || generatedOutputNode);
-  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onOpenStandalone={expanded ? () => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); closePreviewDialogs(); } : undefined} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setDetailsOpen(true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
+  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onOpenStandalone={() => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); if (expanded) closePreviewDialogs(); }} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setNodeEditorOpen(wire.id, true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);
@@ -1995,7 +2053,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           onError={props.onError}
           shouldOpenNodeOnDoubleClick={n => hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null)}
           canEditTextOnSpace={n => !hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null) && !locked(n.id) && !state.drafts.some(d => d.nodeId === n.id && ['conflict', 'recovery'].includes(d.state))}
-          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setDetailsOpen(true); }}
+          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setNodeEditorOpen(n.id, true); }}
           onActivateNode={n => {
             if (n.type === 'execution') return;
             if (n.type === 'preview' && openImageNodePreview(n.id)) return;
@@ -2018,9 +2076,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 e.stopPropagation();
                 e.currentTarget.blur();
               }}/>
-            {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setDetailsOpen(true)}><Settings2 size={16}/></button>}
+            {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16}/></button>}
             {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
-            {n.type === 'visualize' && latestNodeRuns.get(n.id) && <button className="icon-button" aria-label={t('View run details')} title={t('View run details')} disabled={!props.onOpenRun} onClick={() => props.onOpenRun?.(latestNodeRuns.get(n.id)!)}><FileText size={16}/></button>}
+            {n.type === 'visualize' && latestNodeRuns.get(n.id) && <button className="icon-button" aria-label={t('View run details')} title={t('View run details')} disabled={!props.onOpenRun} onClick={() => { selectNodes([n.id]); setNodeEditorOpen(n.id, true); }}><FileText size={16}/></button>}
             {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
             {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
             {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
@@ -2137,10 +2195,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }
           canDropData={(data, targetNodeId) => !readOnly && (canDropProjectFile(data, g.projectId) ? !targetNodeId || isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) : !targetNodeId && props.assetsAvailable !== false && canDropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }))}
           onDropData={(data, position, targetNodeId) => canDropProjectFile(data, g.projectId) ? dropProjectFile(data, g.projectId, position, targetNodeId && isEmptyProjectFileReference(g.nodes.find(item => item.id === targetNodeId)?.content ?? null) ? targetNodeId : undefined, (id, path) => act(() => associateProjectFile(id, path))) : dropAsset(data, { request: props.serviceRequest ?? props.request, projectId: g.projectId, graphId: g.graphId }, position)}
-          renderPanel={panelNode => node && panelNode.id === node.id && selected.length === 1 && detailsOpen && !isProjectFileReference(node.content) && ["text", "image", "execution", "visualize"].includes(node.type) && node.schemaVersion === 1 ? (
+          renderPanel={panelNode => node && panelNode.id === node.id && editorVisible ? (
             <PromptEditor key={node.id} inputChanged={inputChanged} value={String(content.prompt ?? "")} disabled={promptDisabled} runDisabled={runDisabled}
               references={g.edges.filter(edge => edge.kind === "reference" && edge.targetId === node.id).map(edge => ({ id: edge.sourceId, title: work.nodes.find(n => n.id === edge.sourceId)?.title || "Reference node" }))}
-              onOpenReference={setReferenceId} onClose={() => setDetailsOpen(false)} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
+              onOpenReference={setReferenceId} onClose={dismissNodeEditor} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
               mentionEnabled={props.online && props.projectActive}
               skillEnabled={node.type !== "image" || selectedRoute.type === "codex"}
               skillReferences={(Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[]}
@@ -2222,7 +2280,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         initialPreview={documentPreviewId === documentId || (documentWire?.type !== "text" && typeof object(documentWire?.content ?? {}).resourceId === "string")}
         node={{ ...documentNode, readonly: documentNode.readonly || (documentNode.type !== "text" && locked(documentNode.id)) }}
         navigation={previewNavigation}
-        onClose={() => { setDetailsOpen(false); closePreviewDialogs(); }}
+        onClose={() => { if (documentWire?.type === 'document' && documentPreviewId !== documentId) setNodeEditorOpen(documentWire.id, false); closePreviewDialogs(); }}
         onError={props.onError}
         onOpenLink={openMarkdownLink}
         imageRequest={props.serviceRequest ?? props.request}

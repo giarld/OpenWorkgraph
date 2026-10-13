@@ -1,4 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import type { AgentHostTools } from '../agents/host-tools.js';
+import { APPROVAL_MAX_PATHS, normalizeApprovalPermissions, validApprovalPaths, type ApprovalPermissions } from '@openworkgraph/protocol';
+import { AgentOperations } from '../agents/operations.js';
+import { agentGuidance } from '../agents/guidance.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { publicProgressText } from './progress.js';
+import { redactSkillValues } from './redaction.js';
 import { StdioRpc, type RpcId, type StdioOptions } from './stdio.js';
 import { initialize, listModels } from './capabilities.js';
 import { describeCodexFailure, type CodexStage } from './diagnostics.js';
@@ -7,16 +13,20 @@ import { validateRunPaths } from './paths.js';
 import { sandboxMode } from '../execution-settings.js';
 import { join } from 'node:path';
 import { skillGuidance, mergeSkillEnvironment, skillProcessEnvironment } from '../skill-sessions.js';
-import { visualizeGenerationGuidance, VISUALIZE_NODE_TITLE_GUIDANCE } from '../visualize-generation.js';
+import { VISUALIZE_NODE_TITLE_GUIDANCE } from '../visualize-generation.js';
 import { hasVisualizeFeature } from '../visualize-features.js';
 import { BackendError, type BackendAdapter, type BackendCallbacks, type BackendInteraction, type BackendReply, type BackendRunContext, type RuntimeSnapshot } from './types.js';
 export interface AdapterOptions {
   executable?: string; args?: string[]; timeoutMs?: number; initializeTimeoutMs?: number;
 }
-interface PendingInteraction { wireId: RpcId; public: BackendInteraction; method: string; permissions?: Record<string, unknown> }
-interface Session { context: BackendRunContext; callbacks: BackendCallbacks; snapshot: RuntimeSnapshot; rpc: StdioRpc | null; titleRpc?: StdioRpc; interactions: Map<string, PendingInteraction>; replies: Map<string, string>; eventQueue: Promise<void>; cancelled: boolean; interruptRequested: boolean; launching: boolean; buffered: Array<{ method: string; params: any; id?: RpcId }>; skillEnvironment: Record<string,string>; skillSecrets: Record<string,string>; skillQueue: Promise<void>; pendingSkillCommands?: number; commandUncertain?: boolean; finishing?: boolean; commandSandbox?: Record<string,unknown>; commandCwd?: string; }
+interface WireInteraction { method: string; fingerprint: string; privateId: string }
+interface PendingInteraction { wireId: RpcId; public: BackendInteraction; method: string; permissions?: ApprovalPermissions }
+interface FileChangeApproval { paths: string[] | null; fingerprint: string }
+export interface CodexStartOptions { signal?: AbortSignal; hostTools?: AgentHostTools }
+interface Session { fileChanges: Map<string, FileChangeApproval>; wireInteractions: Map<RpcId, WireInteraction>; interactionConflict?: boolean; hostCalls: Map<RpcId, string>; commandCalls: Map<string, { fingerprint: string; result: Promise<import('@openworkgraph/protocol').Json> }>; hostTools?: AgentHostTools | undefined; operations: AgentOperations; work: Set<Promise<unknown>>; callbackFailed?: boolean; signal?: AbortSignal | undefined; abort?: () => void; context: BackendRunContext; callbacks: BackendCallbacks; snapshot: RuntimeSnapshot; rpc: StdioRpc | null; titleRpc?: StdioRpc; interactions: Map<string, PendingInteraction>; replies: Map<string, string>; eventQueue: Promise<void>; cancelled: boolean; interruptRequested: boolean; launching: boolean; buffered: Array<{ method: string; params: any; id?: RpcId }>; skillEnvironment: Record<string,string>; skillSecrets: Record<string,string>; skillQueue: Promise<void>; pendingSkillCommands?: number; commandUncertain?: boolean; finishing?: boolean; commandSandbox?: Record<string,unknown>; commandCwd?: string; }
 const terminal = (s: RuntimeSnapshot) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(s.state);
 const text = (value: unknown, max = 16000): string => typeof value === 'string' ? value.slice(0, max) : '';
+const canonicalWirePayload = (value: unknown): string => JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry) ?? 'null';
 /** References are accepted Run data, not instructions from the service or browser. */
 export function referenceGuidance(context: BackendRunContext): string {
   if (!context.resources?.length && !context.projectFiles?.length) return '';
@@ -38,6 +48,7 @@ export function referenceGuidance(context: BackendRunContext): string {
       const file = context.files?.find(item => item.resourceId === resource.resourceId && item.version === resource.version && item.sha256 === resource.sha256);
       if (!file) throw new BackendError('INVALID_INPUT', 'Frozen reference file mapping is missing');
       lines.push('File (' + resource.mime + '): ' + file.path);
+      if (envelope.kind === 'video') lines.push('This video is supplied as a local file reference, not as a native video token. Inspect its metadata, frames or audio with available native file/command tools under this Run sandbox when needed. Report unavailable tools or unreadable content; do not infer that the video was read merely from its path.');
       if (envelope.kind === 'image') lines.push('Inspect this image as reference data. If generating an image with image_gen, pass this local file as a referenced_image_paths input so its visual content is used. If the built-in tool cannot read the reference, report failure rather than generating an unrelated image.');
     }
   }
@@ -85,31 +96,8 @@ export function executionDeliveryGuidance(generateTitle = true): string {
 }
 /** Fail closed for path/credential-bearing messages. Never pass tool output or reason here.
  * Inspect the whole message before bounding it; partial deltas are not safe to publish. */
-export function publicProgressText(value: unknown): string {
-  if (typeof value !== 'string' || /(?:[a-z]:[\\/]|\\\\|(?:^|[^a-z0-9._/\-])(?:\/|~[\\/])|file:\/\/|\.(?:env|ssh|codex|aws)\b|(?:api[_-]?key|access[_-]?token|password|secret|authorization|bearer|private[_ -]?key)\b|sk-[a-z0-9]{8})/im.test(value)) return '';
-  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, 4000);
-}
-export function redactSkillValues(value: string, environment: Record<string,string>): string {
-  // Finite literal forms: raw values and at most two JSON.stringify string-body
-  // escape layers. This does not cover arbitrary encodings or fragmented output.
-  const forms = new Set<string>();
-  for (const secret of new Set(Object.values(environment))) {
-    if (!secret) continue;
-    let form = secret;
-    forms.add(form);
-    for (let depth = 0; depth < 2; depth++) {
-      form = JSON.stringify(form).slice(1, -1);
-      forms.add(form);
-    }
-  }
-  if (!forms.size) return value;
-  // Match once against the original text. Longest first handles overlapping
-  // values; the marker prevents repeated snapshots from redacting it again.
-  forms.add('[redacted]');
-  const pattern = [...forms].sort((a,b) => b.length-a.length).map(form => form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  return value.replace(new RegExp(pattern, 'g'), '[redacted]');
-}
-/** Fresh ephemeral execution and optional parallel title threads. No DB/auth mutation. */
+export { publicProgressText } from './progress.js';
+export { redactSkillValues } from './redaction.js';
 export class CodexBackendAdapter implements BackendAdapter {
   private sessions = new Map<string, Session>();
   constructor(private readonly options: AdapterOptions = {}) {}
@@ -123,8 +111,12 @@ export class CodexBackendAdapter implements BackendAdapter {
   }
   private emit(s: Session): void {
     if (terminal(s.snapshot) || s.snapshot.state === 'unknown') s.titleRpc?.close();
-    s.snapshot.observedAt = new Date().toISOString(); const value = this.snapshot(s);
-    s.eventQueue = s.eventQueue.then(() => s.callbacks.onSnapshot(value)).catch(() => { if (!terminal(s.snapshot)) { s.titleRpc?.close(); s.snapshot.state = 'unknown'; s.snapshot.reason = 'Host callback failed; reconcile persisted state'; s.rpc?.close(); } });
+    s.snapshot.observedAt = new Date().toISOString(); const value = this.snapshot(s), recovering = s.callbackFailed;
+    s.eventQueue = s.eventQueue.then(async () => {
+      if (terminal(value)) await this.drainSideEffects(s.context.runId, false);
+      await s.callbacks.onSnapshot(value);
+      if (recovering && terminal(value) && terminal(s.snapshot)) s.callbackFailed = false;
+    }).catch(() => { s.callbackFailed = true; s.titleRpc?.close(); s.snapshot.state = 'unknown'; s.snapshot.reason = 'Host callback or drain failed; reconcile persisted state'; s.rpc?.close(); });
   }
   private unknown(s: Session, reason: string): void { if (terminal(s.snapshot) || s.snapshot.state === 'unknown') return; s.titleRpc?.close(); s.snapshot.state = 'unknown'; s.snapshot.reason = reason; s.interactions.clear(); this.emit(s); }
   /** Independent, best-effort naming never delays execution or changes its answer. */
@@ -145,7 +137,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       const final = params.turn.items?.findLast((item: any) => item.type === 'agentMessage' && item.phase !== 'commentary');
       const title = redactSkillValues(typeof final?.text === 'string' ? text(final.text, 1025) : answer, s.skillSecrets).trim();
       if (params.turn.status === 'completed' && title && title.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(title)) {
-        void Promise.resolve().then(() => canUpdate() ? s.callbacks.setNodeTitle!(title) : false).catch(() => {}).finally(() => rpc.close());
+        this.track(s, Promise.resolve().then(() => canUpdate() ? s.callbacks.setNodeTitle!(title) : false).catch(() => {}).finally(() => rpc.close()));
       } else rpc.close();
     };
     try {
@@ -166,13 +158,21 @@ export class CodexBackendAdapter implements BackendAdapter {
     } catch { /* Naming failure keeps the immediate prompt title and task execution. */ }
     finally { if (!awaitingCompletion) rpc.close(); }
   }
-  async start(context: BackendRunContext, callbacks: BackendCallbacks): Promise<RuntimeSnapshot> {
+  async start(context: BackendRunContext, callbacks: BackendCallbacks, native: CodexStartOptions = {}): Promise<RuntimeSnapshot> {
+    native.signal?.throwIfAborted();
     if (this.sessions.has(context.runId)) throw new BackendError('CONFLICT', 'Run already attached; start never implicitly retries');
     if (this.sessions.size >= 1024) throw new BackendError('UNAVAILABLE', 'Runtime retention limit reached; forget reconciled terminal Runs');
     if ((!context.prompt.trim() && !(context.kind==='image_generation' && context.resources?.some(item=>item.kind==='image' && item.resource))) || Buffer.byteLength(context.prompt) > 256 * 1024) throw new BackendError('INVALID_INPUT', 'Prompt is empty without a frozen image, or too large');
     const mode = sandboxMode(context.sandboxMode ?? 'read-only');
-    const s: Session = { context: structuredClone(context), callbacks, snapshot: { runId: context.runId, threadId: null, turnId: null, state: 'starting', observedAt: new Date().toISOString(), model: { ...context.model }, reason: null, answer: '' }, rpc: null, interactions: new Map(), replies: new Map(), eventQueue: Promise.resolve(), cancelled: false, interruptRequested: false, launching: true, buffered: [], skillEnvironment: {...context.skillEnvironment}, skillSecrets: {...context.skillEnvironment}, skillQueue: Promise.resolve() };
-    this.sessions.set(context.runId, s); this.emit(s);
+    const s: Session = { context: structuredClone(context), callbacks, snapshot: { runId: context.runId, threadId: null, turnId: null, state: 'starting', observedAt: new Date().toISOString(), model: { ...context.model }, reason: null, answer: '' }, rpc: null, interactions: new Map(), replies: new Map(), eventQueue: Promise.resolve(), cancelled: false, interruptRequested: false, launching: true, buffered: [], skillEnvironment: {...context.skillEnvironment}, skillSecrets: {...context.skillEnvironment}, skillQueue: Promise.resolve(), fileChanges: new Map(), wireInteractions: new Map(), hostCalls: new Map(), commandCalls: new Map(), operations: new AgentOperations(), work: new Set(), hostTools: native.hostTools, signal: native.signal };
+    this.sessions.set(context.runId, s);
+    s.abort = () => {
+      s.cancelled = true; s.operations.cancelPending(); s.titleRpc?.close();
+      if (!s.snapshot.turnId) s.rpc?.close();
+      else void this.cancel(context.runId).catch(() => this.unknown(s, 'Cancellation outcome unconfirmed'));
+    };
+    native.signal?.addEventListener('abort', s.abort, { once: true });
+    this.emit(s);
     let stage: CodexStage = 'initialize';
     try {
       await validateRunPaths(s.context);
@@ -185,7 +185,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       // Legacy env-only callers have no schema metadata; conservatively mask all
       // their values. Schema-aware callers supply secrets explicitly, even if empty.
       const spawn = (environment: Record<string,string>, secrets: Record<string,string> = environment): StdioRpc | null => {
-        if (s.cancelled) return null;
+        if (s.cancelled || native.signal?.aborted) return null;
         s.skillEnvironment = { ...environment };
         s.skillSecrets = { ...secrets };
         if (Object.keys(environment).length) opts.env = skillProcessEnvironment(process.env,environment);
@@ -217,7 +217,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       const visualizeTools = callbacks.validateVisualizeOutput && (context.kind === 'visualize_generation' || context.kind === 'execution' && hasVisualizeFeature(context.features)) ? [{ type: 'function', name: 'validate_visualize_output', description: 'Validate the actual visualize page file and manifest in this Run Output directory before delivery. Returns valid or errors with JSON pointer paths and correction guidance. Read-only; does not publish or test browser interactions. Recompute manifest bytes/hash after edits and validate again.', inputSchema: { type: 'object', properties: { path: { type: 'string', minLength: 1, maxLength: 512 } }, required: ['path'], additionalProperties: false } }] : [];
       const skillTools = (callbacks.skillEnvironment || callbacks.withSkillEnvironment) && s.context.skills?.some(skill=>skill.source==='openworkgraph') ? [{ type: 'function', name: 'run_skill_command', description: 'Run a frozen OpenWorkgraph skill command with its protected configuration injected on demand. Read that skill SKILL.md first. Supply argv, never configuration values. Uses this Run sandbox; missing configuration or permission denial is reported without bypass.', inputSchema: { type: 'object', properties: { skillId: { type: 'string', minLength: 1, maxLength: 1024 }, command: { type: 'array', minItems: 1, maxItems: 128, items: { type: 'string', maxLength: 16000 } } }, required: ['skillId','command'], additionalProperties: false } }] : [];
       stage = 'thread/start';
-      const started = await rpc.request('thread/start', { model: s.snapshot.model.model, modelProvider: 'openai', allowProviderModelFallback: false, cwd: opts.cwd, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: mode, config, ephemeral: true, dynamicTools: [...tools, ...contextTools, ...skillTools, ...visualizeTools], experimentalRawEvents: false });
+      const started = await rpc.request('thread/start', { model: s.snapshot.model.model, modelProvider: 'openai', allowProviderModelFallback: false, cwd: opts.cwd, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: mode, config, ephemeral: true, dynamicTools: s.hostTools ? [...s.hostTools.describe().map(({ name, description, inputSchema }) => ({ type: 'function', name, description, inputSchema })), ...skillTools] : [...tools, ...contextTools, ...skillTools, ...visualizeTools], experimentalRawEvents: false });
       if (typeof started?.thread?.id !== 'string') throw new BackendError('PROTOCOL', 'Thread start missing id');
       s.snapshot.threadId = started.thread.id;
       const policyType = { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' }[mode];
@@ -230,7 +230,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       const imageSettings = s.context.kind === 'image_generation' && s.context.imageOptions
         ? 'Image settings requested by the user: quality='+(s.context.imageOptions.quality??'auto')+', size='+(s.context.imageOptions.size??'auto')+', aspect ratio='+(s.context.imageOptions.aspectRatio??'auto')+'. Pass supported settings to image_gen. If a setting is not directly supported, preserve its intent in the generation prompt instead of silently dropping it.\n'
         : '';
-      const generationGuidance = visualizeGenerationGuidance(s.context) + (s.context.kind === 'text_generation'
+      const generationGuidance = agentGuidance(s.context) + '\n' + (s.context.kind === 'text_generation'
         ? 'For text generation, the published Markdown is the target text node content. Begin the result (and any published Markdown file) with one concise Markdown heading (# Title) of at most 32 characters; the Work Graph uses its first nonempty line as the generated node title, capped at 32 characters. Keep the heading in the complete content. Your final answer must contain the complete user-facing result, even when you also write an output file. Do not replace the result with a summary, a local file path, or a link to the output directory. If you create an output file, its Markdown content must stand alone when read in the Work Graph; publish that file through manifest.json with outputs containing outputKey, relative path, mime (text/markdown), byte count, and SHA-256.\n'
         : s.context.kind === 'image_generation'
         ? '$imagegen Generate one image using the built-in image_gen tool for the requested image node. Do not use the Image API or a CLI fallback. Copy the selected image from the built-in Codex image location into the Output directory as a real file; an inline preview or link is not a deliverable. Also write one nonempty Markdown description (.md) in the Output directory, beginning with a concise heading (# Title) of at most 32 characters. The Work Graph uses that heading as the generated image node title, capped at 32 characters. Write manifest.json there with outputs containing exactly one image and exactly one Markdown entry. Each entry must have a unique outputKey, a relative path, exact mime (image/png, image/jpeg, image/webp, or image/gif for the image; text/markdown for the description), actual byte count, and lowercase SHA-256 of the saved bytes. Verify both files and the manifest before claiming delivery. If the built-in tool is unavailable, report that failure instead of claiming an image was created.\n'
@@ -241,7 +241,7 @@ export class CodexBackendAdapter implements BackendAdapter {
         : '';
       const instructions = `Frozen input directory: ${s.context.inputPath}\nOutput directory: ${s.context.outputPath}\nThe frozen task prompt is stored in snapshot.json under the prompt field and is repeated after these service instructions. An empty resources, projectFiles, or files list means there are no references; it does not mean the task prompt is missing.\n${generationGuidance}${imageSettings}${executionGuidance}${references}Only inspect history when useful; verify claims against current project state before modifying files. If history is unavailable, do not invent progress. Preserve existing edits and never automatically commit, reset, stash, or create a worktree. Simple questions need only a simple answer.\n\n${s.context.prompt}`;
       // Subsequent turns inherit the sandbox selected on this thread.
-      void this.generateTitle(s).catch(() => { s.titleRpc?.close(); });
+      this.track(s, this.generateTitle(s).catch(() => { s.titleRpc?.close(); }));
       stage = 'turn/start';
       const turn = await rpc.request('turn/start', { threadId: s.snapshot.threadId, model: s.snapshot.model.model, effort: s.snapshot.model.reasoningEffort, input: [{ type: 'text', text: skillGuidance(s.context.skills ?? []) + instructions + '\n', text_elements: [] }, ...(s.context.skills ?? []).filter(skill=>skill.explicit).map(skill=>({type:'skill',name:skill.name,path:skill.path}))] });
       if (typeof turn?.turn?.id !== 'string' || (s.snapshot.turnId !== null && s.snapshot.turnId !== turn.turn.id)) throw new BackendError('PROTOCOL', 'Turn start identity mismatch');
@@ -254,33 +254,48 @@ export class CodexBackendAdapter implements BackendAdapter {
       return this.snapshot(s);
     } catch (error) {
       // A turn/start timeout or disconnect may have executed work. Never infer failure/cancelled.
-      this.unknown(s, s.rpc ? describeCodexFailure(error, s.rpc, stage).message : error instanceof BackendError ? error.message : 'Backend preparation failed; inspect runtime before retrying');
-      s.rpc?.close(); throw error;
-    }
+      if (!s.rpc) { s.snapshot.state = s.cancelled ? 'cancelled' : 'failed'; s.snapshot.reason = 'Backend preparation failed before native attachment'; this.emit(s); }
+      else this.unknown(s, s.rpc ? describeCodexFailure(error, s.rpc, stage).message : error instanceof BackendError ? error.message : 'Backend preparation failed; inspect runtime before retrying');
+      s.rpc?.close();
+      // A scoped native event can prove attachment before the RPC ACK. Host
+      // callback failure then closes transport, but must preserve that attached
+      // instance as an unknown result rather than pretending start never happened.
+      if (s.callbackFailed && s.snapshot.threadId && s.snapshot.turnId) return this.snapshot(s);
+      throw error;
+    } finally { s.launching = false; }
   }
   private incoming(s: Session, method: string, params: any, id?: RpcId): void {
-    if (terminal(s.snapshot)) { if (id !== undefined) s.rpc?.reject(id); return; }
+    if (terminal(s.snapshot) || s.interactionConflict) { if (id !== undefined && !s.rpc?.isClosed) s.rpc?.reject(id); return; }
     if (!s.snapshot.threadId) {
       if (params?.threadId || method === 'thread/started') { if (s.buffered.length >= 128) { this.unknown(s, 'Backend initialization event limit exceeded'); s.rpc?.close(); return; } s.buffered.push({ method, params, ...(id === undefined ? {} : { id }) }); }
       else if (id !== undefined) s.rpc?.reject(id);
       return;
     }
     if (params?.threadId !== s.snapshot.threadId) { if (id !== undefined) s.rpc?.reject(id); return; }
-    if (method === 'turn/started' && typeof params.turn?.id === 'string' && s.snapshot.turnId === null) s.snapshot.turnId = params.turn.id;
     const turnId = params.turnId ?? params.turn?.id;
+    const attached = ['turn/started', 'item/started', 'item/completed', 'turn/completed'].includes(method) || id !== undefined && ['item/tool/call', 'item/tool/requestUserInput', 'item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(method);
+    if (s.launching && s.snapshot.turnId === null && attached && typeof turnId === 'string') s.snapshot.turnId = turnId;
     if (turnId && s.snapshot.turnId && turnId !== s.snapshot.turnId) { if (id !== undefined) s.rpc?.reject(id); return; }
+    // A wire ACK and several messages may arrive in one stdout chunk. Expose
+    // attachment before emitting each completed message, otherwise the host
+    // correctly ignores starting snapshots and only the last message survives.
+    if (attached && turnId && turnId === s.snapshot.turnId && s.snapshot.state === 'starting') {
+      s.snapshot.state = 'running'; this.emit(s);
+    }
     if (id !== undefined) {
-      if (!s.snapshot.turnId || params.turnId !== s.snapshot.turnId || s.cancelled || s.snapshot.state === 'unknown') { s.rpc?.reject(id); return; }
+      if (!s.snapshot.turnId || params.turnId !== s.snapshot.turnId || s.finishing || s.cancelled || s.snapshot.state === 'unknown') { s.rpc?.reject(id); return; }
       this.request(s, id, method, params); return;
     }
+    if (['item/started', 'item/completed'].includes(method) && params.turnId === s.snapshot.turnId && s.snapshot.turnId && params.item?.type === 'fileChange') this.fileChange(s, params.item);
     if (method === 'item/completed' && params.turnId === s.snapshot.turnId && s.snapshot.turnId) this.message(s, params.item);
     if (method === 'turn/completed' && params.turn?.id === s.snapshot.turnId) {
       if (s.finishing) return;
-      if (s.pendingSkillCommands) {
+      if (s.pendingSkillCommands || s.work.size) {
+        s.titleRpc?.close();
         s.finishing = true;
         // command/exec is independent of the model turn. Its bounded command
         // result, not turn/interrupt ACK, confirms the command has stopped.
-        void s.skillQueue.then(() => {
+        void Promise.all([s.skillQueue, ...s.work]).then(() => {
           s.finishing = false;
           if (s.commandUncertain) { this.unknown(s, 'Skill command exit unconfirmed; keep project occupancy'); return; }
           this.incoming(s, method, params);
@@ -294,8 +309,23 @@ export class CodexBackendAdapter implements BackendAdapter {
       if (finalMessage && typeof finalMessage.text === 'string') s.snapshot.answer = text(finalMessage.text, 256 * 1024);
       s.snapshot.state = state === 'completed' ? 'completed' : state === 'failed' ? 'failed' : state === 'interrupted' ? (s.cancelled ? 'cancelled' : 'unknown') : 'unknown';
       s.snapshot.reason = state === 'failed' ? 'Backend turn failed; partial file changes are retained' : s.snapshot.state === 'unknown' ? 'Backend outcome not confirmed' : null;
-      s.interactions.clear(); this.emit(s); if (terminal(s.snapshot)) { s.titleRpc?.close(); if (!s.launching) s.rpc?.close(); }
+      s.interactions.clear(); s.fileChanges.clear(); this.emit(s); if (terminal(s.snapshot)) { s.titleRpc?.close(); if (!s.launching) s.rpc?.close(); }
     }
+  }
+  private fileChange(s: Session, item: any): void {
+    if (typeof item.id !== 'string' || !item.id || item.id.length > 200) return;
+    if (!s.fileChanges.has(item.id) && s.fileChanges.size >= 256) { this.unknown(s, 'Native file change retention limit exceeded'); s.rpc?.close(); return; }
+    // Store only paths and a private action digest, never the raw file diff.
+    const changes = item.changes;
+    let paths: string[] | null = null;
+    if (Array.isArray(changes) && changes.length > 0 && changes.length <= APPROVAL_MAX_PATHS) {
+      const candidates: unknown[] = changes.flatMap((change: any) => [change?.path, ...(change?.kind?.type === 'update' && change.kind.move_path != null ? [change.kind.move_path] : [])]);
+      if (candidates.every(path => typeof path === 'string' && !!path.trim() && path.length <= 4096)) {
+        const unique = [...new Set(candidates as string[])];
+        if (validApprovalPaths(unique)) paths = unique;
+      }
+    }
+    s.fileChanges.set(item.id, { paths, fingerprint: createHash('sha256').update(canonicalWirePayload(changes)).digest('hex') });
   }
   private message(s: Session, item: any): void {
     if (item?.type !== 'agentMessage' || ![undefined, null, 'commentary', 'final_answer'].includes(item.phase)) return;
@@ -307,48 +337,31 @@ export class CodexBackendAdapter implements BackendAdapter {
     this.emit(s);
   }
   private request(s: Session, id: RpcId, method: string, params: any): void {
-    if (method === 'item/tool/call' && params.tool === 'run_skill_command' && (s.callbacks.skillEnvironment || s.callbacks.withSkillEnvironment)) {
-      const args = params.arguments;
-      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key=>!['skillId','command'].includes(key)) || typeof args.skillId !== 'string' || !Array.isArray(args.command) || !args.command.length || args.command.length > 128 || args.command.some((arg:unknown)=>typeof arg !== 'string' || arg.length > 16000 || arg.includes('\0')) || !args.command[0]) { s.rpc?.reject(id); return; }
-      const skill = s.context.skills?.find(skill=>skill.skillId===args.skillId && skill.source==='openworkgraph');
-      if (!skill) { s.rpc?.reply(id, { contentItems: [{type:'inputText',text:'Skill does not belong to this Run frozen directory.'}], success:false }); return; }
-      s.pendingSkillCommands = (s.pendingSkillCommands ?? 0) + 1;
-      s.skillQueue = s.skillQueue.then(async () => {
-        if (terminal(s.snapshot) || s.cancelled || s.snapshot.state === 'unknown' || !s.rpc || !s.commandSandbox) return;
-        let dispatched = false;
-        const dispatch = (environment: Record<string,string>, secrets: Record<string,string> = environment) => {
-          if (terminal(s.snapshot) || s.cancelled || s.snapshot.state === 'unknown' || !s.rpc || s.rpc.isClosed) return null;
-          const merged = { ...s.skillEnvironment };
-          mergeSkillEnvironment(merged, environment, skill.name);
-          s.skillEnvironment = merged;
-          mergeSkillEnvironment(s.skillSecrets, secrets, skill.name);
-          // Send synchronously while the frozen configuration lease is held.
-          // Capture rejection immediately; releasing filesystem locks is async.
-          dispatched = true;
-          return s.rpc.request('command/exec', { command: args.command, cwd: s.commandCwd, env: environment, sandboxPolicy: s.commandSandbox, timeoutMs: 60000, outputBytesCap: 16000 }, 70000)
-            .then(result => ({ result, error: null }), error => ({ result: null, error }));
-        };
-        let command: ReturnType<typeof dispatch>;
-        try {
-          command = s.callbacks.withSkillEnvironment
-            ? (await s.callbacks.withSkillEnvironment(skill.skillId, dispatch)).value
-            : dispatch(await s.callbacks.skillEnvironment!(skill.skillId));
-        } catch (error) {
-          // A lock-release error may occur after the command has already been
-          // sent. Never report it as a harmless configuration rejection.
-          if (dispatched) { s.commandUncertain = true; this.unknown(s, 'Skill command dispatch outcome unconfirmed; keep project occupancy'); }
-          throw error;
-        }
-        if (!command) return;
-        const outcome = await command;
-        if (outcome.error) { s.commandUncertain = true; this.unknown(s, 'Skill command exit unconfirmed; keep project occupancy'); throw outcome.error; }
-        const result = outcome.result;
-        if (!terminal(s.snapshot) && !s.cancelled && !['unknown'].includes(s.snapshot.state)) s.rpc?.reply(id, { contentItems: [{type:'inputText', text:JSON.stringify({exitCode:result.exitCode,stdout:redactSkillValues(String(result.stdout??''),s.skillSecrets),stderr:redactSkillValues(String(result.stderr??''),s.skillSecrets)})}], success:result.exitCode===0 });
-      }).catch(error => {
-        // Service validation errors contain names only; never expose RPC error
-        // payloads, stderr, commands or configuration values on failure.
-        try { if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown') s.rpc?.reply(id, { contentItems: [{type:'inputText',text: error?.name==='ServiceError' ? redactSkillValues(String(error.message),s.skillSecrets) : 'Skill command unavailable or denied by the Codex sandbox. No permission escalation or configuration substitution was performed.'}], success:false }); } catch { /* transport already records uncertainty */ }
-      }).finally(() => { s.pendingSkillCommands = (s.pendingSkillCommands ?? 1) - 1; });
+    const registered = s.wireInteractions.get(id);
+    if (registered && registered.method !== method) { this.interactionConflict(s, id); return; }
+    if (method === 'item/tool/call' && s.hostTools && params.tool !== 'run_skill_command') {
+      const rpc = s.rpc;
+      const fingerprint = JSON.stringify({ tool: params.tool, arguments: params.arguments }, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+      const prior = s.hostCalls.get(id);
+      if (prior !== undefined) {
+        if (prior !== fingerprint) { this.unknown(s, 'Native tool request identity conflict'); rpc?.close(); }
+        return;
+      }
+      if (s.hostCalls.size >= 256 || Buffer.byteLength(fingerprint) > 16384) { this.unknown(s, 'Native tool request budget exceeded'); rpc?.close(); return; }
+      // Host invocation and wire delivery each happen once for this native ID.
+      s.hostCalls.set(id, fingerprint);
+      this.track(s, s.hostTools.call({ callId: JSON.stringify(id), runId: s.context.runId, attemptId: s.context.attemptId!, name: params.tool, arguments: params.arguments }).then(result => {
+        if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && rpc && !rpc.isClosed) rpc.reply(id, { contentItems: [{ type: 'inputText', text: result.content }], success: result.success });
+      }).catch(() => { if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && rpc && !rpc.isClosed) rpc.reply(id, { contentItems: [{ type: 'inputText', text: 'Host tool call unavailable' }], success: false }); }));
+      return;
+    }
+    if (method === 'item/tool/call' && params.tool === 'run_skill_command') {
+      const deliver = (result: import('@openworkgraph/protocol').Json) => {
+        if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && s.rpc && !s.rpc.isClosed) s.rpc.reply(id, { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: !!result && typeof result === 'object' && !Array.isArray(result) && result.exitCode === 0 });
+      };
+      void this.skillCommand(s, JSON.stringify(id), params.arguments, deliver).catch(error => {
+        if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && s.rpc && !s.rpc.isClosed) s.rpc.reply(id, { contentItems: [{ type: 'inputText', text: error?.name === 'ServiceError' ? redactSkillValues(text(error.message), s.skillSecrets) : 'Skill command unavailable or denied by the native sandbox.' }], success: false });
+      });
       return;
     }
     if (method === 'item/tool/call' && params.tool === 'validate_visualize_output' && s.callbacks.validateVisualizeOutput && (s.context.kind === 'visualize_generation' || s.context.kind === 'execution' && hasVisualizeFeature(s.context.features))) {
@@ -380,32 +393,54 @@ export class CodexBackendAdapter implements BackendAdapter {
     const question = method === 'item/tool/requestUserInput';
     const approval = ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval'].includes(method);
     if (!question && !approval) { s.rpc?.reject(id); return; }
-    if (s.interactions.size >= 32) { s.rpc?.reject(id); return; }
-    const permissions = method === 'item/permissions/requestApproval' && params.permissions && typeof params.permissions === 'object' && !Array.isArray(params.permissions)
-      ? Object.fromEntries(Object.entries(params.permissions).filter(([key, value]) => ['network', 'fileSystem'].includes(key) && value !== null)) : undefined;
-    const interaction: BackendInteraction = { id: randomUUID(), kind: question ? 'question' : 'approval', questions: [], reason: text(params.reason), command: typeof params.command === 'string' ? text(params.command) : permissions ? JSON.stringify(permissions) : null, canApprove: approval && (method !== 'item/permissions/requestApproval' || permissions !== undefined) };
+    if (typeof id === 'string' && id.length > 200) { this.interactionConflict(s, id, 'Native interaction identity exceeds retention budget'); return; }
+    const permissions = method === 'item/permissions/requestApproval' ? normalizeApprovalPermissions(params.permissions) ?? undefined : undefined;
+    const fileChange = method === 'item/fileChange/requestApproval' ? s.fileChanges.get(params.itemId) : undefined;
+    const interaction: BackendInteraction = { id: registered?.privateId ?? randomUUID(), kind: question ? 'question' : 'approval', questions: [], reason: text(params.reason), command: typeof params.command === 'string' ? text(params.command) : permissions ? canonicalWirePayload(permissions) : null, canApprove: approval && (method !== 'item/permissions/requestApproval' || permissions !== undefined) && (method !== 'item/fileChange/requestApproval' || !!fileChange?.paths?.length) };
     interaction.reason = redactSkillValues(interaction.reason,s.skillSecrets);
     if (interaction.command) interaction.command = redactSkillValues(interaction.command,s.skillSecrets);
     if (question) {
-      if (!Array.isArray(params.questions) || !params.questions.length || params.questions.length > 10) { s.rpc?.reject(id); return; }
-      interaction.questions = params.questions.map((q: any) => ({ id: text(q.id, 200), text: text(q.question), options: Array.isArray(q.options) ? q.options.map((o: any) => text(o.label, 500)) : [] }));
-      if (interaction.questions.some(q => !q.id) || new Set(interaction.questions.map(q => q.id)).size !== interaction.questions.length) { s.rpc?.reject(id); return; }
+      if (!Array.isArray(params.questions) || !params.questions.length || params.questions.length > 10) { if (registered) this.interactionConflict(s, id); else s.rpc?.reject(id); return; }
+      interaction.questions = params.questions.map((q: any) => ({ id: text(q.id, 200), text: text(q.question), options: Array.isArray(q.options) ? q.options.map((o: any) => text(o.label, 500)) : [], mode: q.isOther === false && q.options?.length ? 'single' as const : 'text' as const }));
+      if (interaction.questions.some(q => !q.id) || new Set(interaction.questions.map(q => q.id)).size !== interaction.questions.length) { if (registered) this.interactionConflict(s, id); else s.rpc?.reject(id); return; }
       for (const q of interaction.questions) { q.text = redactSkillValues(q.text,s.skillSecrets); q.options = q.options.map(option=>redactSkillValues(option,s.skillSecrets)); }
     }
+    if (approval) {
+      const paths = fileChange?.paths?.map(path => redactSkillValues(path, s.skillSecrets)) ?? [];
+      interaction.details = { version: 1, kind: method === 'item/commandExecution/requestApproval' ? 'command' : method === 'item/fileChange/requestApproval' ? 'file_change' : 'permissions', summary: interaction.reason || 'Native approval request', ...(interaction.command ? { command: interaction.command } : {}), ...(paths.length ? { paths } : {}), ...(permissions ? { permissions: JSON.parse(redactSkillValues(JSON.stringify(permissions), s.skillSecrets)) } : {}), scope: method === 'item/permissions/requestApproval' ? 'turn' : 'once' };
+      if (JSON.stringify(interaction.details).length > 32000) interaction.canApprove = false;
+    }
+    const { id: _privateId, ...payload } = interaction;
+    // Canonical public payload is the stable user-visible contract. Also hash
+    // original action fields so redaction/truncation cannot hide a changed grant.
+    const canonical = canonicalWirePayload({ method, payload, action: { itemId: params.itemId, command: params.command, permissions: params.permissions, changes: params.changes, fileChange: fileChange?.fingerprint, questions: params.questions } });
+    const fingerprint = createHash('sha256').update(canonical).digest('hex');
+    if (registered) { if (registered.fingerprint !== fingerprint) this.interactionConflict(s, id); return; }
+    if (s.wireInteractions.size >= 256) { this.interactionConflict(s, id, 'Native interaction retention limit exceeded'); return; }
+    if (s.interactions.size >= 32) { s.rpc?.reject(id); return; }
+    // Type-sensitive RpcId map retains the first private identity even after
+    // answering, cancellation, or uncertain delivery. Never resend its answer.
+    s.wireInteractions.set(id, { method, fingerprint, privateId: interaction.id });
     s.interactions.set(interaction.id, { wireId: id, method, public: interaction, ...(permissions ? { permissions } : {}) });
     s.snapshot.state = question ? 'waiting_answer' : 'waiting_approval'; this.emit(s);
-    s.eventQueue = s.eventQueue.then(() => s.callbacks.onInteraction(structuredClone(interaction))).catch(() => { this.unknown(s, 'Host interaction callback failed'); s.rpc?.close(); });
+    s.eventQueue = s.eventQueue.then(() => s.callbacks.onInteraction(structuredClone(interaction))).catch(() => { s.callbackFailed = true; this.unknown(s, 'Host interaction callback failed'); s.rpc?.close(); });
+  }
+  private interactionConflict(s: Session, id: RpcId, reason = 'Native interaction protocol conflict: wire identity reused'): void {
+    s.interactionConflict = true;
+    try { if (s.rpc && !s.rpc.isClosed) s.rpc.reject(id); } catch { /* uncertainty below retains the original registration */ }
+    this.unknown(s, reason); s.rpc?.close();
   }
   async respond(runId: string, interactionId: string, reply: BackendReply): Promise<RuntimeSnapshot> {
     const s = this.get(runId); const fingerprint = JSON.stringify(reply);
     if (s.replies.has(interactionId)) { if (s.replies.get(interactionId) !== fingerprint) throw new BackendError('CONFLICT', 'Interaction already answered'); return this.snapshot(s); }
     const pending = s.interactions.get(interactionId);
-    if (!pending || terminal(s.snapshot) || s.snapshot.state === 'unknown' || s.cancelled) throw new BackendError('CONFLICT', 'Interaction is stale or unavailable');
+    if (!pending || s.wireInteractions.get(pending.wireId)?.privateId !== interactionId || terminal(s.snapshot) || s.snapshot.state === 'unknown' || s.cancelled) throw new BackendError('CONFLICT', 'Interaction is stale or unavailable');
     if (reply.kind !== pending.public.kind) throw new BackendError('INVALID_INPUT', 'Wrong interaction reply kind');
     let result: unknown;
     if (reply.kind === 'question') {
       const ids = pending.public.questions.map(q => q.id); const answers = reply.answers;
       if (!answers || Object.keys(answers).length !== ids.length || ids.some(key => !Array.isArray(answers[key]) || !answers[key]!.length || answers[key]!.some(a => typeof a !== 'string' || a.length > 16000))) throw new BackendError('INVALID_INPUT', 'Answer every requested question exactly once');
+      if (pending.public.questions.some(q => q.mode === 'single' && (answers[q.id]!.length !== 1 || !q.options.includes(answers[q.id]![0]!)))) throw new BackendError('INVALID_INPUT', 'Select one declared native option');
       result = { answers: Object.fromEntries(ids.map(key => [key, { answers: answers[key] }])) };
     } else {
       if (!['accept', 'decline'].includes(reply.decision) || (reply.decision === 'accept' && !pending.public.canApprove)) throw new BackendError('INVALID_INPUT', 'Approval request is unavailable');
@@ -418,7 +453,7 @@ export class CodexBackendAdapter implements BackendAdapter {
   }
   async cancel(runId: string): Promise<RuntimeSnapshot> {
     const s = this.get(runId); if (terminal(s.snapshot)) return this.snapshot(s);
-    s.cancelled = true; s.titleRpc?.close(); s.snapshot.state = 'cancelling'; this.emit(s);
+    s.cancelled = true; s.operations.cancelPending(); s.titleRpc?.close(); s.snapshot.state = 'cancelling'; this.emit(s);
     if (!s.snapshot.threadId || !s.snapshot.turnId || s.interruptRequested) return this.snapshot(s);
     s.interruptRequested = true;
     try { await s.rpc!.request('turn/interrupt', { threadId: s.snapshot.threadId, turnId: s.snapshot.turnId }); } catch { this.unknown(s, 'Interrupt unconfirmed; keep project occupancy'); }
@@ -429,7 +464,7 @@ export class CodexBackendAdapter implements BackendAdapter {
     const s = this.get(runId); if (terminal(s.snapshot)) return this.snapshot(s);
     // Once this Run's child exits, its ephemeral turn cannot continue. Preserve
     // partial edits and report interruption rather than indefinite uncertainty.
-    if (s.rpc?.isExited && !s.pendingSkillCommands && !s.commandUncertain) {
+    if (s.rpc?.isDrained && !s.pendingSkillCommands && !s.commandUncertain) {
       if (s.rpc.failure) s.snapshot.transportFailure = s.rpc.failure;
       s.snapshot.state = s.cancelled ? 'cancelled' : 'interrupted';
       s.snapshot.reason = 'Backend process exited without a confirmed turn completion';
@@ -443,6 +478,69 @@ export class CodexBackendAdapter implements BackendAdapter {
     this.unknown(s, 'No matching terminal turn notification; live ephemeral turn remains attached');
     return this.snapshot(s);
   }
+  dispatchSkillCommand(runId: string, callId: string, args: unknown): Promise<import('@openworkgraph/protocol').Json> {
+    return this.skillCommand(this.get(runId), callId, args);
+  }
+  private skillCommand(s: Session, callId: string, args: any, deliver?: (result: import('@openworkgraph/protocol').Json) => void): Promise<import('@openworkgraph/protocol').Json> {
+    if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['skillId', 'command'].includes(key)) || typeof args.skillId !== 'string' || !Array.isArray(args.command) || !args.command.length || args.command.length > 128 || args.command.some((arg: unknown) => typeof arg !== 'string' || arg.length > 16000 || arg.includes('\0')) || !args.command[0]) return Promise.reject(new BackendError('INVALID_INPUT', 'Invalid skill command'));
+    if (terminal(s.snapshot) || s.cancelled || s.snapshot.state === 'unknown' || !s.rpc || s.rpc.isClosed) return Promise.reject(new BackendError('CONFLICT', 'Stale skill command'));
+    const skill = s.context.skills?.find(skill => skill.skillId === args.skillId && skill.source === 'openworkgraph');
+    if (!skill || !(s.callbacks.withSkillEnvironment || s.callbacks.skillEnvironment)) return Promise.reject(new BackendError('INVALID_INPUT', 'Skill does not belong to the frozen Run'));
+    const command = structuredClone(args.command), fingerprint = JSON.stringify(args), prior = s.commandCalls.get(callId);
+    if (prior) return prior.fingerprint === fingerprint ? prior.result : Promise.reject(new BackendError('CONFLICT', 'Skill command identity conflict'));
+    s.operations.enqueue(callId); s.pendingSkillCommands = (s.pendingSkillCommands ?? 0) + 1;
+    const work = s.skillQueue.then(async () => {
+      if (s.cancelled || terminal(s.snapshot) || s.snapshot.state === 'unknown') throw new BackendError('CONFLICT', 'Skill command cancelled before dispatch');
+      const baseLease: NonNullable<BackendCallbacks['withSkillEnvironment']> = s.callbacks.withSkillEnvironment ?? (async (_skillId, dispatch) => { const environment = await s.callbacks.skillEnvironment!(skill.skillId); return { value: dispatch(environment, environment) }; });
+      const lease: NonNullable<BackendCallbacks['withSkillEnvironment']> = (skillId, dispatch) => baseLease(skillId, (environment, secrets) => {
+        // Configuration rejection precedes the native side-effect reservation.
+        const merged = { ...s.skillEnvironment }, masks = { ...s.skillSecrets };
+        mergeSkillEnvironment(merged, environment, skill.name); mergeSkillEnvironment(masks, secrets, skill.name);
+        if (!s.rpc || s.rpc.isClosed || !s.commandSandbox || s.cancelled) throw new BackendError('CONFLICT', 'Native command unavailable');
+        s.skillEnvironment = merged; s.skillSecrets = masks; return dispatch(environment, secrets);
+      });
+      try {
+        const result = await s.operations.dispatch(callId, skill.skillId, lease, (environment, secrets) => {
+          if (!s.rpc || s.rpc.isClosed || !s.commandSandbox || s.cancelled) throw new BackendError('CONFLICT', 'Native command unavailable');
+          // Synchronous send under lease; await native exit outside the lease.
+          return s.rpc.request('command/exec', { command, cwd: s.commandCwd, env: environment, sandboxPolicy: s.commandSandbox, timeoutMs: 60000, outputBytesCap: 16000 }, 70000).then(result => {
+            if (!Number.isSafeInteger(result?.exitCode) || typeof result.stdout !== 'string' || typeof result.stderr !== 'string' || Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > 32000) throw new BackendError('PROTOCOL', 'Invalid native command exit result');
+            return result;
+          });
+        });
+        const value = { exitCode: result.exitCode as number, stdout: redactSkillValues(result.stdout, s.skillSecrets), stderr: redactSkillValues(result.stderr, s.skillSecrets) };
+        deliver?.(value); return value;
+      } catch (error) {
+        if (s.operations.outcomeUnknown) { s.commandUncertain = true; this.unknown(s, 'Skill command dispatch outcome unconfirmed; command exit or delivery unconfirmed; keep project occupancy'); s.rpc?.close(); }
+        throw error;
+      }
+    }).finally(() => { s.pendingSkillCommands = (s.pendingSkillCommands ?? 1) - 1; });
+    s.skillQueue = work.then(() => {}, () => {});
+    s.commandCalls.set(callId, { fingerprint, result: work }); return work;
+  }
+  private track<T>(s: Session, promise: Promise<T>): Promise<T> {
+    s.work.add(promise); void promise.then(() => s.work.delete(promise), () => s.work.delete(promise)); return promise;
+  }
+  async drainSideEffects(runId: string, requireStartSettled = true): Promise<void> {
+    const s = this.get(runId);
+    if (!terminal(s.snapshot) || s.commandUncertain || s.operations.outcomeUnknown || requireStartSettled && s.launching) throw new BackendError('CONFLICT', 'Run side effects remain unresolved');
+    await s.skillQueue;
+    while (s.work.size) await Promise.all([...s.work]);
+    await Promise.all([s.rpc, s.titleRpc].filter((rpc): rpc is StdioRpc => !!rpc).map(rpc => rpc.waitForClose()));
+    if (s.pendingSkillCommands || s.commandUncertain) throw new BackendError('CONFLICT', 'Independent command exit remains unresolved');
+  }
+  async releaseRun(runId: string): Promise<void> {
+    const s = this.get(runId); await this.drainSideEffects(runId); await s.eventQueue;
+    if (!terminal(s.snapshot) || s.callbackFailed) throw new BackendError('CONFLICT', 'Host callback completion remains unconfirmed');
+    s.signal?.removeEventListener('abort', s.abort!); this.forget(runId);
+  }
+  /** Control return values obey the same drain/callback barrier as notifications. */
+  async settledSnapshot(runId: string): Promise<RuntimeSnapshot> {
+    const s = this.get(runId); await this.drainSideEffects(runId); await s.eventQueue; return this.snapshot(s);
+  }
+  async disposeUnstarted(): Promise<void> { if (this.sessions.size) throw new BackendError('CONFLICT', 'Cannot dispose an attached Run'); }
+  async disposeDrained(): Promise<void> { if (this.sessions.size) throw new BackendError('CONFLICT', 'Release attached Runs before disposal'); }
+  hasRun(runId: string): boolean { return this.sessions.has(runId); }
   inspect(runId: string): RuntimeSnapshot { return this.snapshot(this.get(runId)); }
   /** Call only after durable terminal finalization. Unknown Runs are never silently forgotten. */
   forget(runId: string): void { const s = this.get(runId); if (!terminal(s.snapshot)) throw new BackendError('CONFLICT', 'Cannot forget an unresolved Run'); s.titleRpc?.close(); s.rpc?.close(); this.sessions.delete(runId); }

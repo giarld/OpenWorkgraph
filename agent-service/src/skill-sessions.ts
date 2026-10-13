@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { isSkillName, legacySkillMentions } from '@openworkgraph/protocol';
+import { isSkillName, isSkillIdentity, legacySkillMentions, skillIdentityKey } from '@openworkgraph/protocol';
 import { isAbsolute, basename } from 'node:path';
 import type { FrozenPromptSelection, FrozenSkill, SkillReference } from '@openworkgraph/protocol';
 import type { BuiltinSkills } from './builtin-skills.js';
@@ -8,6 +8,7 @@ import type { AdapterOptions } from './backend/adapter.js';
 import { discoverCodexSkills } from './skills-api.js';
 import { ServiceError } from './errors.js';
 import { freezeVisualizeFeatures } from './visualize-features.js';
+import type { NativeSkillCatalog } from './agents/skills.js';
 
 /** Values live only in private configuration files and an individual session's memory. */
 export class SkillSessions {
@@ -19,8 +20,9 @@ export class SkillSessions {
     const skills = await this.freeze(prompt, references, cwd);
     return { skills, features: frozenFeatures };
   }
-  async freeze(prompt: string, raw: unknown, cwd: string): Promise<FrozenSkill[]> {
+  async freeze(prompt: string, raw: unknown, cwd: string, native?: NativeSkillCatalog): Promise<FrozenSkill[]> {
     const references = this.references(prompt, raw);
+    if (references.some(ref => ref.source !== 'openworkgraph' && (ref.source === 'codex' ? 'codex' : ref.backendId) !== (native?.backendId ?? 'codex'))) throw new ServiceError('INPUT_BLOCKED', '原生技能不属于本次执行器，请重新选择。');
     const names = legacySkillMentions(prompt);
     const installed = await this.packages.installed();
     if (!installed.length && !names.length && !references.length) return [];
@@ -32,16 +34,21 @@ export class SkillSessions {
     }
     // The installed directory is an automatic-use catalog; Codex discovery is only
     // needed when the prompt itself contains a reference, never for upstream text.
-    const codex = names.length || references.length ? await discoverCodexSkills(cwd, this.backendOptions) : [];
+    // Legacy references keep their exact path identity; public native identities
+    // are resolved by the plugin. Never replace one with a same-named skill.
+    const legacyCodex = (!native && (names.length || references.length) || references.some(ref => ref.source === 'codex')) ? await discoverCodexSkills(cwd, this.backendOptions) : [];
+    const codex = native ? native.skills.map(skill => ({ ...skill, source: 'agent' as const, backendId: native.backendId, path: '' })) : legacyCodex;
     for (const ref of references) {
       if (ref.source === 'openworkgraph') {
-        const item = result.find(item => item.skillId === ref.skillId);
+        const item = result.find(item => skillIdentityKey(item) === skillIdentityKey(ref));
         if (!item) throw new ServiceError('INPUT_BLOCKED', '引用技能未安装，请安装或重新选择：' + ref.name);
         item.explicit = true;
       } else {
-        const item = codex.find(item => item.skillId === ref.skillId);
+        const owner = ref.source === 'codex' ? 'codex' : ref.backendId;
+        if (owner !== (native?.backendId ?? 'codex')) throw new ServiceError('INPUT_BLOCKED', '原生技能不属于本次执行器，请重新选择：' + ref.name);
+        const item = (ref.source === 'codex' ? legacyCodex : codex).find(item => item.skillId === ref.skillId);
         if (!item) throw new ServiceError('INPUT_BLOCKED', 'Codex 技能引用已失效，请重新选择：' + ref.name);
-        if (!result.some(entry => entry.skillId === item.skillId)) result.push({ ...item, explicit: true, requiresConfiguration: false });
+        if (!result.some(entry => skillIdentityKey(entry) === skillIdentityKey(item))) result.push({ ...item, explicit: true, requiresConfiguration: false });
       }
     }
     // Explicit spans win; a legacy $name outside those spans is resolved by name.
@@ -52,11 +59,13 @@ export class SkillSessions {
       if (builtin.length === 1) { builtin[0]!.explicit = true; continue; }
       const candidates = codex.filter(item => item.name === name);
       if (candidates.length > 1) throw new ServiceError('INPUT_BLOCKED', 'Codex 技能名称有歧义，请使用 @ 重新选择：' + name);
-      if (candidates.length === 1 && !result.some(item => item.skillId === candidates[0]!.skillId)) result.push({ ...candidates[0]!, explicit: true, requiresConfiguration: false });
+      if (candidates.length === 1 && !result.some(item => skillIdentityKey(item) === skillIdentityKey(candidates[0]!))) result.push({ ...candidates[0]!, explicit: true, requiresConfiguration: false });
       // Unknown hand-written dollar tokens retain old prompt compatibility.
     }
-    await this.environment(result, true);
-    return result;
+    if (native && !native.configuredSkills && result.some(skill => skill.explicit && skill.requiresConfiguration)) throw new ServiceError('INPUT_BLOCKED', '执行器不支持技能配置注入。');
+    const allowed = native && !native.configuredSkills ? result.filter(skill => !skill.requiresConfiguration) : result;
+    await this.environment(allowed, true);
+    return allowed;
   }
   private references(prompt: string, raw: unknown): SkillReference[] {
     if (raw === undefined) return [];
@@ -64,7 +73,7 @@ export class SkillSessions {
     const references: SkillReference[] = [];
     for (const value of raw) {
       const ref = value as SkillReference;
-      if (!ref || typeof ref.skillId !== 'string' || !ref.skillId || !isSkillName(ref.name) || !['codex','openworkgraph'].includes(ref.source) || !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < 0 || ref.end > prompt.length || prompt.slice(ref.start,ref.end) !== '$' + ref.name || references.some(item => ref.start < item.end && ref.end > item.start)) throw new ServiceError('INPUT_BLOCKED', '技能引用与提示词不一致，请重新选择。');
+      if (!isSkillIdentity(ref) || !isSkillName(ref.name) || !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < 0 || ref.end > prompt.length || prompt.slice(ref.start,ref.end) !== '$' + ref.name || references.some(item => ref.start < item.end && ref.end > item.start)) throw new ServiceError('INPUT_BLOCKED', '技能引用与提示词不一致，请重新选择。');
       references.push(ref);
     }
     return references;
@@ -87,6 +96,7 @@ export class SkillSessions {
     const requests: SkillConfigRevisionRequest[] = [];
     for (const skill of frozen) {
       if (!selected(skill)) continue;
+      if (skill.source === 'agent') { if (!isSkillIdentity(skill)) throw new ServiceError('INPUT_BLOCKED', '冻结原生技能身份无效。'); continue; }
       if (skill.source === 'codex') {
         if (!isAbsolute(skill.path) || basename(skill.path) !== 'SKILL.md' || (await fs.stat(skill.path)).size > 128 * 1024) throw new ServiceError('INPUT_BLOCKED', '冻结 Codex 技能路径不可用：' + skill.name);
         continue;

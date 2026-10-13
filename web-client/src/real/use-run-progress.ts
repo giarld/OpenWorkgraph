@@ -76,14 +76,14 @@ export function useRunPrompts(request: Request, runs: Run[], online: boolean, re
 }
 
 export function useInputChanges(request: Request, run: Run | undefined, online: boolean, revision: number) {
-  const [result, setResult] = useState<{ request: Request; id: string; changed: boolean }>();
+  const [result, setResult] = useState<{ request: Request; id: string; status: Run["status"]; revision: number; changed: boolean }>();
   useEffect(() => {
     let live = true;
     if (!online || !run?.id) return;
     request<{ state: string }>("/v1/runs/" + encodeURIComponent(run.id) + "/input-changes").then(value => {
-      if (live) setResult({ request, id: run.id, changed: value.state === "changed" });
+      if (live) setResult({ request, id: run.id, status: run.status, revision, changed: value.state === "changed" });
     }).catch(() => { if (live) setResult(undefined); });
     return () => { live = false; };
   }, [request, run?.id, run?.status, online, revision]);
-  return result?.request === request && result.id === run?.id && result.changed;
+  return online && result?.request === request && result.id === run?.id && result.status === run.status && result.revision === revision && result.changed;
 }

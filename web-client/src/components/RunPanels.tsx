@@ -1,6 +1,6 @@
 import type { BuiltinFeatureCandidate, SkillCandidates, SkillCandidate as ProtocolSkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
 import { isVisualizeFeatureSelection, type VisualizeFeatureSelection } from "../../../packages/protocol/src/visualize";
-import { legacySkillMentions } from "../../../packages/protocol/src/skills";
+import { legacySkillMentions, skillIdentityKey, skillSourceLabel } from "../../../packages/protocol/src/skills";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -35,6 +35,7 @@ import {
   insertSkillReference,
   syncSkillReferences,
   orderedSkillCandidates,
+  skillCandidatesPath,
   type ProjectFileMentionCandidate,
 } from "../real/project-file-mentions";
 import { useI18n } from "../i18n/I18nProvider";
@@ -105,8 +106,8 @@ export function PromptPanel({
 type MentionRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>;
 type SkillCandidate = ProtocolSkillCandidate & { kind: "skill" };
 type MentionCandidate = ProjectFileMentionCandidate | SkillCandidate | ReferenceMentionCandidate | BuiltinFeatureCandidate;
-const mentionGroup = (item: MentionCandidate) => item.kind === "directory" ? "file" : item.kind === "skill" ? item.source : item.kind;
-const mentionGroups = ['reference', 'file', 'builtin-feature', 'openworkgraph', 'codex'] as const;
+const mentionGroup = (item: MentionCandidate) => item.kind === "directory" ? "file" : item.kind === 'skill' ? (item.source === 'openworkgraph' ? 'openworkgraph' : 'agent') : item.kind;
+const mentionGroups = ['reference', 'file', 'builtin-feature', 'openworkgraph', 'agent'] as const;
 type MentionGroup = typeof mentionGroups[number];
 const builtinCandidates = (items: BuiltinFeatureCandidate[] = []) => items.filter((item, index) =>
   isVisualizeFeatureSelection({ kind: item.kind, featureId: item.featureId, version: item.version }) &&
@@ -150,8 +151,10 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionPosition, setMentionPosition] = useState<{ top: number; left?: number; right?: number; maxHeight?: number; transform?: string }>({ top: 0 });
   const [availableSkills, setAvailableSkills] = useState<ProtocolSkillCandidate[] | null>(null);
+  const skillBackendNames: Record<string, string> = Object.fromEntries((availableSkills ?? []).flatMap(item =>
+    item.source === 'agent' && item.backendName?.trim() ? [[item.backendId, item.backendName]] : []));
   const [skillRefresh, setSkillRefresh] = useState(0);
-  const referenceIdentities = JSON.stringify(skillReferences.map(ref => [ref.source, ref.skillId]));
+  const referenceIdentities = JSON.stringify(skillReferences.map(skillIdentityKey));
   const hasLegacySkills = legacySkillMentions(value).length > 0;
   useEffect(() => {
     // Existing tasks selected the feature before prompts had a visible token.
@@ -171,10 +174,10 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     }
     return () => { cancelled = true; };
   }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, referenceIdentities, hasLegacySkills, skillRefresh]);
-  const missingSkills = skillReferences.filter(ref => (ref.source === "codex" && ref.skillId.startsWith("codex-unresolved:")) || (availableSkills && !availableSkills.some(item => item.source === ref.source && item.skillId === ref.skillId)));
+  const missingSkills = skillReferences.filter(ref => (ref.source === "codex" && ref.skillId.startsWith("codex-unresolved:")) || (availableSkills && !availableSkills.some(item => skillIdentityKey(item) === skillIdentityKey(ref))));
   const notices = [
     ...additionalWarnings.map(text => ({ text, warning: true })),
-    ...(missingSkills.length ? [{ text: t("Referenced skills are missing from this Workspace. Install them or select them again:") + " " + Array.from(new Set(missingSkills.map(ref => ref.name + " (" + (ref.source === "openworkgraph" ? "OpenWorkgraph" : "Codex") + ")"))).join(", "), warning: true }] : []),
+    ...(missingSkills.length ? [{ text: t("Referenced skills are missing from this Workspace. Install them or select them again:") + " " + Array.from(new Set(missingSkills.map(ref => ref.name + " (" + skillSourceLabel(ref, skillBackendNames) + ")"))).join(", "), warning: true }] : []),
     { text: visibleStatus, warning: false },
     { text: runHint && !runHint.startsWith(t("In progress")) ? runHint : "", warning: false },
     { text: inputChanged ? t("Input updated · The next run will use the new content") : "", warning: true },
@@ -267,11 +270,11 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
         .then(result => complete('file', (result.items ?? []).filter(item => item.kind === 'file' || item.kind === 'directory')))
         .catch(() => complete('file', [], true));
     }
-    for (const source of pendingMentionGroups(query).filter(group => group !== 'file')) {
-      const path = trimmed ? "/skills/search?" + new URLSearchParams({ query: trimmed, source }) : "/skills?" + new URLSearchParams({ source });
+    for (const source of pendingMentionGroups(query).filter(group => group === 'agent' || group === 'openworkgraph' || group === 'builtin-feature')) {
+      const path = skillCandidatesPath(trimmed, source);
       void mentionRequest!<SkillCandidates>(base + path)
         .then(result => complete(source, source === 'builtin-feature' ? builtinCandidates(result.features)
-          : orderedSkillCandidates(result.items ?? []).filter(item => item.source === source).map(item => ({ ...item, kind: 'skill' as const }))))
+          : orderedSkillCandidates(result.items ?? []).filter(item => mentionGroup({ ...item, kind: 'skill' }) === source).map(item => ({ ...item, kind: 'skill' as const }))))
         .catch(() => complete(source, [], true));
     }
   };
@@ -280,7 +283,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     return [
       ...(mentionEnabled && query.trim() ? ['file' as const] : []),
       ...(featureSelectionEnabled ? ['builtin-feature' as const] : []),
-      ...(mentionEnabled && skillEnabled ? ['openworkgraph' as const, 'codex' as const] : []),
+      ...(mentionEnabled && skillEnabled ? ['openworkgraph' as const, 'agent' as const] : []),
     ];
   };
   const updateMention = (text: string, cursor: number) => {
@@ -356,7 +359,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
       <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
     </div>
     <div className="prompt-input">
-      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} skillReferences={skillReferences} skillNames={availableSkills?.map(item => item.name)} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
+      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} skillReferences={skillReferences} skillNames={availableSkills?.map(item => item.name)} skillBackendNames={skillBackendNames} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
         onScroll={() => { if (mention) updateMentionPosition(); }}
         onDragOver={event => {
           if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
@@ -421,20 +424,20 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
           const items = mention.items.filter(item => mentionGroup(item) === group);
           const loading = mention.loadingGroups.includes(group);
           const failed = mention.failedGroups.includes(group);
-          const heading = group === 'reference' ? t('Reference content') : group === 'file' ? t('Project files') : group === 'builtin-feature' ? featureHeading : group === 'openworkgraph' ? t('WORKGRAPH skills') : t('Codex skills');
+          const heading = group === 'reference' ? t('Reference content') : group === 'file' ? t('Project files') : group === 'builtin-feature' ? featureHeading : group === 'openworkgraph' ? t('WORKGRAPH skills') : t(items.length && items.every(item => item.kind === 'skill' && item.source === 'codex') ? 'Codex skills' : 'Agent skills');
           if (!items.length && !loading && !failed) return null;
           return <div key={group} role="group" aria-label={heading} aria-busy={loading}>
           <div className="prompt-mention-heading">{heading}</div>
           {loading && <div className="prompt-mention-empty">{t('Loading suggestions…')}</div>}
           {failed && <div className="prompt-mention-error">{t('Unable to load suggestions')}</div>}
-          {items.map(item => { const index = mention.items.indexOf(item); return <div key={item.kind + ":" + (item.kind === "reference" ? item.id : item.kind === "builtin-feature" ? item.featureId : item.kind === "skill" ? item.source + ":" + item.skillId : item.relativePath)}>
+          {items.map(item => { const index = mention.items.indexOf(item); return <div key={item.kind + ":" + (item.kind === "reference" ? item.id : item.kind === "builtin-feature" ? item.featureId : item.kind === "skill" ? skillIdentityKey(item) : item.relativePath)}>
           <button type="button" role="option" aria-selected={index === mention.active}
           disabled={item.kind === "builtin-feature" && (disabled || submitting)}
           className={"prompt-mention-item" + (index === mention.active ? " is-active" : "")}
           onMouseDown={e => e.preventDefault()} onClick={() => insertMention(item)} onMouseEnter={() => setMention(current => current ? { ...current, active: index } : current)}>
           {item.kind === "builtin-feature" && featureSelected(item) ? <Check size={14}/> : item.kind === "skill" || item.kind === "builtin-feature" ? <Sparkles size={14}/> : item.kind === "directory" ? <Folder size={14}/> : <FileText size={14}/>}
           <span className="prompt-mention-name">{item.name}</span>
-          <span className="prompt-mention-path">{item.kind === "reference" ? "" : item.kind === "skill" || item.kind === "builtin-feature" ? item.description : item.relativePath}</span>
+          <span className="prompt-mention-path">{item.kind === "reference" ? "" : item.kind === "skill" || item.kind === "builtin-feature" ? (item.kind === 'skill' ? skillSourceLabel(item) + ' · ' : '') + item.description : item.relativePath}</span>
         </button></div>; })}
         </div>; })}
       </div>)}

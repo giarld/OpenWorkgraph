@@ -1,6 +1,10 @@
 # OpenWorkgraph
 
-OpenWorkgraph is a software development workflow product built around the infinite canvas concept, with support for organizing work and collaborating across other fields.
+> [!IMPORTANT]
+> OpenWorkgraph is an all-purpose visual agent workbench built around the infinite canvas concept. Beyond image, text, and video generation and software development, it helps you organize agent workflows for a wide range of purposes.
+>
+> Visual Agent Workbench
+> Less hassle. Greater efficiency. Bring ideas to life faster.
 
 [简体中文](README.md) | English
 

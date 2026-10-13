@@ -179,6 +179,7 @@ export const componentsZhCN: Record<string, string> = {
   "Skills": "技能",
   "WORKGRAPH skills": "WORKGRAPH 技能",
   "Codex skills": "Codex 技能",
+  "Agent skills": "Agent 技能",
   "Referenced skills are missing from this Workspace. Install them or select them again:": "当前工作空间缺少引用的技能，请安装或重新选择：",
   "Invalid skill references.": "技能引用无效。",
   "No matching suggestions": "没有匹配的项目文件或技能",

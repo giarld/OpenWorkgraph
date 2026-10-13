@@ -1,20 +1,28 @@
-import { isSkillName } from "../../../packages/protocol/src/skills";
+import { isSkillName, isSkillIdentity, skillIdentityKey, portableSkillReference } from "../../../packages/protocol/src/skills";
 import type { SkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
 export type ProjectFileMentionKind = "file" | "directory";
 
 export interface PromptEdit { start: number; end: number; text: string }
 
+/** Native discovery reads the complete catalog, including legacy source=codex.
+ * The HTTP allowlist needs no new backend names or an empty query suffix. */
+export function skillCandidatesPath(query: string, source: 'agent' | 'openworkgraph' | 'builtin-feature'): string {
+  const trimmed = query.trim();
+  const params = new URLSearchParams({ ...(trimmed ? { query: trimmed } : {}), ...(source === 'agent' ? {} : { source }) });
+  return '/skills' + (trimmed ? '/search' : '') + (params.size ? '?' + params : '');
+}
+
 export function validSkillReferences(value: string, input: unknown): SkillReference[] {
   if (!Array.isArray(input)) return [];
   const result: SkillReference[] = [];
   for (const ref of input) {
-    if (!ref || typeof ref !== "object" || Object.keys(ref).some(key => !["skillId", "source", "name", "start", "end"].includes(key)) ||
+    if (!ref || typeof ref !== "object" || Object.keys(ref).some(key => !["skillId", "source", "backendId", "name", "start", "end"].includes(key)) ||
       typeof ref.skillId !== "string" || !ref.skillId.trim() || ref.skillId.length > 4096 || /[\x00-\x1f]/.test(ref.skillId) ||
-      !["openworkgraph", "codex"].includes(ref.source) || !isSkillName(ref.name) ||
+      !isSkillIdentity({ ...ref }) || !isSkillName(ref.name) ||
       !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < 0 || ref.end > value.length ||
       value.slice(ref.start, ref.end) !== "$" + ref.name ||
       (ref.start > 0 && !/\s/.test(value[ref.start - 1])) || (ref.end < value.length && !/[\s.,!?;，。！？；]/.test(value[ref.end]))) continue;
-    result.push({ skillId: ref.skillId, source: ref.source, name: ref.name, start: ref.start, end: ref.end });
+    result.push({ skillId: ref.skillId, source: ref.source, ...(ref.source === "agent" ? { backendId: ref.backendId } : {}), name: ref.name, start: ref.start, end: ref.end } as SkillReference);
   }
   return result.sort((a, b) => a.start - b.start).filter((ref, index, refs) => index === 0 || ref.start >= refs[index - 1].end);
 }
@@ -42,8 +50,8 @@ export function syncSkillReferences(before: string, after: string, refs: readonl
 
 export function orderedSkillCandidates(items: SkillCandidate[]): SkillCandidate[] {
   const seen = new Set<string>();
-  return [...items].sort((a, b) => Number(a.source === "codex") - Number(b.source === "codex")).filter(item => {
-    const key = item.source + ":" + item.skillId;
+  return [...items].sort((a, b) => Number(a.source !== "openworkgraph") - Number(b.source !== "openworkgraph")).filter(item => {
+    const key = skillIdentityKey(item);
     if (seen.has(key)) return false;
     seen.add(key); return true;
   });
@@ -54,7 +62,7 @@ export function insertSkillReference(text: string, start: number, end: number, i
   const insertion = next.value.slice(start, next.caret);
   const tokenStart = start + (insertion.startsWith(" ") ? 1 : 0);
   return { ...next, skillReferences: validSkillReferences(next.value, [...syncSkillReferences(text, next.value, refs, { start, end, text: insertion }),
-    { skillId: item.skillId, source: item.source, name: item.name, start: tokenStart, end: tokenStart + item.name.length + 1 }]) };
+    { skillId: item.skillId, source: item.source, ...(item.source === "agent" ? { backendId: item.backendId } : {}), name: item.name, start: tokenStart, end: tokenStart + item.name.length + 1 }]) };
 }
 
 export interface ProjectFileMentionCandidate {
@@ -68,7 +76,7 @@ export interface MentionQuery {
   query: string;
 }
 
-/** Codex recognizes a skill invocation by its dollar-prefixed name. */
+/** Agents recognize a skill invocation by its dollar-prefixed name. */
 export function insertSkillMention(text: string, start: number, end: number, name: string): { value: string; caret: number } {
   const before = text.slice(0, start);
   const after = text.slice(end);
@@ -141,11 +149,12 @@ export function findMentionQuery(value: string, cursor: number): MentionQuery | 
   return { start, query };
 }
 
-/** Keep explicit Codex provenance without host paths; never downgrade to a legacy name. */
+/** Preserve provenance and opaque native IDs; strip legacy Codex path identities
+ * (including normalized aliases) only at the portable copy boundary. */
 export function portableSkillContent<T>(content: T): T {
   if (!content || typeof content !== 'object' || Array.isArray(content) || !('skillReferences' in content)) return content;
   const raw = content as Record<string, unknown>;
   const refs = validSkillReferences(typeof raw.prompt === 'string' ? raw.prompt : '', raw.skillReferences);
   if (!Array.isArray(raw.skillReferences) || refs.length !== raw.skillReferences.length) throw Error('Invalid skill references');
-  return { ...raw, skillReferences: refs.map(ref => ref.source === 'codex' ? { ...ref, skillId: 'codex-unresolved:' + ref.name } : ref) } as T;
+  return { ...raw, skillReferences: refs.map(portableSkillReference) } as T;
 }

@@ -1,4 +1,4 @@
-import { isSkillName, validateVisualizeNodeContent } from '@openworkgraph/protocol';
+import { isSkillIdentity, isSkillName, portableSkillReference, validateVisualizeNodeContent } from '@openworkgraph/protocol';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Json, ResourceEnvelope, SkillReference } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
@@ -117,10 +117,9 @@ export function validSkillContent(content: Json): boolean {
   const prompt = content.prompt;
   let end = 0;
   for (const value of refs) {
-    if (!object(value) || Object.keys(value).some(key => !['skillId','source','name','start','end'].includes(key))) return false;
+    if (!object(value) || Object.keys(value).some(key => !['skillId','source','backendId','name','start','end'].includes(key)) || !isSkillIdentity(value as unknown)) return false;
     const ref = value as unknown as SkillReference;
-    if (typeof ref.skillId !== 'string' || !ref.skillId.trim() || ref.skillId.length > 4096 || /[\x00-\x1f]/.test(ref.skillId) ||
-      !['openworkgraph','codex'].includes(ref.source) || !isSkillName(ref.name) ||
+    if (!isSkillName(ref.name) ||
       !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < end || ref.end > prompt.length ||
       prompt.slice(ref.start,ref.end) !== '$'+ref.name ||
       (ref.start > 0 && !/\s/.test(prompt[ref.start-1]!)) || (ref.end < prompt.length && !/[\s.,!?;，。！？；]/.test(prompt[ref.end]!))) return false;
@@ -128,11 +127,12 @@ export function validSkillContent(content: Json): boolean {
   }
   return true;
 }
-/** Keep explicit Codex provenance while removing host paths; re-selection is required. */
+/** Keep native opaque identities intact. Strip legacy Codex path identities
+ * (including normalized aliases) only from the portable copy. */
 export function portableSkillContent(content: Json): Json {
   if (!object(content) || content.skillReferences === undefined) return content;
   if (!validSkillContent(content)) invalid('Invalid skill references');
-  return { ...content, skillReferences: (content.skillReferences as Json[]).map(ref => object(ref) && ref.source === 'codex' ? { ...ref, skillId: 'codex-unresolved:' + ref.name } : ref) };
+  return { ...content, skillReferences: (content.skillReferences as unknown as SkillReference[]).map(portableSkillReference) };
 }
 export interface PluginInformation { state: 'available' | 'missing' | 'incompatible' | 'invalid'; typeId: string; schemaVersion: number; content: Json; reason: string | null; contract: PluginContract | null }
 export class PluginRegistry {

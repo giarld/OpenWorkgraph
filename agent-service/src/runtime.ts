@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
-import type { Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
+import type { AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
 import { prepareOutputHistory } from './execution-output-history.js';
@@ -43,12 +43,26 @@ import { VisualizeAssetExport } from './visualize-asset-export.js';
 import { VisualizeSuccessors } from './visualize-successors.js';
 import { discoverCodexSkills } from './skills-api.js';
 import { freezeVisualizeFeatures } from './visualize-features.js';
+import { AgentRegistry } from './agents/registry.js';
+import { AgentSettingsStore } from './agents/settings.js';
+import { AgentDiscovery } from './agents/discovery.js';
+import { AgentRouter } from './agents/router.js';
+import { assertFrozenAgent } from './agents/freezing.js';
+import { AgentError } from './agents/errors.js';
+import { normalizeConfiguration } from './agents/configuration.js';
+import { nativeSkillCatalog } from './agents/skills.js';
+import { createCodexPlugin, codexQueryFailure } from './agents/codex.js';
+import { resolveProductionSelection } from './agents/production-selection.js';
+import type { AgentExecutionSelection } from './agents/contracts.js';
+interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean }
 
 export interface WorkflowRuntimeOptions {
   backend?: SchedulerBackend; models?: BackendModel[];
   /** Default: discover on model reads/submission. True also probes at startup; false disables execution and discovery. */
   enableBackend?: boolean; backendOptions?: AdapterOptions;
   skillsOptions?: BuiltinSkillsOptions;
+  /** Explicit test/custom composition. Production defaults to the Codex plugin. */
+  agentRegistry?: AgentRegistry;
 }
 class RuntimeRuns extends Runs {
   constructor(db: DatabaseSync, serviceId: string, dependencies: RunsDependencies, private readonly available: (run: Run, snapshot: import('@openworkgraph/protocol').InputSnapshot) => boolean) { super(db, serviceId, dependencies); }
@@ -75,8 +89,12 @@ export class WorkflowRuntime {
   readonly visualize: VisualizePages;
   readonly visualizeInputs: VisualizeInputs;
   readonly visualizeBridge: VisualizeBridge;
+  readonly agentSettings: AgentSettingsStore | undefined;
+  readonly agentDiscovery: AgentDiscovery | undefined;
+  private readonly agentRouter: AgentRouter | undefined;
   private readonly probe = new ProjectProbe();
   private readonly adapter: CodexBackendAdapter | undefined;
+  private readonly productionAgents: boolean;
   private availableModels: BackendModel[];
   private timer: NodeJS.Timeout | undefined;
   private starting: Promise<void> | undefined;
@@ -85,6 +103,15 @@ export class WorkflowRuntime {
   private recovering = false;
   private closed = false; private closing = false; private stopping = false;
   constructor(readonly db: DatabaseSync, readonly serviceId: string, readonly directories: DataDirectories, readonly options: WorkflowRuntimeOptions = {}) {
+    if (!options.agentRegistry && !options.backend && options.enableBackend !== false) {
+      const registry = new AgentRegistry();
+      registry.register(createCodexPlugin({ ...options.backendOptions, cwd: directories.root }));
+      this.options = options = { ...options, agentRegistry: registry };
+    }
+    // A custom static composition must not secretly recover an unregistered
+    // Codex through the pre-plugin adapter. Only controlled host injection may
+    // supply that legacy test boundary.
+    this.productionAgents = !options.backend && options.enableBackend !== false && !!options.agentRegistry;
     this.availableModels = structuredClone(options.models ?? []);
     this.blobs = new BlobStore(directories.blobs); this.resources = new Resources(db, this.blobs);
     this.graphs = new Graphs(db, serviceId); this.plugins = new PluginRegistry(db);
@@ -95,7 +122,16 @@ export class WorkflowRuntime {
       const installed = await this.skills.installed();
       const project = this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(projectId);
       const codex = prompt.skillReferences.some(ref => ref.source === 'codex') ? await discoverCodexSkills(String(project?.canonical_path), this.options.backendOptions) : [];
-      for (const ref of prompt.skillReferences) if (!(ref.source === 'codex' ? codex : installed).some(item => item.skillId === ref.skillId && item.name === ref.name)) throw new ServiceError('INPUT_BLOCKED', '技能身份不可用，请重新选择：' + ref.name);
+      const native = new Map<string, Awaited<ReturnType<typeof nativeSkillCatalog>>['skills']>();
+      for (const ref of prompt.skillReferences) {
+        let candidates: readonly { skillId: string; name: string }[] = ref.source === 'codex' ? codex : installed;
+        if (ref.source === 'agent') {
+          if (!this.options.agentRegistry || !this.agentSettings) throw new AgentError('runtime_unavailable');
+          if (!native.has(ref.backendId)) { const settings = this.agentSettings.get(ref.backendId); native.set(ref.backendId, (await nativeSkillCatalog(this.options.agentRegistry.get(ref.backendId), { backendId: ref.backendId, options: settings.options }, { projectPath: String(project?.canonical_path) })).skills); }
+          candidates = native.get(ref.backendId)!;
+        }
+        if (!candidates.some(item => item.skillId === ref.skillId && item.name === ref.name)) throw new ServiceError('INPUT_BLOCKED', '技能身份不可用，请重新选择：' + ref.name);
+      }
     });
     const assetExport = new VisualizeAssetExport(this.visualize);
     this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args) });
@@ -108,20 +144,61 @@ export class WorkflowRuntime {
     this.skillConfigs = new SkillConfigs(directories, serviceId);
     this.skillSessions = new SkillSessions(this.skills, this.skillConfigs, options.backendOptions);
     this.inputs = new InputPreparation(db, { plugins: this.plugins, readRepresentation: resource => this.resources.readPreparedRepresentation(resource) }); this.models = new ModelDefaultsStore(db);
-    this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
+    this.agentSettings = options.agentRegistry ? new AgentSettingsStore(db, options.agentRegistry) : undefined;
+    this.agentDiscovery = options.agentRegistry ? new AgentDiscovery(options.agentRegistry, this.productionAgents ? { ttlMs: 0 } : {}) : undefined;
+    this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend || options.agentRegistry ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
       ? this.imageProviders.credentialAvailable(snapshot.imageRoute.providerId,snapshot.imageRoute.credentialRevision)
-      : this.executionCapability.status === 'available');
+      : snapshot.agent || this.productionAgents ? this.agentEligible(_run.id, snapshot, String(this.runs.runtime(_run.id).details.kind)) : this.executionCapability.status === 'available');
     this.history = new History(db); this.publication = new Publication(db, directories, this.resources, this.graphs, this.runs);
     this.executionChains = new ExecutionChains(this.runs,this.graphs,this.resources);
-    this.adapter = options.backend ? undefined : new CodexBackendAdapter(options.backendOptions);
-    const codexBackend = options.backend ?? new RuntimeBackend(this.runs, directories, this.adapter!, this.probe, this.skillSessions);
-    const backend = new RoutedImageBackend(codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
+    this.adapter = options.backend || this.productionAgents ? undefined : new CodexBackendAdapter(options.backendOptions);
+    const codexBackend = options.backend ?? (this.adapter ? new RuntimeBackend(this.runs, directories, this.adapter, this.probe, this.skillSessions) : { start: async () => { throw new AgentError('runtime_unavailable'); }, cancel: async () => 'unknown' as const });
+    this.agentRouter = options.agentRegistry ? new AgentRouter(this.runs, directories, id => options.agentRegistry!.get(id), (snapshot, kind) => assertFrozenAgent(options.agentRegistry!, snapshot, String(kind)), codexBackend, this.probe, this.skillSessions, {}, this.productionAgents ? (run, snapshot) => resolveProductionSelection(options.agentRegistry!, snapshot, this.runs.runtime(run.id).details) : undefined) : undefined;
+    const backend = new RoutedImageBackend(this.agentRouter ?? codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
     this.scheduler = new Scheduler(this.runs, backend, { publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
   get catalog(): BackendModel[] { return structuredClone(this.availableModels); }
+  private agentEligible(runId: string, snapshot: import('@openworkgraph/protocol').InputSnapshot, kind: string): boolean {
+    let reason: string | null = null;
+    try {
+      if (!this.options.agentRegistry) throw new AgentError('runtime_unavailable');
+      if (this.productionAgents) resolveProductionSelection(this.options.agentRegistry, snapshot, this.runs.runtime(runId).details);
+      else assertFrozenAgent(this.options.agentRegistry, snapshot, kind);
+    } catch (error) {
+      // Never persist native errors, paths or plugin-provided free-form messages.
+      reason = error instanceof AgentError && ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown'].includes(error.reason) ? error.reason : 'protocol_error';
+    }
+    const prior = this.db.prepare("SELECT kind,json_extract(payload,'$.reason') AS reason FROM run_process_records WHERE run_id=? AND kind IN ('agent.input_blocked','agent.input_ready') ORDER BY id DESC LIMIT 1").get(runId);
+    if (reason !== null) {
+      if (prior?.kind !== 'agent.input_blocked' || prior.reason !== reason) this.runs.record(runId, 'agent.input_blocked', { reason });
+      return false;
+    }
+    if (prior?.kind === 'agent.input_blocked') this.runs.record(runId, 'agent.input_ready', {});
+    return true;
+  }
+  private async prepareAgent(selection: AgentSelection): Promise<AgentPlan> {
+    selection = structuredClone(selection);
+    if (!this.options.agentRegistry || !this.agentSettings || !this.agentDiscovery) throw new AgentError('runtime_unavailable');
+    const current = this.agentSettings.get(selection.backendId);
+    if (!current.enabled) throw new AgentError('runtime_unavailable');
+    if (selection.configRevision !== current.revision) throw new ServiceError('REVISION_CONFLICT', '执行器设置已变化，请刷新后重试。');
+    const descriptor = this.options.agentRegistry.get(selection.backendId).descriptor;
+    const query = { options: normalizeConfiguration(descriptor.configuration, { ...current.options, ...selection.options }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
+    const catalog = await this.agentDiscovery.listModels(selection.backendId, query);
+    const diagnosis = await this.agentDiscovery.diagnose(selection.backendId, query);
+    if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
+    return { frozen: this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null }), independent: true };
+  }
+  private nativeSkillCatalog(frozen: Pick<AgentExecutionSelection, 'backendId' | 'options'>, projectPath?: string) { return nativeSkillCatalog(this.options.agentRegistry!.get(frozen.backendId), frozen, { ...(projectPath ? { projectPath } : {}) }); }
+  private async prepareImplicitCodex(input: SubmitRun): Promise<AgentPlan> {
+    this.requireAvailable(input);
+    const settings = this.agentSettings!.get('codex');
+    const plan = await this.prepareAgent({ backendId: 'codex', configRevision: settings.revision, schemaVersion: settings.schemaVersion, ...(input.modelOverride ? { model: input.modelOverride } : {}) });
+    return { ...plan, implicit: true, image: input.kind === 'image_generation' };
+  }
   /** Catalog reads require only the wire handshake, never login or execution self-checks. */
   async refreshModels(): Promise<void> {
-    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '运行时正在关闭。');
+    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '工作空间正在关闭。');
     if (this.options.backend || this.options.enableBackend === false) return;
     if (this.catalogRefresh) return this.catalogRefresh;
     this.catalogRefresh = (async () => {
@@ -129,14 +206,21 @@ export class WorkflowRuntime {
       let rpc: StdioRpc | undefined;
       let stage: CodexStage = 'initialize';
       try {
+        if (this.productionAgents) {
+          const settings = this.agentSettings!.get('codex');
+          this.availableModels = (await this.agentDiscovery!.listModels('codex', { options: settings.options, schemaVersion: settings.schemaVersion })).map(model => ({ ...model, defaultReasoningEffort: model.defaultReasoningEffort ?? null }));
+          return;
+        }
         rpc = this.catalogRpc = new StdioRpc({ cwd: this.directories.root, ...(options.executable ? { executable: options.executable } : {}), ...(options.args ? { args: options.args } : {}), ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}), ...(options.initializeTimeoutMs !== undefined ? { initializeTimeoutMs: options.initializeTimeoutMs } : {}) });
         await connect(rpc);
         stage = 'model/list';
         const models = await listModels(rpc);
-        if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '运行时正在关闭。');
+        if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', '工作空间正在关闭。');
         this.availableModels = models;
       } catch (error) {
         this.availableModels = [];
+        const legacyFailure = codexQueryFailure(error);
+        if (legacyFailure) throw new ServiceError('MODEL_UNAVAILABLE', legacyFailure.message, { details: legacyFailure.details, retryable: legacyFailure.retryable });
         if (error instanceof ServiceError) throw error;
         const failure = describeCodexFailure(error, rpc, stage);
         throw new ServiceError('MODEL_UNAVAILABLE', failure.message, { details: failure.details, retryable: failure.retryable });
@@ -145,9 +229,10 @@ export class WorkflowRuntime {
     try { await this.catalogRefresh; } finally { this.catalogRefresh = undefined; }
   }
   get executionCapability(): Capability {
-    if (this.closed || this.closing) return capability('unavailable', 'Runtime is closing; accepted tasks are retained');
+    if (this.closed || this.closing) return capability('unavailable', 'Workspace is closing; accepted tasks are retained');
     if (this.options.backend) return capability('available', 'Host-injected controlled backend; not evidence of real Codex execution');
     if (this.options.enableBackend === false) return capability('unavailable', 'Backend discovery explicitly disabled by host');
+    if (this.productionAgents && !this.options.agentRegistry!.list().some(plugin => plugin.id === 'codex')) return capability('unavailable', 'Codex is not registered in this Workspace; saved tasks retain their identity');
     return capability('available', '执行由 Codex app-server 提供，沙盒权限使用工作空间设置；提交时检查模型，认证由 Codex 自身处理');
   }
   get imageGenerationCapability(): Capability {
@@ -190,21 +275,35 @@ export class WorkflowRuntime {
     return {models:discovered.map(item=>({...item,selected:selected.has(item.id)})),revision:current.revision};
   }
   private requireAvailable(request: SubmitRun): void {
+    if (request.agent) { if (!this.options.agentRegistry) throw new AgentError('runtime_unavailable'); this.options.agentRegistry.get(request.agent.backendId); return; }
+    if (this.productionAgents && request.imageRoute?.type !== 'api') this.options.agentRegistry!.get('codex');
     const state = request.kind === 'image_generation' && request.imageRoute?.type==='api' ? this.imageGenerationCapability : this.executionCapability;
     if (state.status !== 'available') throw new ServiceError('NOT_IMPLEMENTED', state.reason);
   }
   /** Returns a request-scoped synchronous commit closure; no shared mutable cache. */
-  async prepareSubmission(input: SubmitRun, cleanups: (() => unknown)[] = []): Promise<(principal: string) => Run> {
-    if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups);
+  async prepareSubmission(input: SubmitRun, cleanups: (() => unknown)[] = [], principal?: string): Promise<(principal: string) => Run> {
+    input = structuredClone(input);
+    if (principal) {
+      const prior = this.runs.repo.replay(principal + ':run.submit', input.idempotencyKey, input as unknown as Json);
+      if (prior) return owner => {
+        if (owner !== principal) throw new ServiceError('UNAUTHENTICATED', '提交归属已变化。');
+        const replay = this.runs.repo.replay(owner + ':run.submit', input.idempotencyKey, input as unknown as Json);
+        if (!replay) throw new ServiceError('CONFLICT', '提交回放状态已变化。');
+        return structuredClone(replay) as unknown as Run;
+      };
+    }
+    if (input.agent && (String(input.kind) === 'image_generation' || input.modelOverride)) throw new AgentError('invalid_configuration');
+    const agentPlan = input.agent ? await this.prepareAgent(input.agent) : this.productionAgents && input.imageRoute?.type !== 'api' ? await this.prepareImplicitCodex(input) : undefined;
+    if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const graph=this.graphs.snapshot(input);
-    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false,cleanups);
+    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false,cleanups,agentPlan);
     const plan=this.executionChains.plan(graph,input.nodeId);
     const outgoing=graph.edges.some(e=>e.kind==='execution'&&e.sourceId===input.nodeId);
-    const commit=await this.prepareSingleSubmission(input, true, cleanups);
+    const commit=await this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const auto=!outgoing&&!plan.requiresConfirmation&&!plan.nodes.some(n=>n.required&&n.missingPrompt);
     const selected=this.executionChains.selection(plan,plan.initialNodeIds);
     const preserve=input.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
-    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>this.prepareSingleSubmission(request,true,cleanups),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies)):undefined;
+    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>this.prepareSingleSubmission(request,true,cleanups,agentPlan),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies)):undefined;
     return principal=>atomic(this.db,()=>{
       const run=this.runs.get(commit(principal).id);
       if(run.status!=='accepted'||run.executionStart==='dependencies')return run;
@@ -214,6 +313,8 @@ export class WorkflowRuntime {
     });
   }
   async prepareExecutionStart(id:string,nodeIds:string[],expectedExecutionRevision:number,preserveHistoricalOutputs?:boolean,cleanups:(()=>unknown)[] = []):Promise<(principal:string,key:string)=>Run>{
+    if (!Array.isArray(nodeIds)) throw new ServiceError('INVALID_REQUEST', '执行深度必须是节点列表。');
+    nodeIds = [...nodeIds];
     if (preserveHistoricalOutputs !== undefined && typeof preserveHistoricalOutputs !== 'boolean') throw new ServiceError('INVALID_REQUEST', 'Invalid historical output option');
     const run=this.runs.get(id);
     if(run.status!=='accepted'||!['manual','confirm'].includes(run.executionStart??''))throw new ServiceError('CONFLICT','任务已开始或不可启动。');
@@ -221,7 +322,10 @@ export class WorkflowRuntime {
     if(plan.executionRevision!==expectedExecutionRevision)throw new ServiceError('REVISION_CONFLICT','工作图已变化，请重新选择执行深度。');
     const selected=this.executionChains.selection(plan,nodeIds);
     const preserve=preserveHistoricalOutputs ?? plan.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
-    const members=await this.executionChains.prepareMembers(graph,plan,selected,id,request=>this.prepareSingleSubmission(request,true,cleanups),preserve,(nodeId,copies)=>this.prepareChainOutputHistory({...run,kind:'execution',expectedExecutionRevision},nodeId,cleanups,copies));
+    const originalSnapshot = this.runs.snapshot(id);
+    const inherited = originalSnapshot.agent ?? (this.productionAgents ? resolveProductionSelection(this.options.agentRegistry!, originalSnapshot, this.runs.runtime(id).details) : undefined);
+    const agentPlan = inherited ? { frozen: inherited, independent: false, implicit: 'legacy' in inherited } : undefined;
+    const members=await this.executionChains.prepareMembers(graph,plan,selected,id,request=>this.prepareSingleSubmission(request,true,cleanups,agentPlan),preserve,(nodeId,copies)=>this.prepareChainOutputHistory({...run,kind:'execution',expectedExecutionRevision},nodeId,cleanups,copies));
     return (principal,key)=>this.runs.repo.idempotent(principal+':run.start:'+id,key,{nodeIds,expectedExecutionRevision,...(preserveHistoricalOutputs === undefined ? {} : {preserveHistoricalOutputs})},()=>members(principal) as unknown as Json) as unknown as Run;
   }
   private async prepareChainOutputHistory(scope: Omit<SubmitRun, 'idempotencyKey'>, nodeId: string, cleanups: (() => unknown)[], copies: Map<string, string>) {
@@ -229,9 +333,13 @@ export class WorkflowRuntime {
     const commit = await prepareOutputHistory(this.graphs,this.resources,request,cleanups,copies);
     return () => commit(request,this.graphs);
   }
-  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true, cleanups: (() => unknown)[] = []): Promise<(principal: string) => Run> {
+  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true, cleanups: (() => unknown)[] = [], agentPlan?: AgentPlan): Promise<(principal: string) => Run> {
     if (this.db.isTransaction) throw new ServiceError('CONFLICT', 'Preflight must precede the auth transaction');
     const request = structuredClone(input);
+    if (agentPlan) {
+      if (!agentPlan.implicit && (request.kind === 'image_generation' || request.modelOverride)) throw new AgentError('invalid_configuration');
+      if (!agentPlan.implicit && !request.agent && !('legacy' in agentPlan.frozen)) request.agent = { backendId: agentPlan.frozen.backendId, configRevision: agentPlan.frozen.configRevision, schemaVersion: agentPlan.frozen.schemaVersion, options: { ...agentPlan.frozen.options }, model: { ...agentPlan.frozen.model } };
+    }
     if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
     if(request.imageRoute && request.kind!=='image_generation')throw new ServiceError('INVALID_REQUEST','Only image tasks can select an image route');
     let apiRoute: FrozenApiImageRoute | undefined;
@@ -249,8 +357,8 @@ export class WorkflowRuntime {
       }
       else { if(request.imageRoute && request.imageRoute.type!=='codex')throw new ServiceError('INVALID_REQUEST','Invalid image route');request.imageRoute={type:'codex',...(request.imageRoute?.options?{options:request.imageRoute.options}:{})}; }
     }
-    if(!apiRoute){this.requireAvailable(request);await this.refreshModels();}
-    const executionSettings = apiRoute?null:this.executionSettings.get();
+    if(!apiRoute && !agentPlan){this.requireAvailable(request);await this.refreshModels();}
+    const executionSettings = apiRoute || agentPlan ? null : this.executionSettings.get();
     if (request.serviceId !== this.serviceId) throw new ServiceError('SERVICE_MISMATCH', 'Wrong service');
     const project = this.db.prepare('SELECT canonical_path,state FROM projects WHERE id=?').get(request.projectId);
     if (!project) throw new ServiceError('NOT_FOUND', 'Project not found');
@@ -305,7 +413,10 @@ export class WorkflowRuntime {
       visualizeGeneration = { version: 1, feature: { kind: 'builtin-feature', featureId: VISUALIZE_FEATURE_ID, version: 1 }, inputs, layout: { default: { ...VISUALIZE_DEFAULT_SIZE }, current, maximum: { ...VISUALIZE_GENERATION_MAX_SIZE }, contentViewport: { width: current.width, height: Math.max(1, current.height - 48) } }, replacementPolicy: 'new-initial-form', ...(stored.page && stored.content.form ? { previous: { page: stored.page, formFormatReference: stored.content.form } } : {}) };
     }
     if (apiRoute && Array.isArray(skillReferences) && skillReferences.length) throw new ServiceError('INPUT_BLOCKED', '独立图片 API 不支持技能引用，请切换到 Codex 或移除技能引用。');
-    const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path);
+    const nativeSkills = agentPlan ? scopedPreview.prompt.includes('$') || Array.isArray(skillReferences) && skillReferences.some(ref => typeof ref === 'object' && ref !== null && (ref as { source?: string }).source !== 'openworkgraph')
+      ? await this.nativeSkillCatalog(agentPlan.frozen, path)
+      : { backendId: agentPlan.frozen.backendId, configuredSkills: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.configuredSkills, skills: [] } : undefined;
+    const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path, nativeSkills);
     if(apiRoute){
       const references: {bytes:Buffer;mime:'image/png'|'image/jpeg'|'image/webp'}[]=[];
       for(const envelope of scopedPreview.resources){
@@ -324,6 +435,9 @@ export class WorkflowRuntime {
         if(apiRoute){
           const current=this.imageProviders.list().find(item=>item.id===apiRoute.providerId);
           if(!current?.enabled || current.revision!==apiRoute.configRevision || current.credentialRevision!==apiRoute.credentialRevision || !this.imageProviders.credentialAvailable(apiRoute.providerId,apiRoute.credentialRevision))throw new ServiceError('REVISION_CONFLICT','生图服务商或凭据配置已变化，请重新提交。');
+        } else if (agentPlan) {
+          if (agentPlan.independent && !('legacy' in agentPlan.frozen)) this.agentSettings!.assertCurrent(agentPlan.frozen);
+          if (agentPlan.frozen.backendId === 'codex') context.sandboxMode = agentPlan.frozen.options.sandboxMode as import('@openworkgraph/protocol').SandboxMode;
         } else {
           this.requireAvailable(request);
           if (this.executionSettings.get().revision !== executionSettings!.revision) throw new ServiceError('REVISION_CONFLICT', '权限设置已变化，请重新提交任务。');
@@ -332,9 +446,9 @@ export class WorkflowRuntime {
         }
         if (context.canonicalPath !== path) throw new ServiceError('REVISION_CONFLICT', 'Project path changed while preparing inputs');
       },
-      freeze: () => scopedInputs.build(request.graphId, request.nodeId, apiRoute
+      freeze: () => { const snapshot = scopedInputs.build(request.graphId, request.nodeId, apiRoute
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
-        : {expectedExecutionRevision:request.expectedExecutionRevision,model:this.models.freeze(request.modelOverride,this.availableModels),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}),
+        : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
     });
     return principal => scoped.submit(request, principal, request.kind==='execution' && holdExecution);
   }
@@ -346,7 +460,20 @@ export class WorkflowRuntime {
     const snapshot = this.runs.snapshot(id); const snapshotJson = canonicalJson(snapshot as unknown as Json);
     const api=snapshot.imageRoute?.type==='api'?snapshot.imageRoute:null;
     if(api){await this.imageProviders.refreshCredentials();if(!this.imageProviders.credentialAvailable(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销或本机不可用。');}
-    else {this.requireAvailable({ kind: token.details.kind } as SubmitRun);await this.refreshModels();await this.skillSessions.environment(snapshot.skills ?? [], true);}
+    else if (snapshot.agent) {
+      if (!this.options.agentRegistry) throw new AgentError('runtime_unavailable');
+      assertFrozenAgent(this.options.agentRegistry, snapshot, String(token.details.kind), true);
+      await this.skillSessions.environment(snapshot.skills ?? [], true);
+      const projectPath = this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(run.projectId)?.canonical_path;
+      const catalog = await this.nativeSkillCatalog(snapshot.agent, typeof projectPath === 'string' ? projectPath : undefined);
+      if (snapshot.skills?.some(skill => skill.source === 'agent' && (skill.backendId !== snapshot.agent!.backendId || !catalog.skills.some(item => item.skillId === skill.skillId && item.name === skill.name)))) throw new AgentError('capability_unsupported');
+    } else if (this.productionAgents) {
+      const legacy = resolveProductionSelection(this.options.agentRegistry!, snapshot, token.details, true);
+      const models = await this.agentDiscovery!.listModels(legacy.backendId, { options: { ...legacy.options }, schemaVersion: legacy.schemaVersion });
+      const frozen = freezeModelSelection(legacy.model, models.map(model => ({ ...model, defaultReasoningEffort: model.defaultReasoningEffort ?? null })));
+      if (canonicalJson(frozen as unknown as Json) !== canonicalJson(snapshot.model as unknown as Json)) throw new AgentError('model_unavailable');
+      await this.skillSessions.environment(snapshot.skills ?? [], true);
+    } else {this.requireAvailable({ kind: token.details.kind } as SubmitRun);await this.refreshModels();await this.skillSessions.environment(snapshot.skills ?? [], true);}
     const project = this.db.prepare('SELECT state,canonical_path FROM projects WHERE id=?').get(run.projectId);
     if (!project || project.state !== 'active') throw new ServiceError('PROJECT_INACTIVE', 'Restored project is inactive');
     const path = String(project.canonical_path);
@@ -367,6 +494,8 @@ export class WorkflowRuntime {
         if(this.db.prepare('SELECT 1 FROM image_provider_revoked_credentials WHERE provider_id=? AND revision=?').get(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销。');
         return;
       }
+      if (snapshot.agent) { assertFrozenAgent(this.options.agentRegistry!, snapshot, String(token.details.kind), true); return; }
+      if (this.productionAgents) { resolveProductionSelection(this.options.agentRegistry!, snapshot, token.details, true); return; }
       if (!snapshot.model) throw new ServiceError('INPUT_BLOCKED','Codex model is missing from restored snapshot');
       try {
         const frozen = freezeModelSelection(snapshot.model, this.availableModels);
@@ -383,7 +512,7 @@ export class WorkflowRuntime {
     return replay(() => {
       if (this.runs.repo.setting('acceptingRuns') !== true) throw new ServiceError('MAINTENANCE', 'Service is not accepting continuations');
       if(api){if(!this.imageProviders.credentialAvailable(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据不可用。');}
-      else this.requireAvailable({ kind: token.details.kind } as SubmitRun); validateFrozen();
+      else if (!snapshot.agent && !this.productionAgents) this.requireAvailable({ kind: token.details.kind } as SubmitRun); validateFrozen();
       const current = this.runs.runtime(id);
       const target = this.db.prepare('SELECT p.state,p.canonical_path,g.archived,g.trashed,n.deleted,n.read_only FROM projects p JOIN graphs g ON g.project_id=p.id JOIN nodes n ON n.graph_id=g.id WHERE p.id=? AND g.id=? AND n.id=?').get(run.projectId, run.graphId, run.nodeId);
       if (!target || target.state !== 'active' || target.canonical_path !== path || target.archived || target.trashed || target.deleted || target.read_only) throw new ServiceError('PROJECT_UNAVAILABLE', 'Restored target changed or is read-only');
@@ -398,10 +527,11 @@ export class WorkflowRuntime {
     if (this.closed) return;
     if(!this.closing)await this.executionChains.pump();
     await this.scheduler.tick();
+    await this.agentRouter?.releaseFinished();
     if (this.closing && !this.active().length) this.finishClose();
   }
   async start(): Promise<void> {
-    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Runtime closed');
+    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Workspace closed');
     if (this.starting) return this.starting;
     this.starting = (async () => {
       if (this.options.enableBackend && !this.options.backend) {
@@ -418,7 +548,7 @@ export class WorkflowRuntime {
   }
   /** Host must hold its service-root instance lock before transferring epochs. */
   async recover(): Promise<void> {
-    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Runtime closed');
+    if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Workspace closed');
     this.recovering = true;
     atomic(this.db, () => {
       if (this.runs.repo.setting('backupRestorePending') === true) {
@@ -433,6 +563,7 @@ export class WorkflowRuntime {
     if (this.starting || this.recovering || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
     if (this.closed) return;
     this.closed = true; this.executionChains.stop(); this.probe.close();
+    void this.agentDiscovery?.dispose().catch(() => {});
   }
   stopAccepting(): void { this.stopping = true; this.executionChains.stop(); atomic(this.db, () => this.db.prepare("UPDATE settings SET value='false' WHERE key='acceptingRuns'").run()); }
   /** A host shutdown cancels durable queued work as well as active responders. */
@@ -449,11 +580,14 @@ export class WorkflowRuntime {
       await this.pump(); await delay(25);
     }
     await this.scheduler.settled();
+    await this.agentRouter?.disposeDrained();
   }
   private finishClose(): void {
     this.visualizeBridge.dispose();
     if (this.closed) return; this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; this.probe.close();
     this.catalogRpc?.close();
+    void this.agentDiscovery?.dispose().catch(() => {});
+    void this.agentRouter?.disposeDrained().catch(() => {});
     // No adapter.close(): disconnecting unresolved child processes is not cancellation.
   }
   close(): void {

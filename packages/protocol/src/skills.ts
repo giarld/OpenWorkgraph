@@ -28,8 +28,56 @@ export function legacySkillMentions(prompt: string, knownNames: readonly string[
   }
   return result;
 }
-export interface SkillReference { skillId: string; source: 'openworkgraph' | 'codex'; name: string; start: number; end: number }
-export interface SkillCandidate { skillId: string; source: 'openworkgraph' | 'codex'; name: string; description: string }
+export type SkillIdentity =
+  | { source: 'openworkgraph'; skillId: string }
+  | { source: 'codex'; skillId: string }
+  | { source: 'agent'; backendId: string; skillId: string };
+/** Read legacy provenance without rewriting frozen content or its digest. */
+export function normalizeSkillIdentity(identity: SkillIdentity): SkillIdentity {
+  return identity.source === 'codex'
+    ? { source: 'agent', backendId: 'codex', skillId: identity.skillId }
+    : identity.source === 'agent'
+      ? { source: 'agent', backendId: identity.backendId, skillId: identity.skillId }
+      : { source: 'openworkgraph', skillId: identity.skillId };
+}
+export function skillIdentityKey(identity: SkillIdentity): string {
+  const normalized = normalizeSkillIdentity(identity);
+  return JSON.stringify([normalized.source, normalized.source === 'agent' ? normalized.backendId : null, normalized.skillId]);
+}
+/** Display metadata is independent of portable/frozen identity. */
+export function skillSourceLabel(identity: SkillIdentity & { backendName?: string }, backendNames: Readonly<Record<string, string>> = {}): string {
+  if (identity.source === 'openworkgraph') return 'OpenWorkgraph';
+  if (identity.source === 'codex') return 'Codex';
+  const label = Object.hasOwn(backendNames, identity.backendId) ? backendNames[identity.backendId] : identity.backendName;
+  return typeof label === 'string' && label.trim() ? label.trim() : identity.backendId;
+}
+/** Existing Codex wire keeps its portable behavior. A normalized alias is
+ * legacy only when its opaque ID still contains the old absolute-path form. */
+export function isLegacyCodexSkillIdentity(identity: SkillIdentity): boolean {
+  if (identity.source === 'codex') return true;
+  if (identity.source !== 'agent' || identity.backendId !== 'codex') return false;
+  const id = identity.skillId.startsWith('codex:') ? identity.skillId.slice('codex:'.length) : identity.skillId;
+  const backslash = String.fromCharCode(92);
+  return id.startsWith('/') || id.startsWith(backslash + backslash) ||
+    (/^[A-Za-z]:/.test(id) && (id[2] === '/' || id[2] === backslash));
+}
+/** Call only on portable copies. Preserve provenance; never rewrite a stored
+ * node, frozen snapshot or digest input while reading/normalizing identities. */
+export function portableSkillReference<T extends SkillIdentity & { name: string }>(reference: T): T {
+  return isLegacyCodexSkillIdentity(reference) ? { ...reference, skillId: 'codex-unresolved:' + reference.name } : reference;
+}
+export function isSkillIdentity(value: unknown): value is SkillIdentity {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  const id = (value: unknown, max: number) => typeof value === 'string' && !!value.trim() && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
+  if (!id(item.skillId, 4096)) return false;
+  // Opaque skill IDs may contain slashes (including normalized historical IDs).
+  // Registry membership is validated by the host, never inferred from a name.
+  return item.source === 'agent' ? id(item.backendId, 128) && /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(item.backendId as string)
+    : ['openworkgraph', 'codex'].includes(String(item.source)) && item.backendId === undefined;
+}
+export type SkillReference = SkillIdentity & { name: string; start: number; end: number };
+export type SkillCandidate = SkillIdentity & { name: string; description: string; backendName?: string };
 /** Product functions are separate candidates, never installable skill identities. */
 export interface BuiltinFeatureCandidate extends VisualizeFeatureSelection { name: string; description: string }
 /** Keep legacy items unchanged; clients combine features with items for selection. */
@@ -47,4 +95,4 @@ export interface SkillConfigValue { name: string; configured: boolean; value?: s
 export interface SkillConfiguration { skillId: string; revision: number; schema: SkillConfigSchema; values: SkillConfigValue[]; packageVersion?: string }
 export interface SkillConfigurationWrite { expectedRevision: number; values: Record<string, string | null>; expectedPackageVersion?: string }
 /** Frozen public metadata. Credentials are resolved separately from protected revisions at launch. */
-export interface FrozenSkill { skillId: string; source: 'openworkgraph' | 'codex'; name: string; description: string; path: string; packageVersion?: string; configRevision?: number; explicit: boolean; requiresConfiguration: boolean }
+export type FrozenSkill = SkillIdentity & { name: string; description: string; path: string; packageVersion?: string; configRevision?: number; explicit: boolean; requiresConfiguration: boolean };

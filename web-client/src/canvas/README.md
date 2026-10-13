@@ -34,6 +34,8 @@ Image, video, audio, document, preview and file node bodies first render when th
 
 ## Interaction and reference
 
+Visualize nodes switch to their validated generated SVG logo (or the protocol default logo) when either screen dimension falls below 7.5% of the corresponding browser window dimension. Both dimensions must reach 9% to restore the page, preventing threshold flicker. The outer node is measured independently of iframe rendering density; node resizing, Work Graph zoom and browser window resizing all update the detail level. Small nodes defer page/bridge/assets loading. Already loaded pages retain their document and unfinished controls, skip layout/paint, and pause page activity and input polling until enlarged. Expanded and standalone views always render normally. Coverage: ../../tests/browser/visualize-detail.spec.ts.
+
 CanvasHandle.getPlacementPosition(size) returns a node's world-space top-left position centered in the currently rendered viewport, using the live viewport and measured canvas size. GraphWorkspace forwards the handle through onCanvas so the asset library can place new nodes in view. Placement retries retain the originally prepared position.
 
 canDropData(dataTransfer) and onDropData(dataTransfer, world) support application-owned drags onto the editable canvas background. File imports keep their separate onImportFiles path. GraphWorkspace accepts only a live asset drag matching its resource request, project and graph; RealApp centers the copied node at the dropped world point. The asset copy and node placement retain their original idempotency keys and coordinates on retries.

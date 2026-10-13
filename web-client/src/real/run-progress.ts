@@ -1,4 +1,5 @@
 import type { Json } from '../../../packages/protocol/src/index';
+import type { AgentMessageIdentity } from '../../../packages/protocol/src/agents';
 import '../i18n/catalogs/runs';
 import { translate } from '../i18n/translate';
 import { displayTerminology } from '../i18n/display-terminology';
@@ -17,6 +18,25 @@ const states: Record<string, string> = {
   failed: 'Agent execution failed', cancelled: 'Agent confirmed stopping', unknown: 'Execution result pending verification',
 };
 const object = (value: Json | undefined) => value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+/** New public identities need no native session/turn. Legacy records remain readable. */
+function messageIdentity(payload: Record<string, Json>, summary: Record<string, Json>): string | null {
+  const explicit = summary.identity ?? payload.identity;
+  if ((summary.identity !== undefined || payload.identity !== undefined) && !object(explicit)) return null;
+  const identity = object(explicit) ?? {
+    backendId: summary.backendId ?? payload.backendId, attemptId: summary.attemptId ?? payload.attemptId,
+    messageId: summary.messageId ?? payload.messageId,
+  };
+  const fields: (keyof AgentMessageIdentity)[] = ['backendId', 'attemptId', 'messageId'];
+  const identifier = (value: Json | undefined) => typeof value === 'string' && !!value.trim() && value.length <= 200 && !Array.from(value).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+  if (fields.every(key => identifier(identity[key]))) {
+    if (summary.messageId !== undefined && summary.messageId !== identity.messageId) return null;
+    return JSON.stringify(['agent', ...fields.map(key => identity[key])]);
+  }
+  // Partial or invalid new identities must not fall back and collide with old records.
+  if (explicit !== undefined || fields.some(key => identity[key] !== undefined)) return null;
+  return [payload.threadId, payload.turnId, summary.itemId].every(value => typeof value === 'string' && value.trim())
+    ? JSON.stringify(['legacy', payload.threadId, payload.turnId, summary.itemId]) : null;
+}
 const runStates: Record<string, string> = {
   accepted: 'Run request accepted', queued: 'Entered queue', preparing: 'Preparing input', running: 'Executing',
   waiting_answer: 'Waiting for answer', waiting_approval: 'Waiting for approval', cancelling: 'Cancelling',
@@ -87,9 +107,9 @@ function parseProgressEntries(history: RunProgressHistory | null | undefined, ma
     if (Object.hasOwn(states, state)) pushState(translate(states[state]));
     const summary = object(payload.summary);
     if (!summary || summary.source !== 'agentMessage' || !['commentary', 'final_answer'].includes(String(summary.phase)) ||
-      typeof summary.itemId !== 'string' || !summary.itemId || typeof summary.text !== 'string' || !summary.text.trim() ||
-      typeof payload.threadId !== 'string' || typeof payload.turnId !== 'string') continue;
-    const key = JSON.stringify([payload.threadId, payload.turnId, summary.itemId]);
+      typeof summary.text !== 'string' || !summary.text.trim()) continue;
+    const key = messageIdentity(payload, summary);
+    if (!key) continue;
     if (seen.has(key)) continue;
     seen.add(key); push('message', summary.text);
   }

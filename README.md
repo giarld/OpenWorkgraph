@@ -1,6 +1,11 @@
 # OpenWorkgraph
 
-OpenWorkgraph 是基于无限画布思想的软件开发工作流产品，同时面向其他领域的工作组织与协作。
+> [!IMPORTANT]
+> OpenWorkgraph 是基于无限画布思想的全能可视化智能体工作台产品，除了图、文、视频生成、软件开发等工作，还能组织各种用途的 Agent 工作流。
+>
+> 可视化智能体工作台
+> Visual Agent Workbench
+> 更少操心，更高效率，让创意更快落地。
 
 简体中文 | [English](README.en.md)
 

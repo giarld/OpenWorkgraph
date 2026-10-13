@@ -14,6 +14,8 @@ import { initialize } from './backend/capabilities.js';
 import type { WorkflowRuntime } from './runtime.js';
 import type { ApiResult } from './api.js';
 import { visualizeFeatureCandidates } from './visualize-features.js';
+import { AgentControl } from './agents/control.js';
+import { publicText } from './agents/configuration.js';
 
 export type { SkillCandidate } from '@openworkgraph/protocol';
 export type DiscoveredSkill = SkillCandidate & {path:string};
@@ -94,24 +96,39 @@ export class SkillsApi {
 
   async handle(request: IncomingMessage, rawPath: string, token: string, origin: string): Promise<ApiResult> {
     const url = new URL(rawPath, 'http://localhost');
+    const native=/^\/v1\/agents\/([a-z][a-z0-9._-]*)\/skills$/.exec(url.pathname);
     const match = /^\/v1\/projects\/([a-zA-Z0-9_-]+)\/skills(\/search)?$/.exec(url.pathname);
-    if (!match) return { handled: false };
+    if (!match&&!native) return { handled: false };
     this.auth.withSession(token, origin, () => undefined);
+    const controller=new AbortController(),abort=()=>controller.abort();
+    request.once?.('aborted',abort);request.socket?.once?.('close',abort);
+    try {
+    if(native){
+      if(request.method!=='GET'||url.searchParams.size)throw new ServiceError('INVALID_REQUEST','无效的执行器技能查询。');
+      const result=await new AgentControl(this.runtime).listNativeSkills(native[1]!,controller.signal);
+      return this.auth.withSession(token,origin,()=>({handled:true,body:result}));
+    }
+    if(!match)return {handled:false};
     const search = !!match[2];
     const source = url.searchParams.get('source');
-    if (request.method !== 'GET' || [...url.searchParams.keys()].some(key => key !== 'source' && !(search && key === 'query')) || url.searchParams.getAll('query').length > 1 || url.searchParams.getAll('source').length > 1 || (source !== null && !['builtin-feature', 'openworkgraph', 'codex'].includes(source))) throw new ServiceError('INVALID_REQUEST', '无效的技能查询。');
-    const row = this.db.prepare("SELECT canonical_path FROM projects WHERE id=? AND state='active'").get(match[1]!);
-    if (!row || typeof row.canonical_path !== 'string') throw new ServiceError('NOT_FOUND', '项目不存在或未激活。');
-    const cwd = resolve(row.canonical_path);
+    const backendId=url.searchParams.get('backendId');
+    if (request.method !== 'GET' || [...url.searchParams.keys()].some(key => key !== 'source' && !(search && key === 'query') && !(source==='agent'&&key==='backendId')) || url.searchParams.getAll('query').length > 1 || url.searchParams.getAll('source').length > 1 || url.searchParams.getAll('backendId').length>1 || (source !== null && !['builtin-feature', 'openworkgraph', 'codex','agent'].includes(source)) || source==='agent'&&!backendId) throw new ServiceError('INVALID_REQUEST', '无效的技能查询。');
+    const project=()=>{
+      const row=this.db.prepare("SELECT canonical_path FROM projects WHERE id=? AND state='active'").get(match[1]!);
+      if (!row || typeof row.canonical_path !== 'string') throw new ServiceError('NOT_FOUND', '项目不存在或未激活。');
+      return resolve(row.canonical_path);
+    };
+    const cwd=this.auth.withSession(token,origin,project);
     const query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase();
     if (query.length > 100) throw new ServiceError('INVALID_REQUEST', '技能查询过长。');
     // A source-specific search must not wait for discovery of any other source.
-    const [codex,builtin] = await Promise.all([
+    const [codex,builtin,agent] = await Promise.all([
       source === null || source === 'codex' ? this.load(cwd) : [],
       source === null || source === 'openworkgraph' ? this.runtime.skills.installed() : [],
+      source==='agent'?new AgentControl(this.runtime).listNativeSkills(backendId!,controller.signal,cwd):null,
     ]);
-    const candidates: SkillCandidate[] = [...builtin.map(item=>({skillId:item.skillId,source:'openworkgraph' as const,name:item.name,description:item.description})),...codex];
-    this.auth.withSession(token, origin, () => undefined);
+    const candidates: SkillCandidate[] = [...builtin.map(item=>({skillId:item.skillId,source:'openworkgraph' as const,name:item.name,description:item.description})),...codex,...(agent?agent.skills.map(skill=>({...skill,source:'agent' as const,backendId:agent.backendId})):[])];
+    this.auth.withSession(token, origin, () => {if(project()!==cwd)throw new ServiceError('CONFLICT','项目目录在技能查询期间变化，请重试。');});
     const seen = new Set<string>();
     const items = candidates.filter(item => {
       if (seen.has(item.skillId)) return false;
@@ -121,8 +138,9 @@ export class SkillsApi {
     // Search suggestions are bounded; existence checks need the complete catalog.
     const visible = search ? items.slice(0, 100) : items;
     return { handled: true, body: {
-      items: visible.map(({ skillId, source, name, description }) => ({ skillId, source, name, description })),
+      items: visible.map(({ skillId, source, name, description, ...identity }) => ({ skillId, source, name, description:description===''||publicText(description)?description:'',...(source==='agent'?identity:{}) })),
       features: source === null || source === 'builtin-feature' ? visualizeFeatureCandidates(query) : [],
     } };
+    } finally {request.off?.('aborted',abort);request.socket?.off?.('close',abort);}
   }
 }

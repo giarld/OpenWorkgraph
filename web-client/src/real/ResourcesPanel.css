@@ -134,7 +134,7 @@
 .ow-assets-card.is-shared .ow-assets-video-badge { right: 40px; }
 .ow-resources-panel .ow-assets-file-preview { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 38px 12px 12px; text-align: left; }
 .ow-assets-file-preview span { display: block; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.4; }
-.ow-assets-quick-actions { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity 150ms ease; }
+.ow-assets-quick-actions { position: absolute; inset: 38px 0 68px; display: flex; align-items: center; justify-content: center; gap: 8px; pointer-events: none; opacity: 0; transition: opacity 150ms ease; }
 .ow-resources-panel .ow-assets-quick-actions button { display: grid; place-items: center; flex: none; width: 34px; height: 34px; min-height: 34px; padding: 0; border: 1px solid #ffffff20; border-radius: 50%; color: #fff; background: #292b35e8; box-shadow: 0 2px 8px #0002; pointer-events: none; }
 .ow-resources-panel .ow-assets-quick-actions button:hover:not(:disabled) { background: #161820; }
 .ow-resources-panel .ow-assets-quick-actions button:focus-visible { outline-color: #fff; box-shadow: 0 0 0 5px #292b35; }
@@ -148,9 +148,13 @@
 .ow-assets-card.is-shared .ow-assets-filename { padding-right: 42px; }
 .ow-assets-card.is-shared .ow-assets-filename-measure { width: calc(100% - 52px); }
 .ow-assets-card:hover .ow-assets-filename, .ow-assets-card:focus-within .ow-assets-filename { opacity: 1; }
+.ow-assets-visualize-title { position:absolute; inset:auto 0 0; box-sizing:border-box; padding:24px 10px 9px; border-radius:0 0 14px 14px; color:#fff; background:linear-gradient(to bottom, #10121600, #10121699 42%, #101216d9); font-size:12px; font-weight:500; line-height:17px; text-shadow:0 1px 3px #0006; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+.ow-assets-card.is-shared .ow-assets-visualize-title { padding-right:42px; }
+.ow-assets-card:hover .ow-assets-visualize-title, .ow-assets-card:focus-within .ow-assets-visualize-title { visibility:hidden; }
 .ow-assets-card:hover .ow-assets-video-badge, .ow-assets-card:focus-within .ow-assets-video-badge { opacity: 0; }
 @media (hover: none), (pointer: coarse) {
   .ow-assets-filename { opacity: 1; }
+  .ow-assets-visualize-title { visibility:hidden; }
   .ow-assets-video-badge { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .ow-assets-filename { transition: none; } }
@@ -165,14 +169,13 @@
 .ow-assets-library-settings > summary { width: fit-content; padding: 6px 0; cursor: pointer; }
 .ow-assets-library-settings .ow-assets-filters { flex-wrap: wrap; align-items: center; }
 .ow-resources-panel .ow-assets-library-settings .ow-resources-check { width: auto; margin: 0; font-size: 12px; }
-@container (max-width: 190px) { .ow-resources-panel .ow-assets-list { grid-template-columns: minmax(0, 1fr); } }
+@container (max-width: 320px) { .ow-resources-panel .ow-assets-list { grid-template-columns: minmax(0, 1fr); } }
 @media (hover: none), (pointer: coarse) {
   .ow-assets-type-badge { max-width: calc(100% - 64px); }
   .ow-assets-quick-actions, .ow-assets-card-menu .ow-assets-menu-trigger { opacity: 1; }
-  .ow-assets-quick-actions { align-items: center; padding-bottom: 24px; }
+  .ow-assets-quick-actions { inset: 56px 0 68px; }
   .ow-resources-panel .ow-assets-quick-actions button { width: 44px; height: 44px; pointer-events: auto; }
   .ow-assets-card-menu .ow-assets-menu-trigger { width: 44px; height: 44px; }
-  @container (max-width: 320px) { .ow-resources-panel .ow-assets-list { grid-template-columns: minmax(0, 1fr); } }
 }
 @media (prefers-reduced-motion: reduce) { .ow-assets-quick-actions, .ow-assets-card-menu .ow-assets-menu-trigger { transition: none; } }
 

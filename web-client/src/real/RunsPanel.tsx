@@ -1,8 +1,9 @@
 import { runProgressEntries } from "./run-progress";
 import { randomId } from "../adapter/random";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { isTerminalRunStatus, type GraphSnapshot, type InputSnapshot, type Interaction, type Json, type Run } from '../../../packages/protocol/src/index';
+import { isTerminalRunStatus, normalizeApprovalPermissions, validApprovalPaths, type GraphSnapshot, type InputSnapshot, type Interaction, type Json, type Run } from '../../../packages/protocol/src/index';
 import type { RunStatus } from '../../../packages/protocol/src/index';
+import type { AgentApprovalDetails, AgentQuestionMode } from '../../../packages/protocol/src/agents';
 import { RunProcessList } from '../components/NodeContent';
 import { ArrowDown, Check, ChevronRight, ShieldCheck, Terminal, X } from 'lucide-react';
 import { RefreshIcon } from '../components/RefreshIcon';
@@ -27,7 +28,8 @@ type Candidate = { baseVersion: number; content: Json; state: 'pending' | 'accep
 type Changes = { state: 'changed' | 'unchanged' | 'unknown'; issues: Json[] };
 type PublicMetadata = { imageRoute: InputSnapshot['imageRoute']; inputMode: string | null; requestId: string | null };
 type Capacity = { capacity: number; occupied: number; available: number };
-type Question = { id: string; text: string; options: string[] };
+type Question = { id: string; text: string; options: string[]; mode: AgentQuestionMode; groupId?: string };
+export type QuestionAnswers = Record<string, string | string[]>;
 export interface RunDetailsData {
   history: History | null; snapshot: InputSnapshot | null; changes: Changes | null;
   publicMetadata: PublicMetadata | null;
@@ -69,17 +71,75 @@ export function runsForDetail(runs: Run[], detailRun: Run): Run[] {
 }
 export function interactionQuestions(interaction: Interaction): Question[] {
   const questions = object(interaction.payload).questions;
-  if (!Array.isArray(questions)) return [];
-  return questions.flatMap(value => {
+  if (!Array.isArray(questions) || !questions.length || questions.length > 32) return [];
+  const result: Question[] = [];
+  for (const value of questions) {
     const q = object(value);
-    return typeof q.id === 'string' && typeof q.text === 'string' && Array.isArray(q.options) && q.options.every(option => typeof option === 'string')
-      ? [{ id: q.id, text: q.text, options: q.options as string[] }] : [];
-  });
+    const mode = q.mode ?? (q.strict === true ? 'single' : 'text');
+    if (typeof q.id !== 'string' || !q.id.trim() || q.id.length > 200 || typeof q.text !== 'string' || !q.text.trim() || q.text.length > 16000 ||
+      !Array.isArray(q.options) || q.options.length > 128 || !q.options.every(option => typeof option === 'string' && !!option.trim() && option.length <= 16000) ||
+      !['text', 'single', 'multiple'].includes(String(mode)) || (q.strict === true && mode === 'text') ||
+      (mode !== 'text' && (!q.options.length || new Set(q.options).size !== q.options.length)) ||
+      (q.groupId !== undefined && typeof q.groupId !== 'string')) return [];
+    result.push({ id: q.id, text: q.text, options: q.options as string[], mode: mode as AgentQuestionMode,
+      ...(typeof q.groupId === 'string' ? { groupId: q.groupId } : {}) });
+  }
+  return new Set(result.map(q => q.id)).size === result.length ? result : [];
 }
-export function questionAnswer(interaction: Interaction, answers: Record<string, string>): Json {
+export function questionAnswer(interaction: Interaction, answers: QuestionAnswers): Json {
   const questions = interactionQuestions(interaction);
-  if (!questions.length || new Set(questions.map(q => q.id)).size !== questions.length || questions.some(q => typeof answers[q.id] !== 'string' || !answers[q.id].trim() || answers[q.id].length > 16000)) throw new Error(translate('Please answer every question completely (up to 16,000 characters each).'));
-  return { kind: 'question', answers: Object.fromEntries(questions.map(q => [q.id, [answers[q.id]]])) };
+  const entries = questions.map(q => {
+    const answer = answers[q.id];
+    const values = typeof answer === 'string' ? [answer] : answer;
+    if (!Array.isArray(values) || !values.length || values.length > 64 || values.some(value => typeof value !== 'string' || !value.trim() || value.length > 16000) ||
+      new Set(values).size !== values.length || (q.mode !== 'multiple' && values.length !== 1) ||
+      (q.mode !== 'text' && values.some(value => !q.options.includes(value)))) throw new Error(translate('Please answer every question completely (up to 16,000 characters each).'));
+    return [q.id, [...values]];
+  });
+  if (!questions.length) throw new Error(translate('The question format is not recognized, so it cannot be submitted. Check again later or contact the Workspace administrator.'));
+  return { kind: 'question', answers: Object.fromEntries(entries) };
+}
+
+const boundedText = (value: unknown, limit = 16000): value is string => typeof value === 'string' && value.length <= limit;
+const pathsValid = (value: unknown): value is string[] => validApprovalPaths(value);
+/** Bound legacy/unknown details before rendering, including depth and total size. */
+export function boundedInteractionDetails(value: unknown): Json {
+  let remaining = 32000, nodes = 256;
+  const visit = (item: unknown, depth: number): Json => {
+    if (--nodes < 0 || remaining <= 0 || depth > 6) return '…';
+    if (typeof item === 'string') { const text = item.slice(0, Math.min(remaining, 16000)); remaining -= text.length; return text === item ? text : text + '…'; }
+    if (Array.isArray(item)) return item.slice(0, 100).map(child => visit(child, depth + 1));
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).slice(0, 50).map(([key, child]) => [key.slice(0, 128), visit(child, depth + 1)]));
+    return item === null || typeof item === 'boolean' || typeof item === 'number' ? item : null;
+  };
+  return visit(value, 0);
+}
+export function interactionApproval(interaction: Interaction): { canApprove: boolean; details: AgentApprovalDetails | null; command: string; reason: string; display: Json } {
+  const payload = object(interaction.payload);
+  const reason = typeof payload.reason === 'string' ? payload.reason.trim().slice(0, 16000) : '';
+  const raw = payload.details;
+  if (raw === undefined) {
+    const command = typeof payload.command === 'string' ? payload.command : '';
+    return { reason, command: command.slice(0, 16000), details: null, display: boundedInteractionDetails(payload),
+      canApprove: payload.canApprove === true && !!command.trim() && boundedText(command) && !['permissions', 'file_change', 'tool'].includes(String(payload.approvalKind ?? payload.kind)) };
+  }
+  const details = { ...object(raw) };
+  const allowed = ['version', 'kind', 'summary', 'command', 'paths', 'permissions', 'scope'];
+  let valid = details.version === 1 && ['command', 'file_change', 'permissions', 'tool'].includes(String(details.kind)) &&
+    boundedText(details.summary) && !!details.summary.trim() && Object.keys(details).every(key => allowed.includes(key)) &&
+    (details.command === undefined || boundedText(details.command)) && (details.paths === undefined || pathsValid(details.paths)) &&
+    (details.scope === undefined || ['once', 'turn'].includes(String(details.scope)));
+  if (details.kind === 'command') valid &&= typeof details.command === 'string' && !!details.command.trim() && details.permissions === undefined;
+  if (details.kind === 'file_change') valid &&= pathsValid(details.paths) && details.permissions === undefined;
+  if (details.kind === 'permissions') {
+    const permissions = normalizeApprovalPermissions(details.permissions);
+    valid &&= permissions !== null && typeof details.scope === 'string' && !!details.scope.trim();
+    if (permissions) details.permissions = permissions as unknown as Json;
+  }
+  if (details.kind === 'tool') valid &&= details.permissions === undefined;
+  valid &&= JSON.stringify(raw).length <= 32000;
+  return { reason, command: typeof details.command === 'string' ? details.command.slice(0, 16000) : '',
+    details: valid ? details as unknown as AgentApprovalDetails : null, display: boundedInteractionDetails(raw), canApprove: payload.canApprove === true && valid };
 }
 export async function readRunDetails(request: Request, run: Run): Promise<RunDetailsData> {
   const errors: string[] = [];
@@ -107,6 +167,7 @@ export async function readRunDetails(request: Request, run: Run): Promise<RunDet
 }
 export async function replyToInteraction(request: Request, run: Run, interaction: Interaction, answer: Json, idempotencyKey: string) {
   if (interaction.runId !== run.id || interaction.status !== 'pending') throw new Error(translate('This interaction has already been handled. Wait for the status to update.'));
+  if (interaction.kind === 'approval' && (answer === true || object(answer).decision === 'accept') && !interactionApproval(interaction).canApprove) throw new Error(translate('The Workspace does not allow this operation to be approved. You can still decline it.'));
   return request(pathFor(run, 'reply'), { interactionId: interaction.id, epoch: interaction.epoch, expectedVersion: interaction.version, idempotencyKey, answer }, 'POST');
 }
 export async function decideRunCandidate(request: Request, run: Run, decision: 'accept' | 'discard', expectedContentVersion: number, idempotencyKey: string) {
@@ -114,11 +175,15 @@ export async function decideRunCandidate(request: Request, run: Run, decision: '
   // Do not silently rebase a conflicting decision onto a freshly fetched body.
   return request(pathFor(run, 'candidate'), { decision, expectedContentVersion, idempotencyKey }, 'POST');
 }
+export async function continueRestoredRun(request: Request, run: Run, idempotencyKey: string): Promise<Run> {
+  if (run.status !== 'paused_restore') throw new Error(translate('Only a task paused after restore can continue.'));
+  return request<Run>(pathFor(run, 'continue'), { idempotencyKey }, 'POST');
+}
 function JsonBlock({ value }: { value: unknown }) {
   const { t } = useI18n();
   if (Array.isArray(value)) return <ul className="run-value-list">{value.map((item, index) => <li key={index}><JsonBlock value={item}/></li>)}</ul>;
   if (value && typeof value === 'object') {
-    const labels: Record<string, string> = { title: 'Title', text: 'Body', prompt: 'Prompt', message: 'Description', command: 'Command', cwd: 'Working directory', reason: 'Reason', description: 'Description', kind: 'Type', questions: 'Questions', options: 'Options', model: 'Model', reasoningEffort: 'Reasoning effort' };
+    const labels: Record<string, string> = { title: 'Title', text: 'Body', prompt: 'Prompt', message: 'Description', command: 'Command', cwd: 'Working directory', reason: 'Reason', description: 'Description', kind: 'Type', questions: 'Questions', options: 'Options', model: 'Model', reasoningEffort: 'Reasoning effort', summary: 'Summary', paths: 'Paths', permissions: 'Permissions', scope: 'Approval scope', version: 'Version' };
     return <dl className="run-value-list">{Object.entries(value).map(([key, item]) => <div key={key}><dt>{labels[key] ? t(labels[key]) : key}</dt><dd><JsonBlock value={item}/></dd></div>)}</dl>;
   }
   return <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%' }}>{display(value)}</pre>;
@@ -158,13 +223,15 @@ function FrozenInputs({ snapshot }: { snapshot: InputSnapshot }) {
 }
 export function InteractionForm({ interaction, disabled, onReply, onError }: { interaction: Interaction; disabled: boolean; onReply: (answer: Json) => void; onError: (error: unknown) => void }) {
   const { t } = useI18n();
-  const [answers, setAnswers] = useState<Record<string, string>>(() => Object.create(null));
+  const [answers, setAnswers] = useState<QuestionAnswers>(() => Object.create(null));
   const questions = interactionQuestions(interaction);
-  const payload = object(interaction.payload);
-  const valid = questions.length > 0 && new Set(questions.map(q => q.id)).size === questions.length && questions.every(q => typeof answers[q.id] === 'string' && answers[q.id].trim() && answers[q.id].length <= 16000);
+  const formId = useId();
+  const approval = interactionApproval(interaction);
+  let valid = false;
+  try { questionAnswer(interaction, answers); valid = true; } catch { /* Incomplete answers disable submission. */ }
+  useEffect(() => { setAnswers(Object.create(null)); }, [interaction.id, interaction.epoch]);
   useEffect(() => { if (interaction.kind === 'question' && questions.length === 0) onError(new Error(t('The question format is not recognized, so it cannot be submitted. Check again later or contact the Workspace administrator.'))); }, [interaction.id, interaction.kind, questions.length, onError, t]);
-  const reason = typeof payload.reason === 'string' ? payload.reason.trim() : '';
-  const command = typeof payload.command === 'string' ? payload.command : '';
+  const { reason, command } = approval;
   return <section className={`interaction-box${interaction.kind === 'approval' ? ' run-approval' : ''}`} aria-label={t('Current question or approval awaiting action')}>
     {interaction.kind === 'question' ? <strong>{t('Your answer is needed')}</strong> : <header className="run-approval-heading">
       <span className="run-approval-icon"><ShieldCheck size={20} aria-hidden="true" /></span>
@@ -173,12 +240,21 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
 
     {interaction.status !== 'pending' ? <p role="status">{t('The answer was submitted and is awaiting Workspace confirmation. Later interactions are not available yet.')}</p> : interaction.kind === 'question' ? <form onSubmit={event => { event.preventDefault(); if (!disabled && valid) onReply(questionAnswer(interaction, answers)); }}>
       {questions.length === 0 && <p role="status">{t('The current question cannot be submitted. Check the notification.')}</p>}
-      {questions.map(q => <label key={q.id} style={{ display: 'block', marginBlock: 12 }}>
-        {q.text}
-        {!!q.options.length && <span className="muted" style={{ display: 'block' }}>{t('Optional answers: {options}', { options: q.options.join(' / ') })}</span>}
-        <textarea aria-label={q.text} value={answers[q.id] ?? ''} maxLength={16000} disabled={disabled} required
-          style={{ width: '100%', minHeight: 72, boxSizing: 'border-box' }} onChange={event => setAnswers(current => ({ ...current, [q.id]: event.target.value }))} />
-      </label>)}
+      {questions.map(q => <fieldset key={q.id} disabled={disabled} style={{ marginBlock: 12 }}>
+        <legend>{q.text}</legend>
+        {q.mode === 'text' ? <>
+          {!!q.options.length && <span className="muted" style={{ display: 'block' }}>{t('Optional answers: {options}', { options: q.options.join(' / ') })}</span>}
+          <textarea aria-label={q.text} value={typeof answers[q.id] === 'string' ? answers[q.id] as string : ''} maxLength={16000} required
+            style={{ width: '100%', minHeight: 72, boxSizing: 'border-box' }} onChange={event => setAnswers(current => ({ ...current, [q.id]: event.target.value }))} />
+        </> : q.options.map(option => <label key={option} style={{ display: 'block' }}>
+          <input type={q.mode === 'single' ? 'radio' : 'checkbox'} name={formId + ':' + q.id} value={option}
+            checked={Array.isArray(answers[q.id]) ? (answers[q.id] as string[]).includes(option) : answers[q.id] === option}
+            onChange={event => { const checked = event.target.checked; setAnswers(current => {
+              const values = Array.isArray(current[q.id]) ? current[q.id] as string[] : [];
+              return { ...current, [q.id]: q.mode === 'single' ? [option] : checked ? [...values, option] : values.filter(value => value !== option) };
+            }); }} />{option}
+        </label>)}
+      </fieldset>)}
       <button className="primary-button" disabled={disabled || !valid}>{t('Submit answer')}</button>
     </form> : <>
       <div className="run-approval-body">
@@ -186,13 +262,14 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
         {command.trim() ? <div className="run-approval-command">
           <div className="run-approval-command-label"><Terminal size={14} aria-hidden="true" />{t('Operation to run')}</div>
           <pre tabIndex={0} aria-label={t('Full operation awaiting approval')}><code>{command}</code></pre>
-        </div> : <p className="run-approval-note">{t('No command was provided. Expand the request details to verify the operation scope.')}</p>}
-        <details className="run-approval-details"><summary>{t('Request details')}</summary><JsonBlock value={interaction.payload} /></details>
-        {payload.canApprove !== true && <p className="run-approval-note" role="status">{t('The Workspace does not allow this operation to be approved. You can still decline it.')}</p>}
+        </div> : !approval.details && <p className="run-approval-note">{t('No command was provided. Expand the request details to verify the operation scope.')}</p>}
+        {approval.details && <><p>{approval.details.summary}</p>{approval.details.scope && <p>{t('Approval scope')}: {approval.details.scope}</p>}</>}
+        <details className="run-approval-details"><summary>{t('Request details')}</summary><JsonBlock value={approval.display} /></details>
+        {!approval.canApprove && <p className="run-approval-note" role="status">{t('The Workspace does not allow this operation to be approved. You can still decline it.')}</p>}
       </div>
       <div className="run-approval-actions">
         <button type="button" className="secondary-button" disabled={disabled} onClick={() => onReply({ kind: 'approval', decision: 'decline' })}><X size={16} aria-hidden="true" />{t('Decline')}</button>
-        <button type="button" className="primary-button" disabled={disabled || payload.canApprove !== true} onClick={() => onReply({ kind: 'approval', decision: 'accept' })}><Check size={16} aria-hidden="true" />{t('Approve this operation')}</button>
+        <button type="button" className="primary-button" disabled={disabled || !approval.canApprove} onClick={() => { if (!disabled && approval.canApprove) onReply({ kind: 'approval', decision: 'accept' }); }}><Check size={16} aria-hidden="true" />{t('Approve this operation')}</button>
       </div>
     </>}
   </section>;
@@ -212,7 +289,7 @@ export function RunInteractionRecords({ interactions, active, disabled, onReply,
   return <div className="run-process-interactions" data-canvas-interactive data-canvas-no-zoom onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
     {visibleRunInteractions(interactions).filter(item => item.id !== active?.id).map(item => <details className="run-interaction-record" key={item.id}>
       <summary>{t(item.kind === 'question' ? 'Question' : 'Operation approval')} · {t({ pending: 'Pending', answered: 'Answered', expired: 'Expired' }[item.status])}</summary>
-      <JsonBlock value={item.payload}/>
+      <JsonBlock value={boundedInteractionDetails(item.payload)}/>
     </details>)}
     {active && <InteractionForm key={active.id + ':' + active.epoch} interaction={submittedId === active.id ? { ...active, status: 'answered' } : active} disabled={disabled} onReply={onReply} onError={onError}/>}
   </div>;
@@ -236,11 +313,13 @@ export function RunsPanel(props: RunsPanelProps) {
   const [loading, setLoading] = useState(false);
   const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [continuingKey, setContinuingKey] = useState<string | null>(null);
   const [submittedInteraction, setSubmittedInteraction] = useState<string>();
   const [confirmCancel, setConfirmCancel] = useState<Run | null>(null);
   const [confirmStopChain, setConfirmStopChain] = useState<string | null>(null);
   const [confirmCandidate, setConfirmCandidate] = useState<'accept' | 'discard' | null>(null);
   const actionLock = useRef(false);
+  const continuationKeys = useRef(new Map<string, string>());
   const callbacks = useRef({ onError, onChanged });
   callbacks.current = { onError, onChanged };
   const reportedScopeError = useRef('');
@@ -302,6 +381,17 @@ export function RunsPanel(props: RunsPanelProps) {
     }
   };
   const disabled = readOnly || busy || loading;
+  const continueTask = (run: Run) => {
+    if (readOnly || scopeError || actionLock.current) return;
+    const key = JSON.stringify([run.serviceId, run.id]);
+    const idempotencyKey = continuationKeys.current.get(key) ?? randomId();
+    continuationKeys.current.set(key, idempotencyKey);
+    setContinuingKey(key);
+    void mutate(async () => {
+      try { await continueRestoredRun(request, run, idempotencyKey); continuationKeys.current.delete(key); }
+      finally { setContinuingKey(null); }
+    });
+  };
   const queue = ordered.filter(run => !isTerminalRunStatus(run.status));
   const queueHeader = mode === 'queue' && !!props.onClose;
   const refreshControl = <button type="button" className="icon-button run-refresh-button"
@@ -331,6 +421,7 @@ export function RunsPanel(props: RunsPanelProps) {
           </button>
           <div className="real-queue-item-side">
             <span className={'status status-' + run.status}><i aria-hidden="true"/>{t(runStatusMessages[run.status])}</span>
+            {run.status === 'paused_restore' && <button type="button" className="primary-button" disabled={readOnly || busy} aria-busy={continuingKey === JSON.stringify([run.serviceId, run.id])} onClick={() => continueTask(run)}>{t(continuingKey === JSON.stringify([run.serviceId, run.id]) ? 'Continuing restored run…' : 'Continue restored run')}</button>}
             <button className="secondary-button real-queue-item-cancel" disabled={readOnly || busy || run.status === 'cancelling'} onClick={() => setConfirmCancel(run)}>{run.status === 'cancelling' ? t('Waiting for cancellation confirmation') : t('Cancel task')}</button>
           </div>
         </article>)}
@@ -346,6 +437,7 @@ export function RunsPanel(props: RunsPanelProps) {
       {selected && <button className="secondary-button" onClick={() => onLocate(selected)}>{t('Locate this task')}</button>}
       {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
       {selected?.status === 'accepted' && ['manual','confirm'].includes(selected.executionStart ?? '') && <button className="secondary-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), {idempotencyKey:randomId()}, 'POST'))}>{t('Withdraw this submission')}</button>}
+      {selected?.status === 'paused_restore' && <div className="interaction-box" role="group" aria-label={t('Paused after restore')}><p>{t('The Workspace will check the saved inputs before continuing this task.')}</p><button type="button" className="primary-button" disabled={readOnly || busy || loading} aria-busy={continuingKey === selectedKey} onClick={() => continueTask(selected)}>{t(continuingKey === selectedKey ? 'Continuing restored run…' : 'Continue restored run')}</button></div>}
       {selected && current && <>
         {current.snapshot?.imageRoute?.type==='api' ? <p>{t('Generation method: Image generation API · {provider} / {model} · Configuration v{config} / Credential v{credential}', { provider: current.snapshot.imageRoute.providerId, model: current.snapshot.imageRoute.modelId, config: current.snapshot.imageRoute.configRevision, credential: current.snapshot.imageRoute.credentialRevision })}</p> : current.snapshot?.imageRoute?.type==='codex' ? <p>{t('Generation method: Codex image generation')}</p> : null}
         {current.publicMetadata?.requestId && <p>{t('Provider request ID: {id}', { id: current.publicMetadata.requestId })}</p>}

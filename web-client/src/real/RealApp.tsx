@@ -1491,7 +1491,7 @@ export function RealApp() {
                   onManage: () => { setServicePage('list'); setServicePanelOpen(true); },
                 } : undefined}
                 projectActive={canvasProjectActive}
-                onOpenRun={run => { setDetailRun(run); setRightPanel(run ? 'details' : null); }}
+                onOpenRun={(run, visible = Boolean(run)) => { setDetailRun(run); setRightPanel(panel => visible ? 'details' : panel === 'details' ? null : panel); }}
                 onRunSubmitted={run => { setDetailRun(run); setRightPanel('details'); }}
                 runs={localMode ? [] : current?.runs ?? []}
                 refreshToken={localMode ? local.revision : current?.revision ?? 0}
@@ -1568,12 +1568,12 @@ export function RealApp() {
           )}
         </section>
         <aside id="service-panel" className={'real-service-panel' + (rightPanel ? '' : ' real-service-panel-collapsed')} aria-label={panelContent === 'queue' ? t('Workspace queue') : panelContent === 'details' ? t('Run details') : t('Workspace management and connection')} aria-hidden={!rightPanel} inert={!rightPanel}>
-          {panelContent === 'details' && detailRun && connection && detailRun.serviceId === serviceId && <div className="real-right-panel-content">
+          {panelContent === 'details' && <div className="real-right-panel-content">
             <div className="service-panel-heading"><h2>{t('Run details')}</h2><button className="icon-button" aria-label={t('Close run details')} onClick={() => setRightPanel(null)}>×</button></div>
-            <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
+            {detailRun && connection && detailRun.serviceId === serviceId ? <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
               request={request} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
               onEditExecutionNode={(run,nodeId)=>{setTemporary(false);setProjectId(run.projectId);setGraphId(run.graphId);setEditExecutionNode({nodeId,graphId:run.graphId,projectId:run.projectId,nonce:Date.now()});}}
-              readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/>
+              readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/> : <p className="muted">{t('No run history')}</p>}
           </div>}
           {panelContent === 'queue' && connection && (
             <div className="real-right-panel-content"><RunsPanel

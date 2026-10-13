@@ -25,6 +25,8 @@ export const runsZhCN = {
   'Operation to run': '待执行的操作', 'Full operation awaiting approval': '待审批的完整操作',
   'No command was provided. Expand the request details to verify the operation scope.': '未提供命令内容，请展开请求详情核对操作范围。',
   'Request details': '请求详情', 'The Workspace does not allow this operation to be approved. You can still decline it.': '工作空间不允许批准此操作；仍可拒绝。',
+  'Approval scope': '批准范围',
+  'Paths': '路径', 'Permissions': '权限', 'Summary': '摘要', 'Version': '版本',
   'Decline': '拒绝', 'Approve this operation': '批准本次操作',
   'Workspace tasks and run history': '工作空间任务与运行历史', 'Workspace task queue': '工作空间任务队列', 'Refresh': '刷新',
   'Reading current Workspace records': '正在读取工作空间实际记录', 'The Workspace task scope is invalid. Check the notification and correct it.': '工作空间任务范围无效，请查看通知后修正。',
@@ -87,6 +89,9 @@ export const runsZhCN = {
   'Failure reason: {reason}': '失败原因：{reason}', 'Progress could not be read. Waiting to reconnect.': '进展读取失败，等待重新连接',
   'Earlier progress or full messages are available in run details.': '更早的进展或完整消息请在运行详情中查看。',
   'Form field {path}: {message}': '表单字段 {path}：{message}',
+  'Continue restored run': '继续恢复任务', 'Continuing restored run…': '正在继续恢复任务…',
+  'Only a task paused after restore can continue.': '只有恢复后暂停的任务可以继续。',
+  'The Workspace will check the saved inputs before continuing this task.': '工作空间会检查已保存的输入，再继续此任务。',
 } satisfies Record<string, string>;
 
 Object.assign(zhCN, runsZhCN);

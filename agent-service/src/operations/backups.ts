@@ -20,7 +20,7 @@ export interface BackupOptions {
   maintenance?: OperationsLock;
 }
 interface FileEntry { path: string; sha256: string; bytes: number }
-interface Manifest { format: 1; id: string; serviceId: string; schemaVersion: number; createdAt: string; files: FileEntry[] }
+interface Manifest { format: 1; id: string; serviceId: string; schemaVersion: number; createdAt: string; files: FileEntry[]; localStateOmitted?: true }
 interface Verified { manifest: Manifest; sha256: string; bytes: number; files: Map<string, Buffer> }
 const MAX_ARCHIVE = 512 * 1024 * 1024;
 const pendingBackups = new WeakMap<DatabaseSync, Set<Promise<Backup>>>();
@@ -37,6 +37,57 @@ export function clearStaleResourceLeases(db: DatabaseSync, lock: OperationsLock)
 }
 const validFile = (path: string): boolean => path === 'service.sqlite' || /^blobs[/][a-f0-9]{64}$/.test(path);
 const hasTable = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
+const localSettingNames = new Set(['executionSettings', 'agentDefault', 'listener', 'operationsInstance', 'backupRestorePending']);
+const privateFieldNames = new Set(['env', 'environment', 'secret', 'secrets', 'credential', 'credentials', 'password', 'token', 'tokenhash', 'apikey', 'accesskey', 'privatekey', 'authorization', 'cookie', 'executable', 'argv', 'args', 'cwd', 'launch', 'launcher', 'session']);
+const privateField = (name: string): boolean => privateFieldNames.has(name.replace(/[_-]/g, '').toLowerCase())
+  || name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').split(/[:._-]/).some(part => privateFieldNames.has(part.toLowerCase()));
+/** Only host configuration is stripped. Business metadata and user-authored
+ * graph content/frozen facts are never traversed or rewritten. */
+function localSetting(key: string, serialized: string): boolean {
+  if (['capacity', 'eventFloor', 'acceptingRuns', 'modelDefaults', 'metadata'].includes(key)
+    || /^(?:graph-import-requirements:|graph-copied-provenance:|metadata:)/.test(key)) return false;
+  if (localSettingNames.has(key) || key.startsWith('agentSettings:')) return true;
+  if (privateField(key)) return true;
+  // Unknown future launch/configuration rows still cannot smuggle private host
+  // fields through settings. Inspect field names, never arbitrary text values.
+  const pending: unknown[] = [JSON.parse(serialized)];
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== 'object') continue;
+    if (Object.keys(value).some(privateField)) return true;
+    for (const child of Object.values(value)) if (child && typeof child === 'object') pending.push(child);
+  }
+  return false;
+}
+/** Call ONLY on an isolated writable SQLite copy, inside its transaction. Keep
+ * principal IDs and idempotency scopes; authentication material is inert. */
+function omitLocalState(db: DatabaseSync, revokedAt: number): number {
+  let changes = 0;
+  for (const row of db.prepare('SELECT key,value FROM settings').all()) {
+    if (localSetting(String(row.key), String(row.value))) changes += Number(db.prepare('DELETE FROM settings WHERE key=?').run(row.key!).changes);
+  }
+  changes += Number(db.prepare("UPDATE settings SET value='null' WHERE key='modelDefaults' AND value!='null'").run().changes);
+  changes += Number(db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES('modelDefaults','null')").run().changes);
+  for (const row of db.prepare('SELECT id,token_hash,revoked_at FROM sessions').all()) {
+    const inert = 'portable-revoked:' + digest(String(row.id));
+    if (row.token_hash !== inert || row.revoked_at === null) changes += Number(db.prepare('UPDATE sessions SET token_hash=?,revoked_at=coalesce(revoked_at,?) WHERE id=?').run(inert, revokedAt, row.id!).changes);
+  }
+  changes += Number(db.prepare('DELETE FROM pairing_codes').run().changes);
+  if (hasTable(db, 'image_provider_revoked_credentials')) {
+    for (const row of db.prepare('SELECT id,credential_counter FROM image_providers').all()) {
+      for (let revision = 1; revision <= Number(row.credential_counter); revision++) changes += Number(db.prepare('INSERT OR IGNORE INTO image_provider_revoked_credentials(provider_id,revision) VALUES(?,?)').run(row.id!, revision).changes);
+    }
+    changes += Number(db.prepare('UPDATE image_providers SET credential_revision=NULL WHERE credential_revision IS NOT NULL').run().changes);
+    changes += Number(db.prepare('UPDATE image_provider_models SET verified_at=NULL WHERE verified_at IS NOT NULL').run().changes);
+  }
+  return changes;
+}
+function portableJournal(db: DatabaseSync): void {
+  // Exclusive temporary copy: finish/checkpoint WAL before changing journal
+  // mode. DELETE leaves no persistent journal/WAL carrying removed values.
+  if (db.isTransaction) throw new Error('Backup sanitization requires an isolated copy outside a transaction');
+  db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;');
+}
 function identity(db: DatabaseSync): string {
   const row = db.prepare('SELECT service_id FROM identity WHERE singleton=1').get();
   if (!row || typeof row.service_id !== 'string') throw new Error('Missing service identity');
@@ -83,7 +134,7 @@ async function verify(path: string, expectedHash?: string, schema?: string): Pro
   const hash = digest(manifestBytes);
   if (expectedHash !== undefined && hash !== expectedHash) throw new Error('Backup manifest checksum mismatch');
   const manifest = JSON.parse(manifestBytes.toString()) as Manifest;
-  if (manifest.format !== 1 || !Array.isArray(manifest.files) || typeof manifest.serviceId !== 'string' || typeof manifest.createdAt !== 'string' || !Number.isInteger(manifest.schemaVersion)) throw new Error('Invalid backup manifest');
+  if (manifest.format !== 1 || !Array.isArray(manifest.files) || typeof manifest.serviceId !== 'string' || typeof manifest.createdAt !== 'string' || !Number.isInteger(manifest.schemaVersion) || (manifest.localStateOmitted !== undefined && manifest.localStateOmitted !== true)) throw new Error('Invalid backup manifest');
   identifier(manifest.id); let total = manifestBytes.length;
   for (const entry of manifest.files) {
     if (!entry || typeof entry.path !== 'string' || !validFile(entry.path) || files.has(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Unsafe backup manifest entry');
@@ -173,6 +224,16 @@ export class Backups {
         const snapshot = join(temporary, 'service.sqlite');
         // One SQLite consistent snapshot including WAL, under host GC exclusion.
         await createDatabaseSnapshot(this.directories.database, snapshot);
+        const portable = new DatabaseSync(snapshot, { allowExtension: false });
+        try {
+          portableJournal(portable);
+          transaction(portable, () => omitLocalState(portable, Date.parse(createdAt)));
+        } finally { portable.close(); }
+        // Compact in the existing worker, so large VACUUMs do not block HTTP.
+        // All SQLite handles close before replacing the file on Windows.
+        const compacted = snapshot + '.portable';
+        await createDatabaseSnapshot(snapshot, compacted);
+        await rename(compacted, snapshot);
         const copied = new DatabaseSync(snapshot, { readOnly: true, allowExtension: false });
         let total: number, manifestHash: string;
         try {
@@ -192,7 +253,7 @@ export class Backups {
           const bytes = await readSafe(snapshot), file = await open(snapshot, 'r+');
           try { await file.sync(); await file.chmod(0o400); } finally { await file.close(); }
           entries.unshift({ path: 'service.sqlite', bytes: bytes.length, sha256: digest(bytes) });
-          const manifest: Manifest = { format: 1, id, serviceId: identity(copied), schemaVersion: Number(copied.prepare('PRAGMA user_version').get()!.user_version), createdAt, files: entries };
+          const manifest: Manifest = { format: 1, id, serviceId: identity(copied), schemaVersion: Number(copied.prepare('PRAGMA user_version').get()!.user_version), createdAt, files: entries, localStateOmitted: true };
           checkDatabase(copied, manifest); const serialized = JSON.stringify(manifest);
           const encodedBytes = 4 * Math.ceil(Buffer.byteLength(serialized) / 3) + entries.reduce((total, entry) => total + 4 * Math.ceil(entry.bytes / 3) + Buffer.byteLength(JSON.stringify(entry.path)) + 4, 0) + 128;
           if (encodedBytes > MAX_ARCHIVE) throw new Error('Backup exceeds bounded portable archive limit');
@@ -219,7 +280,23 @@ export class Backups {
     identifier(id); const record = (await this.list()).find(item => item.id === id);
     if (!record || record.state !== 'ready' || !record.sha256) throw new Error('Backup is not ready');
     const path = join(this.directories.backups, id), verified = await verify(path, record.sha256, schemaSignature(this.db));
-    const manifest = await readSafe(join(path, 'manifest.json'));
+    let manifest = await readSafe(join(path, 'manifest.json'));
+    // Old ready backups remain immutable on disk. Export a sanitized copy and
+    // its own manifest/checksum; restore preview authenticates that exact export.
+    const original = verified.files.get('service.sqlite')!;
+    const sanitized = await withTemporaryDatabase(original, async db => {
+      portableJournal(db);
+      const changed = transaction(db, () => omitLocalState(db, Date.parse(verified.manifest.createdAt) || 1));
+      if (!changed && verified.manifest.localStateOmitted) return original;
+      const file = db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')!.file;
+      const compacted = String(file) + '.portable';
+      await createDatabaseSnapshot(String(file), compacted);
+      return readSafe(compacted);
+    });
+    if (sanitized !== original) {
+      verified.files.set('service.sqlite', sanitized);
+      manifest = Buffer.from(JSON.stringify({ ...verified.manifest, localStateOmitted: true, files: verified.manifest.files.map(entry => entry.path === 'service.sqlite' ? { path: entry.path, bytes: sanitized.length, sha256: digest(sanitized) } : entry) }));
+    }
     const body = Buffer.from(JSON.stringify({ format: 'openworkgraph-backup-1', manifest: manifest.toString('base64'), files: Object.fromEntries([...verified.files].map(([name, bytes]) => [name, bytes.toString('base64')])) }));
     if (body.length > MAX_ARCHIVE) throw new Error('Download exceeds bounded archive limit');
     return { filename: id + '.owg-backup', contentType: 'application/vnd.openworkgraph.backup+json', body };
@@ -238,6 +315,7 @@ export class Backups {
     if (verified.manifest.serviceId !== identity(this.db)) throw new Error('Restore cannot replace another service identity');
     await withTemporaryDatabase(verified.files.get('service.sqlite')!, async restored => {
       if(verified.manifest.schemaVersion<SCHEMA_VERSION)migrate(restored);
+      portableJournal(restored);
       const mappings: [string, string][] = [];
       await privateDir(join(this.directories.blobs, 'objects'));
       for (const [name, bytes] of verified.files) {
@@ -247,14 +325,8 @@ export class Backups {
       }
       await syncDir(join(this.directories.blobs, 'objects'));
       transaction(restored, () => {
-        // Every imported token is revoked on EVERY restore, even old tombstones.
-        restored.prepare('UPDATE sessions SET revoked_at=?').run(Date.now());
-        if (hasTable(restored,'image_provider_revoked_credentials')) {
-          for (const row of restored.prepare('SELECT id,credential_counter FROM image_providers').all()) {
-            for (let revision=1;revision<=Number(row.credential_counter);revision++) restored.prepare('INSERT OR IGNORE INTO image_provider_revoked_credentials(provider_id,revision) VALUES(?,?)').run(String(row.id),revision);
-          }
-          restored.exec('UPDATE image_providers SET credential_revision=NULL; UPDATE image_provider_models SET verified_at=NULL;');
-        }
+        // Also sanitize old archives that predate portable backup omission.
+        omitLocalState(restored, Date.now());
         restored.exec("DELETE FROM pairing_codes; UPDATE interactions SET status='expired',version=version+1 WHERE status='pending'; DELETE FROM settings WHERE key IN ('listener','operationsInstance','backupRestorePending'); INSERT INTO settings(key,value) VALUES('backupRestorePending','true'); UPDATE settings SET value='true' WHERE key='acceptingRuns';");
         restored.exec("UPDATE runs SET status=CASE WHEN status IN ('accepted','queued') THEN 'paused_restore' WHEN status IN ('agent_completed','finalizing') THEN 'finalizing' ELSE 'reconciling' END WHERE status NOT IN ('succeeded','failed','cancelled','interrupted','paused_restore');");
         // Persisted backend completion is not backend uncertainty. Continue the
@@ -282,8 +354,13 @@ export class Backups {
         }
       });
       checkDatabase(restored, verified.manifest,undefined,true); this.requireMaintenance();
+      const source = String(restored.prepare('PRAGMA database_list').all().find(row => row.name === 'main')!.file), compacted = source + '.portable';
+      await createDatabaseSnapshot(source, compacted);
       // SQLite replaces destination transactionally, not main-file rename over WAL.
-      await backup(restored, this.directories.database);
+      const portable = new DatabaseSync(compacted, { readOnly: true, allowExtension: false });
+      try { await backup(portable, this.directories.database); } finally { portable.close(); }
+      const checkpoint = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      if (Number(checkpoint?.busy) !== 0) throw new Error('Restored backup could not clear the destination WAL');
     });
   }
 }

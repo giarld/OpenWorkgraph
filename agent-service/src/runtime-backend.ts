@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { InputSnapshot, Interaction, Json, Run } from '@openworkgraph/protocol';
+import type { AgentApprovalDetails, AgentMessageIdentity, InputSnapshot, Interaction, Json, Run } from '@openworkgraph/protocol';
+import { normalizeApprovalPermissions, validApprovalPaths } from '@openworkgraph/protocol';
 import type { BackendAdapter, BackendInteraction, BackendReply, RuntimeSnapshot } from './backend/types.js';
 import type { SchedulerBackend, BackendContext, ReconcileResult } from './scheduler.js';
 import { Runs } from './runs.js';
@@ -8,7 +10,7 @@ import { ProjectProbe } from './project-probe.js';
 import { materializeInputs } from './input-materialization.js';
 import { runDirectories, type DataDirectories } from './directories.js';
 import { ServiceError } from './errors.js';
-import { publicProgressText } from './backend/adapter.js';
+import { publicProgressText } from './backend/progress.js';
 import { sandboxMode } from './execution-settings.js';
 import { ProjectFiles } from './project-files.js';
 import { RunContexts, type RunLineage } from './run-context.js';
@@ -16,16 +18,39 @@ import type { SkillSessions } from './skill-sessions.js';
 import { hasVisualizeFeature } from './visualize-features.js';
 import { validateVisualizeOutput } from './visualize-output-validation.js';
 
+const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
+const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** Accept only the displayed operation, never session/permanent grants. */
+function approvableDetails(details: AgentApprovalDetails): boolean {
+  if (!object(details) || details.version !== 1 || !['command', 'file_change', 'permissions', 'tool'].includes(details.kind) || typeof details.summary !== 'string' || !details.summary.trim()) return false;
+  if (details.scope !== undefined && !['once', 'turn'].includes(details.scope)) return false;
+  if (details.command !== undefined && (typeof details.command !== 'string' || details.command.length > 16000)) return false;
+  if (details.paths !== undefined && !validApprovalPaths(details.paths)) return false;
+  if (details.kind !== 'permissions') return details.permissions === undefined;
+  // Unknown shapes remain readable and declineable, but cannot be approved.
+  return normalizeApprovalPermissions(details.permissions) !== null;
+}
+
 export function backendReply(interaction: Interaction, answer: Json): BackendReply {
   const payload = interaction.payload as unknown as BackendInteraction;
   if (interaction.kind === 'approval') {
     const decision = typeof answer === 'boolean' ? (answer ? 'accept' : 'decline') : answer && typeof answer === 'object' && !Array.isArray(answer) && answer.kind === 'approval' ? answer.decision : null;
-    if (!['accept', 'decline'].includes(String(decision)) || (decision === 'accept' && !payload?.canApprove)) throw new ServiceError('INVALID_REQUEST', 'Approval is not permitted for this action');
+    if (!['accept', 'decline'].includes(String(decision)) || (decision === 'accept' && (payload?.canApprove !== true || (payload.details !== undefined && !approvableDetails(payload.details))))) throw new ServiceError('INVALID_REQUEST', 'Approval is not permitted for this action');
     return { kind: 'approval', decision: decision as 'accept' | 'decline' };
   }
-  const ids = payload?.questions?.map(question => question.id) ?? [];
+  const questions = payload?.questions;
+  if (!Array.isArray(questions) || !questions.length || questions.length > 32 || questions.some(question => !object(question) || !identifier(question.id)) || new Set(questions.map(question => question.id)).size !== questions.length) throw new ServiceError('INVALID_REQUEST', 'Invalid question group');
+  const ids = questions.map(question => question.id);
   const answers = typeof answer === 'string' && ids.length === 1 ? { [ids[0]!]: [answer] } : answer && typeof answer === 'object' && !Array.isArray(answer) && answer.kind === 'question' ? answer.answers : null;
-  if (!ids.length || !answers || typeof answers !== 'object' || Array.isArray(answers) || Object.keys(answers).length !== ids.length || ids.some(id => !Array.isArray(answers[id]) || !(answers[id] as Json[]).length || (answers[id] as Json[]).some(value => typeof value !== 'string' || !value.trim() || value.length > 16000))) throw new ServiceError('INVALID_REQUEST', 'Answer each requested question exactly once');
+  if (!object(answers) || Object.keys(answers).length !== ids.length || ids.some(id => !Object.hasOwn(answers, id))) throw new ServiceError('INVALID_REQUEST', 'Answer each requested question exactly once');
+  for (const question of questions) {
+    const values = answers[question.id]; const mode = question.mode ?? 'text';
+    if (!['text', 'single', 'multiple'].includes(mode) || !Array.isArray(values) || !values.length || values.length > 64 || values.some(value => typeof value !== 'string' || !value.trim() || value.length > 16000)) throw new ServiceError('INVALID_REQUEST', 'Invalid question answer');
+    // Legacy questions allowed arrays and free text even when suggestions exist.
+    if (question.mode === 'text' && values.length !== 1 || mode === 'single' && values.length !== 1 || mode === 'multiple' && new Set(values).size !== values.length) throw new ServiceError('INVALID_REQUEST', 'Invalid question selection count');
+    if (mode !== 'text' && (!Array.isArray(question.options) || (values as string[]).some(value => !question.options.includes(value)))) throw new ServiceError('INVALID_REQUEST', 'Select only requested options');
+  }
   return { kind: 'question', answers: answers as Record<string, string[]> };
 }
 
@@ -33,21 +58,41 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
 export class RuntimeBackend implements SchedulerBackend {
   private readonly contexts = new Map<string, BackendContext>();
   readonly runContexts: RunContexts;
-  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions) { this.runContexts = new RunContexts(runs, dirs); }
+  private readonly callbackTimeoutMs: number;
+  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number } = {}) {
+    this.runContexts = new RunContexts(runs, dirs);
+    this.callbackTimeoutMs = options.callbackTimeoutMs ?? 30000;
+    if (!Number.isSafeInteger(this.callbackTimeoutMs) || this.callbackTimeoutMs < 1 || this.callbackTimeoutMs > 60000) throw new ServiceError('INVALID_REQUEST', 'Invalid host callback timeout');
+  }
+  /** The accepted epoch and frozen plugin fence callbacks and operation returns. */
+  private accepts(snapshot: RuntimeSnapshot, context: BackendContext, runId: string): boolean {
+    if (snapshot.runId !== runId || !this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId)) return false;
+    const token = this.runs.runtime(runId);
+    if (token.epoch !== context.epoch || snapshot.attemptId !== undefined && snapshot.attemptId !== context.epoch) return false;
+    const backendId = this.runs.snapshot(runId).agent?.backendId ?? 'codex';
+    if (snapshot.backendId !== undefined && snapshot.backendId !== backendId) return false;
+    const identity = snapshot.identity;
+    if (identity !== undefined && (!identifier(identity.backendId) || !identifier(identity.attemptId) || !identifier(identity.messageId) || identity.backendId !== backendId || identity.attemptId !== context.epoch || identity.sessionId !== undefined && !identifier(identity.sessionId) || identity.turnId !== undefined && !identifier(identity.turnId))) return false;
+    return true;
+  }
   private snapshot(snapshot: RuntimeSnapshot, context: BackendContext, expectedRunId: string): void {
-    if (snapshot.runId !== expectedRunId) return;
-    if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(expectedRunId)) return;
-    const run = this.runs.get(snapshot.runId); const token = this.runs.runtime(run.id);
-    if (token.epoch !== context.epoch) return;
+    if (!this.accepts(snapshot, context, expectedRunId)) return;
+    const run = this.runs.get(snapshot.runId);
     if (snapshot.state === 'starting') return;
-    if (run.status === 'preparing') context.emit({ type: 'started', identity: { threadId: snapshot.threadId, turnId: snapshot.turnId } });
+    const backendId = this.runs.snapshot(run.id).agent?.backendId;
+    if (run.status === 'preparing') context.emit({ type: 'started', identity: { threadId: snapshot.threadId, turnId: snapshot.turnId, ...(backendId ? { backendId, attemptId: context.epoch } : {}) } });
     const progress = snapshot.progress;
     const content = progress && publicProgressText(progress.text);
-    // Persistent identity deduplication also covers start/respond return snapshots and reconciliation.
-    const duplicate = progress && this.runs.db.prepare("SELECT 1 FROM run_process_records WHERE run_id=? AND kind='backend.progress' AND json_extract(payload,'$.threadId')=? AND json_extract(payload,'$.turnId')=? AND json_extract(payload,'$.summary.itemId')=? LIMIT 1").get(run.id, snapshot.threadId, snapshot.turnId, progress.itemId);
-    const summary = content && !duplicate && snapshot.threadId && snapshot.turnId && progress && typeof progress.itemId === 'string' && progress.itemId.length > 0 && progress.itemId.length <= 200 && ['commentary', 'final_answer'].includes(progress.phase)
-      ? { source: 'agentMessage', itemId: progress.itemId, phase: progress.phase, text: content } : null;
-    context.emit({ type: 'progress', payload: { state: snapshot.state, threadId: snapshot.threadId, turnId: snapshot.turnId, observedAt: snapshot.observedAt, ...(summary ? { summary } : {}), ...(snapshot.transportFailure ? { transportFailure: { kind: snapshot.transportFailure.kind, ...(snapshot.transportFailure.exitCode !== undefined ? { exitCode: snapshot.transportFailure.exitCode } : {}), ...(snapshot.transportFailure.exitSignal !== undefined ? { exitSignal: snapshot.transportFailure.exitSignal } : {}), ...(snapshot.transportFailure.observedFrameBytes !== undefined ? { observedFrameBytes: snapshot.transportFailure.observedFrameBytes } : {}) } } : {}) } });
+    const identity: AgentMessageIdentity | undefined = snapshot.identity ? { backendId: snapshot.identity.backendId, attemptId: snapshot.identity.attemptId, messageId: snapshot.identity.messageId, ...(snapshot.identity.sessionId ? { sessionId: snapshot.identity.sessionId } : {}), ...(snapshot.identity.turnId ? { turnId: snapshot.identity.turnId } : {}) } : backendId && progress && identifier(progress.messageId) ? { backendId, attemptId: context.epoch, messageId: progress.messageId } : undefined;
+    if (snapshot.identity && progress?.messageId !== undefined && progress.messageId !== snapshot.identity.messageId) throw new ServiceError('INVALID_REQUEST', 'Progress message identity mismatch');
+    // Persistent identity deduplication covers callbacks, operation returns and reconcile.
+    const duplicate = progress && (identity
+      ? this.runs.db.prepare("SELECT 1 FROM run_process_records WHERE run_id=? AND kind='backend.progress' AND json_extract(payload,'$.identity.backendId')=? AND json_extract(payload,'$.identity.attemptId')=? AND json_extract(payload,'$.identity.messageId')=? AND json_extract(payload,'$.summary') IS NOT NULL LIMIT 1").get(run.id, identity.backendId, identity.attemptId, identity.messageId)
+      : this.runs.db.prepare("SELECT 1 FROM run_process_records WHERE run_id=? AND kind='backend.progress' AND json_extract(payload,'$.threadId')=? AND json_extract(payload,'$.turnId')=? AND json_extract(payload,'$.summary.itemId')=? LIMIT 1").get(run.id, snapshot.threadId, snapshot.turnId, progress.itemId ?? null));
+    const identified = identity || (!backendId || backendId === 'codex') && snapshot.threadId && snapshot.turnId && progress && identifier(progress.itemId);
+    const summary = content && !duplicate && identified && progress && ['commentary', 'final_answer'].includes(progress.phase)
+      ? { source: 'agentMessage', ...(identifier(progress.itemId) ? { itemId: progress.itemId } : {}), ...(identity ? { messageId: identity.messageId } : {}), phase: progress.phase, text: content } : null;
+    if (!duplicate) context.emit({ type: 'progress', payload: { state: snapshot.state, threadId: snapshot.threadId, turnId: snapshot.turnId, observedAt: snapshot.observedAt, ...(identity ? { identity: { ...identity } } : {}), ...(summary ? { summary } : {}), ...(snapshot.transportFailure ? { transportFailure: { kind: snapshot.transportFailure.kind, ...(snapshot.transportFailure.exitCode !== undefined ? { exitCode: snapshot.transportFailure.exitCode } : {}), ...(snapshot.transportFailure.exitSignal !== undefined ? { exitSignal: snapshot.transportFailure.exitSignal } : {}), ...(snapshot.transportFailure.observedFrameBytes !== undefined ? { observedFrameBytes: snapshot.transportFailure.observedFrameBytes } : {}) } } : {}) } });
     if (snapshot.state === 'completed') context.emit({ type: 'completed', result: { answer: snapshot.answer } });
     else if (snapshot.state === 'failed') context.emit({ type: 'failed', error: snapshot.reason ?? 'Backend confirmed failure' });
     else if (snapshot.state === 'cancelled') context.emit({ type: 'stopped' });
@@ -56,9 +101,67 @@ export class RuntimeBackend implements SchedulerBackend {
       if (['preparing', 'running', 'waiting_answer', 'waiting_approval', 'cancelling'].includes(current.status)) this.runs.transition(run.id, this.runs.runtime(run.id), 'reconciling', { uncertainty: snapshot.reason ?? 'Backend outcome unknown' });
     }
   }
+  /** Host callbacks are synchronous, preserving arrival order and propagating failure. */
+  private callback<T>(runId: string, context: BackendContext, name: string, work: () => T): T {
+    try { return work(); } catch (error) {
+      if (this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId) && this.runs.runtime(runId).epoch === context.epoch) {
+        this.runs.record(runId, 'backend.callback_error', { callback: name });
+        const run = this.runs.get(runId);
+        if (['preparing', 'running', 'waiting_answer', 'waiting_approval', 'cancelling'].includes(run.status)) this.runs.transition(runId, this.runs.runtime(runId), 'reconciling', { uncertainty: 'Backend host callback failed' });
+      }
+      throw error;
+    }
+  }
+  private active(runId: string, context: BackendContext): void {
+    const token = this.runs.runtime(runId);
+    if (token.epoch !== context.epoch || token.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(runId).status)) throw new ServiceError('CONFLICT', 'Run is no longer available for host callbacks');
+  }
+  /** Timeouts reject visibly; late skill resolution cannot dispatch a command. */
+  private async asyncCallback<T>(runId: string, context: BackendContext, name: string, work: (check: () => void) => Promise<T> | T): Promise<T> {
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      if (expired) throw new ServiceError('CONFLICT', 'Host callback expired');
+      this.active(runId, context);
+    };
+    try {
+      check();
+      const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { expired = true; reject(new ServiceError('CONFLICT', 'Host callback timed out')); }, this.callbackTimeoutMs); });
+      const result = await Promise.race([Promise.resolve().then(() => work(check)), timeout]);
+      check();
+      return result;
+    } catch (error) {
+      if (this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId) && this.runs.runtime(runId).epoch === context.epoch) this.runs.record(runId, 'backend.callback_error', { callback: name, timedOut: expired });
+      throw error;
+    } finally { expired = true; if (timer !== undefined) clearTimeout(timer); }
+  }
+  private interaction(value: BackendInteraction, context: BackendContext, runId: string): void {
+    if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(runId)) return;
+    const token = this.runs.runtime(runId); const run = this.runs.get(runId);
+    if (token.epoch !== context.epoch || token.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(run.status)) return;
+    if (!identifier(value.id) || !['question', 'approval'].includes(value.kind) || JSON.stringify(value).length > 65536 || !Array.isArray(value.questions) || value.questions.length > 32) throw new ServiceError('INVALID_REQUEST', 'Invalid or unbounded backend interaction');
+    if (value.kind === 'question' && (!value.questions.length || new Set(value.questions.map(question => question.id)).size !== value.questions.length || value.questions.some(question => !identifier(question.id) || typeof question.text !== 'string' || !question.text.trim() || question.text.length > 16000 || !Array.isArray(question.options) || question.options.length > 64 || question.options.some(option => typeof option !== 'string' || !option.trim() || option.length > 16000) || question.mode !== undefined && !['text', 'single', 'multiple'].includes(question.mode)))) throw new ServiceError('INVALID_REQUEST', 'Invalid backend question group');
+    const hostId = 'backend-' + createHash('sha256').update(JSON.stringify([runId, context.epoch, value.id])).digest('hex');
+    const canApprove = value.canApprove === true && (value.details === undefined || approvableDetails(value.details));
+    const details = value.details;
+    // Project only the public contract; adapter-private fields never become history.
+    const payload = JSON.parse(JSON.stringify({ id: hostId, kind: value.kind, reason: value.reason, command: value.command, canApprove,
+      questions: value.questions.map(question => ({ id: question.id, text: question.text, options: question.options, ...(question.mode !== undefined ? { mode: question.mode } : {}) })),
+      ...(details !== undefined ? { details: object(details) ? { version: details.version, kind: details.kind, summary: details.summary, ...(details.command !== undefined ? { command: details.command } : {}), ...(details.paths !== undefined ? { paths: details.paths } : {}), ...(details.permissions !== undefined ? { permissions: details.permissions } : {}), ...(details.scope !== undefined ? { scope: details.scope } : {}) } : details } : {}),
+      backendInteractionId: value.id, attemptId: context.epoch })) as Json;
+    const prior = this.runs.db.prepare('SELECT id FROM interactions WHERE id=? AND run_id=?').get(hostId, runId);
+    if (prior) {
+      const stored = this.runs.interaction(hostId);
+      const stable = (item: Json): string => JSON.stringify(item, (_key, entry: unknown) => object(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry);
+      if (stored.kind !== value.kind || stable(stored.payload) !== stable(payload)) throw new ServiceError('CONFLICT', 'Backend interaction identity reused');
+      return;
+    }
+    if (run.status === 'preparing') context.emit({ type: 'started' });
+    context.emit({ type: value.kind, id: hostId, payload });
+  }
   async start(run: Run, snapshot: InputSnapshot, context: BackendContext): Promise<void> {
     if (this.runs.db.isTransaction) throw new ServiceError('CONFLICT', 'Backend preparation must run outside transactions');
-    if (snapshot.imageRoute?.type === 'api' || !snapshot.model) throw new ServiceError('INVALID_REQUEST', 'Codex backend cannot execute an API image snapshot');
+    if (snapshot.imageRoute?.type === 'api' || !snapshot.model) throw new ServiceError('INVALID_REQUEST', 'Agent backend cannot execute an API image snapshot');
     this.contexts.set(run.id, context);
     const runtime = this.runs.runtime(run.id); const path = String(runtime.details.canonicalPath);
     // All checks before adapter.start are known not to have spawned a backend.
@@ -107,33 +210,26 @@ export class RuntimeBackend implements SchedulerBackend {
     }
     if (this.runs.runtime(run.id).epoch !== context.epoch) return;
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
-    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.model, skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') }, {
-      onSnapshot: value => this.snapshot(value, context, run.id),
+    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.agent?.model ?? snapshot.model, attemptId: context.epoch, ...(snapshot.agent ? { agent: structuredClone(snapshot.agent) } : {}), skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), ...(!snapshot.agent || snapshot.agent.backendId === 'codex' ? { sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') } : {}) }, {
+      onSnapshot: value => this.callback(run.id, context, 'onSnapshot', () => this.snapshot(value, context, run.id)),
       ...(this.runs.shouldGenerateNodeTitle(run.id) ? { setNodeTitle: (title: string) => {
         const token = this.runs.runtime(run.id);
         if (token.epoch !== context.epoch) return false;
         return this.runs.updateNodeTitle(run.id, token, title);
       } } : {}),
-      onInteraction: value => {
-        if (!this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(run.id)) return;
-        const token = this.runs.runtime(run.id);
-        if (token.epoch !== context.epoch || token.details.cancelRequested === true) return;
-        if (this.runs.db.prepare('SELECT 1 FROM interactions WHERE id=? AND run_id=?').get(value.id, run.id)) return;
-        if (this.runs.get(run.id).status === 'preparing') context.emit({ type: 'started' });
-        context.emit({ type: value.kind, id: value.id, payload: JSON.parse(JSON.stringify(value)) as Json });
-      },
-      queryHistory: async query => this.queryHistory(run.id, query),
-      readRunContext: async request => this.runContexts.read(run.id, request),
-      ...(runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features) ? { validateVisualizeOutput: async (pagePath: string) => {
+      onInteraction: value => this.callback(run.id, context, 'onInteraction', () => this.interaction(value, context, run.id)),
+      queryHistory: query => this.asyncCallback(run.id, context, 'queryHistory', () => this.queryHistory(run.id, query)),
+      readRunContext: request => this.asyncCallback(run.id, context, 'readRunContext', () => this.runContexts.read(run.id, request)),
+      ...(runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features) ? { validateVisualizeOutput: (pagePath: string) => this.asyncCallback(run.id, context, 'validateVisualizeOutput', async () => {
         const current = this.runs.runtime(run.id);
         if (current.epoch !== context.epoch || current.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(run.id).status)) throw new ServiceError('CONFLICT', 'Run is no longer available for output validation.');
         const result = await validateVisualizeOutput(directories.output, pagePath, runtime.details.kind as 'execution' | 'visualize_generation');
         const after = this.runs.runtime(run.id);
         if (after.epoch !== context.epoch || after.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(run.id).status)) throw new ServiceError('CONFLICT', 'Run changed during output validation.');
         return result;
-      } } : {}),
-      ...(this.skillSessions ? { skillEnvironment: async (skillId: string) => this.skillSessions!.forSkill(snapshot.skills ?? [], skillId) } : {}),
-      ...(this.skillSessions ? { withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.skillSessions!.withEnvironment(snapshot.skills ?? [], skillId, dispatch) } : {}),
+      }) } : {}),
+      ...(this.skillSessions ? { skillEnvironment: (skillId: string) => this.asyncCallback(run.id, context, 'skillEnvironment', () => this.skillSessions!.forSkill(snapshot.skills ?? [], skillId)) } : {}),
+      ...(this.skillSessions ? { withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.asyncCallback(run.id, context, 'withSkillEnvironment', check => this.skillSessions!.withEnvironment(snapshot.skills ?? [], skillId, (environment, secrets) => { check(); return dispatch(environment, secrets); })) } : {}),
     });
     this.snapshot(result, context, run.id);
   }
@@ -145,18 +241,22 @@ export class RuntimeBackend implements SchedulerBackend {
     return JSON.stringify(rows.map(row => ({ runId: row.id, nodeId: row.node_id, status: row.status, createdAt: row.created_at, historyState: row.history_state, records: row.history_state === 'cleared' ? [] : this.runs.db.prepare('SELECT kind,payload FROM run_process_records WHERE run_id=? AND instr(payload,?)>0 ORDER BY id DESC LIMIT 10').all(String(row.id), query).map(record => ({ kind: record.kind, payload: String(record.payload).slice(0, 1600) })) }))).slice(0, 30000);
   }
   async cancel(run: Run, context: BackendContext): Promise<'confirmed' | 'unknown'> {
-    const result = await this.adapter.cancel(run.id); if (result.runId !== run.id) return 'unknown'; this.snapshot(result, context, run.id);
+    const result = await this.adapter.cancel(run.id); if (!this.accepts(result, context, run.id)) return 'unknown'; this.snapshot(result, context, run.id);
     return ['cancelled', 'failed', 'completed'].includes(result.state) ? 'confirmed' : 'unknown';
   }
   async reply(run: Run, interaction: Interaction, answer: Json, context: BackendContext): Promise<void> {
-    const result = await this.adapter.respond(run.id, interaction.id, backendReply(interaction, answer));
-    if (result.runId !== run.id || result.state === 'unknown') throw new ServiceError('CONFLICT', 'Reply delivery outcome unknown');
+    if (interaction.runId !== run.id || interaction.epoch !== context.epoch || this.runs.runtime(run.id).epoch !== context.epoch) throw new ServiceError('CONFLICT', 'Stale interaction responder');
+    const payload = interaction.payload;
+    const nativeId = object(payload) && identifier(payload.backendInteractionId) ? payload.backendInteractionId : interaction.id;
+    const result = await this.adapter.respond(run.id, nativeId, backendReply(interaction, answer));
+    if (!this.accepts(result, context, run.id) || result.state === 'unknown') throw new ServiceError('CONFLICT', 'Reply delivery outcome unknown');
     this.snapshot(result, context, run.id);
   }
   async reconcile(run: Run, context: BackendContext): Promise<ReconcileResult> {
     try {
       const result = await this.adapter.reconcile(run.id);
-      if (result.runId !== run.id) return 'unknown';
+      if (!this.accepts(result, context, run.id)) return 'unknown';
+      this.snapshot(result, context, run.id);
       if (result.state === 'cancelled' || result.state === 'failed' || result.state === 'interrupted') return 'interrupted';
       if (result.state === 'completed') {
         const token = this.runs.runtime(run.id);
@@ -168,6 +268,9 @@ export class RuntimeBackend implements SchedulerBackend {
       // Only an adapter attached by THIS bridge has an original responder.
       if (result.state === 'running' && this.contexts.get(run.id)?.epoch === context.epoch) return 'resumed';
       return 'unknown';
-    } catch { return 'unknown'; }
+    } catch {
+      if (this.runs.db.prepare('SELECT 1 FROM runs WHERE id=?').get(run.id) && this.runs.runtime(run.id).epoch === context.epoch) this.runs.record(run.id, 'backend.reconcile_error', { message: 'Backend reconciliation failed' });
+      return 'unknown';
+    }
   }
 }

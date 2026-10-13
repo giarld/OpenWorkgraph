@@ -15,7 +15,7 @@ export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<Input
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
 export interface InputSource { edgeId: string; sourceNodeId: string; sourceNodeTitle?: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; form?: VisualizeFormSnapshot; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
 export interface InputPreview { graphId: string; nodeId: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles: ProjectFileInput[]; sources: InputSource[]; issues: InputIssue[]; canSubmit: boolean; predecessorCount: number; totalBytes: number }
-export type BuildInputOptions = { expectedExecutionRevision?: number; skills?: import('@openworkgraph/protocol').FrozenSkill[]; features?: import('@openworkgraph/protocol').VisualizeFeatureSelection[]; visualizeGeneration?: import('@openworkgraph/protocol').VisualizeGenerationContext } & (
+export type BuildInputOptions = { expectedExecutionRevision?: number; agent?: import('@openworkgraph/protocol').FrozenAgentSelection; skills?: import('@openworkgraph/protocol').FrozenSkill[]; features?: import('@openworkgraph/protocol').VisualizeFeatureSelection[]; visualizeGeneration?: import('@openworkgraph/protocol').VisualizeGenerationContext } & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute,{type:'codex'}> }
   | { imageRoute: FrozenApiImageRoute; model?: never }
 );
@@ -69,7 +69,7 @@ export class InputPreparation {
       if (existing) { existing.edgeIds.push(source.edgeId); existing.resourceIndexes = [...new Set([...existing.resourceIndexes, ...source.resourceIndexes])]; existing.projectFileIndexes = [...new Set([...(existing.projectFileIndexes ?? []), ...source.projectFileIndexes])]; }
       else visualizeBindings.push({ sourceNodeId: source.sourceNodeId, edgeIds: [source.edgeId], resourceIndexes: [...source.resourceIndexes], projectFileIndexes: [...source.projectFileIndexes] });
     }
-    const base = {executionRevision:preview.executionRevision,prompt:preview.prompt,resources:preview.resources,projectFiles:preview.projectFiles,...(visualizeBindings.length ? {visualizeBindings} : {}), ...(options.features?.length ? { features: structuredClone(options.features) } : {}), ...(options.visualizeGeneration ? { visualizeGeneration: structuredClone(options.visualizeGeneration) } : {})};
+    const base = {executionRevision:preview.executionRevision,prompt:preview.prompt,resources:preview.resources,projectFiles:preview.projectFiles,...(options.agent ? {agent:structuredClone(options.agent)} : {}),...(visualizeBindings.length ? {visualizeBindings} : {}), ...(options.features?.length ? { features: structuredClone(options.features) } : {}), ...(options.visualizeGeneration ? { visualizeGeneration: structuredClone(options.visualizeGeneration) } : {})};
     let payload: Omit<InputSnapshot,'inputDigest'>;
     if (options.imageRoute?.type === 'api') {
       const route = options.imageRoute;

@@ -7,7 +7,7 @@ import './catalog';
 import './home.css';
 
 export function HomePage() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('openworkgraph:theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
   });
@@ -17,7 +17,7 @@ export function HomePage() {
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#181715' : '#f4f2ed');
     try { localStorage.setItem('openworkgraph:theme', theme); } catch { /* Keep in-memory preference. */ }
   }, [theme]);
-  useEffect(() => { document.title = t('OpenWorkgraph · Home'); }, [t]);
+  useEffect(() => { document.title = t('OpenWorkgraph · Visual Agent Workbench'); }, [t]);
   useEffect(() => {
     const sync = () => setHidden(document.hidden);
     document.addEventListener('visibilitychange', sync);
@@ -38,10 +38,10 @@ export function HomePage() {
     <main>
       <section className="home-hero" aria-labelledby="home-title">
         <div className="home-copy">
-          <p className="home-eyebrow"><span/>{t('An open space for your workflow')}</p>
-          <h1 id="home-title">{t('Connect ideas.')}<br/><span>{t('Move work forward.')}</span></h1>
-          <p className="home-intro">{t('Spread out your ideas and connect your thoughts. Organize creativity and development freely in a Work Graph, bringing clarity and structure to complex work. Add your favorite skills, explore new possibilities, and make your Work Graph more than just work.')}</p>
-          <a className="home-cta" href="./workgraphs.html#workgraphs">{t('Open Work Graph')}<ArrowRight size={19}/></a>
+          <h1 id="home-title"><span className="home-title-visual">{t('Visual')}</span>{language === 'en' ? ' ' : ''}<span className="home-title-workbench">{t('Agent Workbench')}</span></h1>
+          {language === 'zh-CN' && <p className="home-title-english" lang="en">Visual Agent Workbench</p>}
+          <p className="home-intro">{t('Customize your workflows. Make agents easier to use, ')}<strong>{t('work more efficiently')}</strong>{t(', and bring ideas to life faster.')}</p>
+          <a className="home-cta" href="./workgraphs.html#workgraphs">{t('Get started')}<ArrowRight size={19}/></a>
           <a className="home-explore" href="#examples">{t('Explore the possibilities')}<ArrowDown size={14}/></a>
         </div>
         <div className="home-visual" data-paused={hidden}>
@@ -66,6 +66,6 @@ export function HomePage() {
         </div>
       </section>
     </main>
-    <footer className="home-footer"><span>OpenWorkgraph</span><span>{t('Ideas connected. Work in motion.')}</span></footer>
+    <footer className="home-footer"><span>OpenWorkgraph</span><span>{t('Less hassle. Greater efficiency. Bring ideas to life faster.')}</span></footer>
   </div>;
 }
