@@ -4,13 +4,13 @@
 > OpenWorkgraph is an all-purpose visual agent workbench built around the infinite canvas concept. Beyond image, text, and video generation and software development, it helps you organize agent workflows for a wide range of purposes.
 >
 > Visual Agent Workbench
-> Less hassle. Greater efficiency. Bring ideas to life faster.
+> AI is the magic of creation. Workgraph puts the wand in your hands.
 
 [简体中文](README.md) | English
 
 ## Quick Start
 
-Open the [official OpenWorkgraph editor](https://workgraph.giarld.com/) and follow the on-screen setup guide to get started.
+Open the [official OpenWorkgraph editor](https://canvas.giarld.com) and follow the on-screen setup guide to get started.
 
 ## Design Philosophy: First Principles
 

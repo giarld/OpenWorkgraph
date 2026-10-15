@@ -129,15 +129,17 @@ export class EventSubscription {
   get lastEventId(): string {
     return this.cursor;
   }
+  reconnect(): void {
+    if (!this.controller || this.controller.signal.aborted || this.reconnectRequested) return;
+    this.reconnectRequested = true; this.attemptController?.abort(); this.wakeDelay?.();
+  }
   start(): void {
     if (this.controller) return;
     const controller = new AbortController();
     this.controller = controller;
     const reconnect = () => {
       if (controller.signal.aborted) return;
-      this.reconnectRequested = true;
-      this.attemptController?.abort();
-      this.wakeDelay?.();
+      this.reconnect();
     };
     const offline = () => {
       this.connected = false;

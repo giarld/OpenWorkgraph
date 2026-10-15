@@ -35,7 +35,13 @@
   .ow-visualize-refresh-page .is-spinning { animation:none; }
   .ow-visualize-status button.ow-visualize-header-action { transition:none; }
 }
-.ow-visualize-node > button { margin:auto; padding:12px; }
+.ow-visualize-empty { margin:auto; padding:20px; max-width:100%; display:flex; flex-direction:column; align-items:center; gap:12px; text-align:center; }
+.ow-visualize-empty-prompt { padding:8px; }
+.ow-visualize-upload { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:36px; padding:6px 14px; border:1px solid var(--stroke); border-radius:6px; background:var(--fill); color:var(--text); cursor:pointer; }
+.ow-visualize-upload:hover:not(:disabled) { border-color:var(--muted); }
+.ow-visualize-upload:focus-visible { outline:2px solid var(--link); outline-offset:2px; }
+.ow-visualize-upload:disabled { opacity:.55; cursor:default; }
+.ow-visualize-import-error { margin:0; color:var(--danger); overflow-wrap:anywhere; }
 .ow-visualize-node > [role=alert], .ow-visualize-node > p { padding:12px; overflow:auto; }
 .ow-visualize-expanded { min-height:360px; }
 .reference-preview-backdrop > dialog.reference-preview { margin: auto; color: var(--text); border: 1px solid var(--stroke); }

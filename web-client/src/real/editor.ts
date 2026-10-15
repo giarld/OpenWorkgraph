@@ -60,6 +60,8 @@ export class GraphEditor {
   private chain: Promise<unknown> = Promise.resolve();
   private disposed = false;
   private readSequence = 0;
+  private refreshRequested = 0;
+  private refreshing?: Promise<void>;
   private connectionEpoch = 0;
   private commandEpoch = 0;
   private writerId = randomId();
@@ -188,19 +190,25 @@ export class GraphEditor {
       void this.flush().catch(() => undefined);
     }, 600);
   }
-  async refresh() {
-    const sequence = ++this.readSequence;
-    const graph = await this.request<GraphSnapshot>(
-      graphPath(this.state.graph.projectId, this.state.graph.graphId),
-    );
-    if (this.disposed || sequence !== this.readSequence) return;
-    // An older GET may finish after a command response; revisions cannot move backwards.
-    if (
-      graph.executionRevision < this.state.graph.executionRevision ||
-      graph.layoutRevision < this.state.graph.layoutRevision
-    )
-      return;
-    this.acceptCommitted(graph);
+  refresh(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    ++this.refreshRequested;
+    if (this.refreshing) return this.refreshing;
+    const work = Promise.resolve().then(async () => {
+      for (;;) {
+        if (this.disposed) return;
+        const ticket = this.refreshRequested, sequence = ++this.readSequence;
+        const graph = await this.request<GraphSnapshot>(graphPath(this.state.graph.projectId, this.state.graph.graphId));
+        if (this.disposed) return;
+        // A command may have committed while this read was in flight.
+        if (sequence === this.readSequence) this.acceptCommitted(graph);
+        if (ticket === this.refreshRequested) return;
+      }
+    });
+    this.refreshing = work;
+    const clear = () => { if (this.refreshing === work) this.refreshing = undefined; };
+    void work.then(clear, clear);
+    return work;
   }
   acceptCommitted(graph: GraphSnapshot): void {
     if (this.disposed) return;

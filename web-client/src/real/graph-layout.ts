@@ -86,7 +86,6 @@ export function assertGeometryEditable(graph: GraphSnapshot, ids: string[], read
 /** Resizing only releases existing members; covering another node never adopts it. */
 export function resizeWithMembershipOperations(graph: GraphSnapshot, nodeId: string, bounds: Rect): GraphOperation[] {
   const node = find(graph, nodeId);
-  if (node.type === 'visualize' && (bounds.width < 480 || bounds.height < 360)) throw Error(translate("Visualize nodes must be at least 480 × 360."));
   const operations = [resizeOperation(nodeId, bounds)];
   if (!visualGroup(node)) return operations;
   const before = node.memberIds ?? [];

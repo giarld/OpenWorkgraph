@@ -4,13 +4,14 @@ import { useEffect, useSyncExternalStore } from 'react';
 import type { AgentDefault, AgentDescriptor, AgentModelOption, AgentSelection, AgentSettings, AgentRunKind, AgentWorkspaceConfiguration, AgentBackendConfiguration, AgentConfigurationUpdate, AgentConfiguredModel } from '../../../packages/protocol/src/agents';
 import type { ModelSelection, SandboxMode } from '../../../packages/protocol/src/index';
 import type { SkillReference } from '../../../packages/protocol/src/skills';
+import type { AgentInstallationStatus } from '../../../packages/protocol/src/agents';
 import { ConnectionRegistry, LifecycleCancelledError, TransportError } from '../adapter/connections';
 import { Transport } from '../adapter/transport';
 import type { Request } from './contracts';
 
 export const AGENT_CONFIGURATION_PATH = '/v1/agents/configuration';
 export type WorkspaceAgentConfiguration = AgentWorkspaceConfiguration;
-export interface AgentResource { settings?: AgentBackendConfiguration; models?: AgentModelOption[]; configuredModels?: AgentConfiguredModel[]; configRevision?: number; knownModelIds?: string[]; settingsError?: string; modelsError?: string; modelsUnsupported?: boolean }
+export interface AgentResource { settings?: AgentBackendConfiguration; models?: AgentModelOption[]; configuredModels?: AgentConfiguredModel[]; configRevision?: number; knownModelIds?: string[]; settingsError?: string; modelsError?: string; modelsUnsupported?: boolean; installation?: AgentInstallationStatus }
 export interface AgentState {
   mode: 'loading' | 'legacy' | 'agents' | 'error';
   descriptors: AgentDescriptor[]; default?: AgentDefault; resources: Record<string, AgentResource>;
@@ -173,6 +174,14 @@ export class WorkspaceAgentStore {
       const details = error instanceof TransportError && record(error.details) ? error.details.details : undefined;
       if (this.current(generation)) this.update({ resources: { ...this.state.resources, [backendId]: { ...this.state.resources[backendId], modelsError: failure(error), modelsUnsupported: record(details) && details.reason === 'capability_unsupported' } } });
     }
+  });
+  checkInstallation = (backendId: string): Promise<void> => this.query('installation:' + backendId, async generation => {
+    let installation: AgentInstallationStatus = 'unknown';
+    try {
+      const response: unknown = await this.request(AGENT_CONFIGURATION_PATH + '/' + encodeURIComponent(backendId) + '/diagnose', {});
+      if (record(response) && typeof response.installation === 'string' && ['installed', 'missing', 'unknown'].includes(response.installation)) installation = response.installation as AgentInstallationStatus;
+    } catch { /* Network/auth/version failures do not prove the CLI is missing. */ }
+    if (this.current(generation)) this.update({ resources: { ...this.state.resources, [backendId]: { ...this.state.resources[backendId], installation } } });
   });
   async saveConfiguration(update: AgentConfigurationUpdate) {
     this.assertCurrent();

@@ -149,7 +149,7 @@ export function parseVisualizeAssetPackage(value: unknown, compatibility: Visual
   if (!text(clean.title, 1024) || !object(clean.node)) invalid('Invalid visualize asset title or node');
   fields(clean.node, ['title', 'width', 'height', 'content']);
   if (!text(clean.node.title, 1024)) invalid('Invalid visualize node title');
-  validateVisualizeSize({ width: clean.node.width, height: clean.node.height }, 'manual', { width: 1e9, height: 1e9 });
+  validateVisualizeSize({ width: clean.node.width, height: clean.node.height }, 'snapshot', { width: 1e9, height: 1e9 });
   if (!Array.isArray(clean.inputNames) || clean.inputNames.length > 64 || clean.inputNames.some(name => !text(name, 128)) || new Set(clean.inputNames).size !== clean.inputNames.length) invalid('Invalid visualize input names');
   const content = validateVisualizeNodeContent(clean.node.content);
   if (['modelOverride', 'agentModelOverride', 'skillReferences', 'features'].some(key => Object.hasOwn(content, key)) || content.inputBindings.length) invalid('Asset cannot carry model, skill, feature or input bindings');

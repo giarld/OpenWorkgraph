@@ -125,12 +125,6 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
           </header>
           <ol className="welcome-setup-steps">
             <li>
-              <h3>{t('Install Codex CLI')}</h3>
-              <p>{t('Follow the official guide to install and configure Codex CLI.')}</p>
-              <WelcomeCommand command="npm install -g @openai/codex" copyLabel={t('Copy Codex installation command')} />
-              <a href="https://developers.openai.com/codex/cli/" target="_blank" rel="noopener noreferrer">{t('Open Codex CLI installation guide')}</a>
-            </li>
-            <li>
               <h3>{t('Start Workspace')}</h3>
               <p>{t('Run this command in a terminal on the device that will run your Workspace:')}</p>
               <WelcomeCommand command="npx openworkgraph@latest start" copyLabel={t('Copy start command')} />

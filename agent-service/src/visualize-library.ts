@@ -11,12 +11,13 @@ import { ProjectFiles } from './project-files.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
-import { visualizeChecked } from './visualize-content.js';
+import { validateStoredVisualizeContent, visualizeChecked } from './visualize-content.js';
 import { commitTransferResource, insertTransferredVisualizeNode, transferResourceKey } from './visualize-transfer.js';
 
 export type VisualizeLibrarySave = GraphScope & { nodeId: string; name: string; mode: 'new' | 'update'; assetId?: string; expectedAssetVersion?: number; expectedContentVersion: number; expectedPageRevision: number; expectedFormVersion: number; expectedStateVersion: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string };
 export type VisualizeLibraryInstall = GraphScope & { assetId: string; expectedAssetVersion: number; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string };
 export type VisualizeLibraryImport = Omit<VisualizeLibraryInstall, 'assetId' | 'expectedAssetVersion'>;
+type VisualizeLibraryFill = Omit<VisualizeLibraryImport, 'x' | 'y'> & { nodeId: string; expectedContentVersion: number };
 const invalid = (message: string): never => { throw new ServiceError('INVALID_REQUEST', message); };
 const conflict = (): never => { throw new ServiceError('REVISION_CONFLICT', '交互内容、资产或工作图已变化，请重新读取。'); };
 const json = (value: unknown): Json => value as Json;
@@ -25,20 +26,20 @@ const json = (value: unknown): Json => value as Json;
 export class VisualizeLibrary {
   readonly pages: VisualizePages;
   constructor(readonly graphs: Graphs, readonly resources: Resources) { this.pages = new VisualizePages(graphs, resources); }
-  private request<T>(value: unknown, mode: 'save' | 'install' | 'import'): T {
-    const install = mode !== 'save';
+  private request<T>(value: unknown, mode: 'save' | 'install' | 'import' | 'fill'): T {
+    const install = mode === 'install' || mode === 'import';
     const data = visualizeChecked(() => checkedVisualizeJson(value, 16384));
     if (!data || typeof data !== 'object' || Array.isArray(data)) invalid('无效的交互资产请求。');
     const record = data as Record<string, Json>;
     const common = ['serviceId', 'projectId', 'graphId', 'expectedExecutionRevision', 'expectedLayoutRevision', 'idempotencyKey'];
-    const extra = install ? [...(mode === 'install' ? ['assetId', 'expectedAssetVersion'] : []), 'x', 'y'] : ['nodeId', 'name', 'mode', 'expectedContentVersion', 'expectedPageRevision', 'expectedFormVersion', 'expectedStateVersion', ...(record.mode === 'update' ? ['assetId', 'expectedAssetVersion'] : [])];
+    const extra = mode === 'fill' ? ['nodeId', 'expectedContentVersion'] : install ? [...(mode === 'install' ? ['assetId', 'expectedAssetVersion'] : []), 'x', 'y'] : ['nodeId', 'name', 'mode', 'expectedContentVersion', 'expectedPageRevision', 'expectedFormVersion', 'expectedStateVersion', ...(record.mode === 'update' ? ['assetId', 'expectedAssetVersion'] : [])];
     const keys = [...common, ...extra];
     if (keys.some(key => !Object.hasOwn(record, key)) || Object.keys(record).some(key => !keys.includes(key))) invalid('交互资产请求字段缺失或包含未知字段。');
-    for (const key of ['serviceId', 'projectId', 'graphId', ...(mode === 'install' ? ['assetId'] : mode === 'save' ? ['nodeId'] : [])]) if (typeof record[key] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(record[key])) invalid('交互资产标识无效。');
+    for (const key of ['serviceId', 'projectId', 'graphId', ...(mode === 'install' ? ['assetId'] : mode === 'save' || mode === 'fill' ? ['nodeId'] : [])]) if (typeof record[key] !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(record[key])) invalid('交互资产标识无效。');
     if (typeof record.idempotencyKey !== 'string' || !record.idempotencyKey.trim() || record.idempotencyKey.length > 256) invalid('交互资产请求需要幂等键。');
     for (const key of keys.filter(key => key.startsWith('expected'))) if (!Number.isSafeInteger(record[key]) || Number(record[key]) < (['expectedExecutionRevision', 'expectedLayoutRevision'].includes(key) ? 0 : 1)) invalid('交互资产版本无效。');
     if (install) { for (const key of ['x', 'y']) if (typeof record[key] !== 'number' || !Number.isFinite(record[key]) || Math.abs(record[key]) > 1e9) invalid('入图位置无效。'); }
-    else if (!['new', 'update'].includes(String(record.mode)) || typeof record.name !== 'string' || !record.name.trim() || record.name.length > 512) invalid('保存名称或模式无效。');
+    else if (mode === 'save' && (!['new', 'update'].includes(String(record.mode)) || typeof record.name !== 'string' || !record.name.trim() || record.name.length > 512)) invalid('保存名称或模式无效。');
     return record as unknown as T;
   }
   private expectedSave(request: VisualizeLibrarySave): { node: Node; content: VisualizeNodeContent } {
@@ -117,20 +118,28 @@ export class VisualizeLibrary {
   async importFile(value: unknown, principal = 'local', guard: <T>(work: () => T) => T = work => work()): Promise<{ nodeId: string; snapshot: GraphSnapshot }> {
     if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'package')) invalid('缺少可视化文件内容。');
     const { package: filePackage, ...intent } = value as Record<string, unknown>;
-    const request = this.request<VisualizeLibraryImport>(intent, 'import');
+    const request = this.request<VisualizeLibraryImport | VisualizeLibraryFill>(intent, Object.hasOwn(intent, 'nodeId') ? 'fill' : 'import');
     const pkg = visualizeChecked(() => parseSupportedVisualizeAsset(filePackage));
     const payload = json({ ...request, packageDigest: hashBytes(Buffer.from(canonicalJson(json(pkg)))) });
-    const namespace = principal + ':visualize.file.import:' + request.graphId;
+    const namespace = principal + ':visualize.file.import:' + request.graphId + ('nodeId' in request ? ':' + request.nodeId : '');
     const replay = guard(() => { this.graphs.scope(request); return this.graphs.repo.replay(namespace, request.idempotencyKey, payload); });
     if (replay) return replay as unknown as { nodeId: string; snapshot: GraphSnapshot };
     const expected = () => {
       const graph = this.graphs.writable(request);
       if (graph.execution_revision !== request.expectedExecutionRevision || graph.layout_revision !== request.expectedLayoutRevision) conflict();
+      if ('nodeId' in request) {
+        const node = this.graphs.snapshot(request).nodes.find(item => item.id === request.nodeId);
+        if (!node || node.type !== 'visualize') throw new ServiceError('NOT_FOUND', '可视化节点不存在。');
+        if (node.readOnly) throw new ServiceError('NODE_LOCKED', '可视化节点只读。');
+        this.graphs.assertNodeEditable(node.id);
+        const stored = this.pages.current(request, node.id);
+        if (node.contentVersion !== request.expectedContentVersion || stored.content.page) conflict();
+      }
     };
     guard(expected);
     return this.commitPackage(request, pkg, namespace, payload, expected, guard);
   }
-  private async commitPackage(request: VisualizeLibraryImport, pkg: VisualizeAssetPackage, namespace: string, payload: Json, expected: () => void, guard: <T>(work: () => T) => T): Promise<{ nodeId: string; snapshot: GraphSnapshot }> {
+  private async commitPackage(request: VisualizeLibraryImport | VisualizeLibraryFill, pkg: VisualizeAssetPackage, namespace: string, payload: Json, expected: () => void, guard: <T>(work: () => T) => T): Promise<{ nodeId: string; snapshot: GraphSnapshot }> {
     const mapping = new Map(pkg.resources.map(ref => [transferResourceKey(ref.resourceId, ref.version), { resourceId: randomUUID(), resourceVersion: 1 }]));
     for (const ref of pkg.resources) {
       const bytes = Buffer.from(ref.base64, 'base64');
@@ -146,10 +155,29 @@ export class VisualizeLibrary {
       }
       return guard(() => atomic(this.graphs.db, () => this.graphs.repo.idempotent(namespace, request.idempotencyKey, payload, () => {
         expected();
-        const history = this.graphs.history.capture(request), nodeId = randomUUID();
+        const history = this.graphs.history.capture(request), nodeId = 'nodeId' in request ? request.nodeId : randomUUID();
         for (const plan of plans) commitTransferResource(this.resources, request, plan.blob, plan.name, plan.id);
-        insertTransferredVisualizeNode(this.graphs, request, { id: nodeId, type: 'visualize', schemaVersion: 1, contentVersion: 1, content: next, x: request.x, y: request.y, width: pkg.node.width, height: pkg.node.height, readOnly: false });
-        this.graphs.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1,layout_revision=layout_revision+1 WHERE id=?').run(request.graphId);
+        if ('nodeId' in request) {
+          const previous = this.pages.current(request, nodeId).content;
+          // Undo may have selected a blank checkpoint. Package revisions are
+          // portable defaults, not a reusable identity for this existing node.
+          const versions = this.graphs.db.prepare("SELECT coalesce(max(json_extract(content,'$.page.revision')),0) AS page,coalesce(max(json_extract(content,'$.form.version')),0) AS form,coalesce(max(json_extract(content,'$.state.version')),0) AS state FROM node_versions WHERE node_id=?").get(nodeId)!;
+          const revision = Number(versions['page']) + 1;
+          const content = json({ ...mapped.node.content, inputBindings: previous.inputBindings,
+            page: { ...mapped.node.content.page!, revision },
+            form: { ...mapped.node.content.form!, pageRevision: revision, version: Number(versions['form']) + 1 },
+            state: { ...mapped.node.content.state!, pageRevision: revision, version: Number(versions['state']) + 1 },
+          });
+          validateStoredVisualizeContent(this.graphs.db, request, content);
+          const version = request.expectedContentVersion + 1;
+          this.graphs.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,?,?)').run(nodeId, version, canonicalJson(content));
+          this.graphs.db.prepare('UPDATE nodes SET current_version=? WHERE id=?').run(version, nodeId);
+          this.graphs.retainResources(request, nodeId, version, content);
+          this.graphs.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1 WHERE id=?').run(request.graphId);
+        } else {
+          insertTransferredVisualizeNode(this.graphs, request, { id: nodeId, type: 'visualize', schemaVersion: 1, contentVersion: 1, content: next, x: request.x, y: request.y, width: pkg.node.width, height: pkg.node.height, readOnly: false });
+          this.graphs.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1,layout_revision=layout_revision+1 WHERE id=?').run(request.graphId);
+        }
         this.graphs.history.record(request, history); this.graphs.event(request);
         return json({ nodeId, snapshot: this.graphs.snapshot(request) });
       }))) as unknown as { nodeId: string; snapshot: GraphSnapshot };

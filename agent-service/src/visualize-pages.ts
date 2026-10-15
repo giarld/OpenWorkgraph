@@ -9,7 +9,7 @@ import { ServiceError } from './errors.js';
 import { validateStoredVisualizeContent, validateVisualizeDependencies, validateVisualizeProjectDependencies, visualizeChecked } from './visualize-content.js';
 
 export interface PreparedVisualizeWrite { readonly nodeId: string; readonly action: VisualizeWriteRequest['action'] }
-interface Preparation { request: VisualizeWriteRequest; principal: string; page: VisualizePagePackage | null; blobs: PreparedBlob[]; disposed: boolean; useCurrentGraph: boolean }
+interface Preparation { request: VisualizeWriteRequest; principal: string; page: VisualizePagePackage | null; blobs: PreparedBlob[]; disposed: boolean; useCurrentGraph: boolean; interaction: boolean }
 const invalid = (message: string): never => { throw new ServiceError('INVALID_REQUEST', message); };
 const integer = (value: unknown, minimum: number): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum;
 
@@ -56,19 +56,28 @@ export class VisualizePages {
       return this.graphs.repo.replay(this.namespace(request, principal), request.idempotencyKey, request as unknown as Json) as unknown as VisualizeStoredNode | undefined;
     });
   }
-  private expected(request: VisualizeWriteRequest, useCurrentGraph = false): VisualizeStoredNode {
+  private expected(request: VisualizeWriteRequest, useCurrentGraph = false, interaction = false): VisualizeStoredNode {
     this.writable(request, request.nodeId);
     const current = this.current(request, request.nodeId);
-    if (current.contentVersion !== request.expectedContentVersion || !useCurrentGraph && (current.executionRevision !== request.expectedExecutionRevision || current.layoutRevision !== request.expectedLayoutRevision) || (current.content.page?.revision ?? 0) !== request.expectedPageRevision ||
+    if (!interaction && current.contentVersion !== request.expectedContentVersion || !interaction && !useCurrentGraph && (current.executionRevision !== request.expectedExecutionRevision || current.layoutRevision !== request.expectedLayoutRevision) || (current.content.page?.revision ?? 0) !== request.expectedPageRevision ||
       request.action === 'update-form' && current.content.form?.version !== request.expectedFormVersion || request.action === 'save-state' && current.content.state?.version !== request.expectedStateVersion) throw new ServiceError('REVISION_CONFLICT', '页面、表单、视图或工作图已变化，请读取最新内容。');
     return current;
   }
   async prepare(value: unknown, principal = 'local', useCurrentGraph = false): Promise<PreparedVisualizeWrite> {
+    return this.prepareWrite(value, principal, useCurrentGraph, false);
+  }
+  /** Only bridge-owned form/state writes merge unrelated changes. The public
+   * write API and staged successor forms keep their existing CAS semantics. */
+  async prepareInteraction(value: unknown, principal = 'local'): Promise<PreparedVisualizeWrite> {
+    return this.prepareWrite(value, principal, false, true);
+  }
+  private async prepareWrite(value: unknown, principal: string, useCurrentGraph: boolean, interaction: boolean): Promise<PreparedVisualizeWrite> {
     this.outside();
     const request = this.request(value);
+    if (interaction && request.action !== 'update-form' && request.action !== 'save-state') invalid('仅表单和视图保存可合并无关更改。');
     // Only atomic successor creation may rebase a staged form onto the current graph.
     if (useCurrentGraph && request.action !== 'update-form') invalid('仅后继表单保存可使用当前工作图修订。');
-    const before = atomic(this.graphs.db, () => this.expected(request, useCurrentGraph));
+    const before = atomic(this.graphs.db, () => this.expected(request, useCurrentGraph, interaction));
     let page: VisualizePagePackage | null = null;
     const blobs: PreparedBlob[] = [];
     try {
@@ -94,7 +103,7 @@ export class VisualizePages {
         } else visualizeChecked(() => checkedVisualizeJson(request.state));
       }
       const token = Object.freeze({ nodeId: request.nodeId, action: request.action });
-      this.preparations.set(token, { request, principal, page, blobs, disposed: false, useCurrentGraph });
+      this.preparations.set(token, { request, principal, page, blobs, disposed: false, useCurrentGraph, interaction });
       return token;
     } catch (error) {
       if (blobs.length) atomic(this.graphs.db, () => { for (const blob of blobs) this.resources.discardPrepared(blob); });
@@ -109,7 +118,7 @@ export class VisualizePages {
     return atomic(this.graphs.db, () => {
       this.writable(request, request.nodeId);
       return this.graphs.repo.idempotent(this.namespace(request, principal), request.idempotencyKey, request as unknown as Json, () => {
-        const before = this.expected(request, prepared!.useCurrentGraph), content: VisualizeNodeContent = structuredClone(before.content);
+        const before = this.expected(request, prepared!.useCurrentGraph, prepared!.interaction), content: VisualizeNodeContent = structuredClone(before.content);
         const operations: GraphOperation[] = [];
         if (request.action === 'install-page' && page) {
           const pageResource = content.page ? this.resources.updateCanvasFromPrepared(request, content.page.resource.resourceId, content.page.resource.resourceVersion, blobs[0]!) : this.resources.createCanvasFromPrepared(request, blobs[0]!, 'visualize-page.json');
@@ -124,7 +133,7 @@ export class VisualizePages {
           content.form = { ...content.form!, version: content.form!.version + 1, data: request.form, resource: { resourceId: resource.resource.id, resourceVersion: resource.resource.current.version } };
         } else if (request.action === 'save-state') content.state = { ...content.state!, version: content.state!.version + 1, data: request.state };
         operations.unshift({ type: 'node.content', nodeId: request.nodeId, expectedContentVersion: before.contentVersion, content: content as unknown as Json });
-        this.graphs.command({ serviceId: request.serviceId, projectId: request.projectId, graphId: request.graphId, idempotencyKey: request.idempotencyKey, expectedExecutionRevision: before.executionRevision, expectedLayoutRevision: before.layoutRevision, operations }, this.namespace(request, principal));
+        this.graphs.applyWithoutSnapshot({ serviceId: request.serviceId, projectId: request.projectId, graphId: request.graphId, idempotencyKey: request.idempotencyKey, expectedExecutionRevision: before.executionRevision, expectedLayoutRevision: before.layoutRevision, operations }, this.namespace(request, principal));
         return this.current(request, request.nodeId) as unknown as Json;
       }) as unknown as VisualizeStoredNode;
     });

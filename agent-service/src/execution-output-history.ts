@@ -1,11 +1,31 @@
 import { limitNodeTitle, NODE_TITLE_MAX_LENGTH } from '@openworkgraph/protocol';
 import { randomUUID } from 'node:crypto';
-import type { Json, SubmitRun } from '@openworkgraph/protocol';
+import type { GraphCommand, Json, SubmitRun } from '@openworkgraph/protocol';
 import type { PreparedBlob } from './blob-store.js';
 import { Graphs, resourceLinks } from './graphs.js';
 import { Resources } from './resources.js';
 import { ServiceError } from './errors.js';
 import { insertTransferredVisualizeNode, prepareVisualizeCopy } from './visualize-transfer.js';
+
+/** Prepare every deleted execution before the command transaction, including hidden outputs. */
+export async function prepareDeletedOutputHistory(graphs: Graphs, resources: Resources, command: GraphCommand, cleanups: (() => unknown)[]) {
+  const prepared = new Map<string, () => void>();
+  const copies = new Map<string, string>();
+  if (!command.operations.some(op => op.type === 'node.delete')) return () => {};
+  const graph = graphs.snapshot(command);
+  for (const op of command.operations) {
+    if (op.type !== 'node.delete' || prepared.has(op.nodeId) || !graph.nodes.some(node => node.id === op.nodeId && node.type === 'execution')) continue;
+    if (!graphs.executionOutputs(command, op.nodeId).length) continue;
+    const request: SubmitRun = { ...command, nodeId: op.nodeId, kind: 'execution' };
+    const preserve = await prepareOutputHistory(graphs, resources, request, cleanups, copies);
+    prepared.set(op.nodeId, () => preserve(request, graphs));
+  }
+  return () => {
+    copies.clear();
+    for (const preserve of prepared.values()) preserve();
+    return copies;
+  };
+}
 
 /** Keep history batches on one row, moving each group's members with its frame. */
 function arrangeHistoryGroups(graphs: Graphs, request: SubmitRun): void {

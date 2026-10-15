@@ -49,24 +49,51 @@ function sync<T>(value: T): T {
 export class Runs {
   readonly repo: Repositories;
   readonly now: () => number;
+  private readonly statements = new Map<string, ReturnType<DatabaseSync['prepare']>>();
+  private statement(sql: string) {
+    let statement = this.statements.get(sql);
+    if (!statement) { statement = this.db.prepare(sql); this.statements.set(sql, statement); }
+    return statement;
+  }
+  private readonly selection = "SELECT r.*,rt.details AS runtime_details,EXISTS(SELECT 1 FROM generation_candidates c WHERE c.run_id=r.id AND c.state='pending') AS pending_generation_candidate FROM runs r LEFT JOIN run_runtime rt ON rt.run_id=r.id";
   constructor(readonly db: DatabaseSync, readonly serviceId: string, readonly dependencies: RunsDependencies) {
     this.repo = new Repositories(db); this.now = dependencies.now ?? Date.now;
   }
   get(id: string): Run {
-    const row = this.db.prepare("SELECT r.*, EXISTS(SELECT 1 FROM generation_candidates c WHERE c.run_id=r.id AND c.state='pending') AS pending_generation_candidate FROM runs r WHERE r.id=?").get(id);
+    const row = this.statement(this.selection + ' WHERE r.id=?').get(id);
     if (!row) throw new ServiceError('NOT_FOUND', 'Run not found');
-    const details = this.db.prepare('SELECT details FROM run_runtime WHERE run_id=?').get(id);
-    const executionDetails = details ? JSON.parse(String(details.details)) : {};
+    return this.fromRow(row);
+  }
+  private fromRow(row: Record<string, unknown>): Run {
+    const id = String(row.id);
+    const executionDetails = row.runtime_details ? JSON.parse(String(row.runtime_details)) : {};
     const executionStart = executionDetails.executionStart as Run['executionStart'];
     const chainBatch = typeof executionDetails.chainBatch === 'string' ? executionDetails.chainBatch : undefined;
-    const chainMembers = chainBatch === id ? this.db.prepare("SELECT r.status FROM runs r JOIN run_runtime rt ON rt.run_id=r.id WHERE r.project_id=? AND r.graph_id=? AND json_extract(rt.details,'$.chainBatch')=?").all(row.project_id!,row.graph_id!,id) : [];
+    const chainMembers = chainBatch === id ? this.statement("SELECT r.status FROM run_runtime rt INDEXED BY run_runtime_chain_batch CROSS JOIN runs r ON r.id=rt.run_id WHERE r.project_id=? AND r.graph_id=? AND json_extract(rt.details,'$.chainBatch')=?").all(String(row.project_id),String(row.graph_id),id) : [];
     const chainActive = chainMembers.some(member => !isTerminalRunStatus(member.status as RunStatus));
     const chainControl: Run['chainControl'] = chainMembers.length ? executionDetails.chainStopRequested ? chainActive ? 'stopping' : 'stopped' : chainActive ? 'active' : undefined : undefined;
     return { serviceId: this.serviceId, projectId: String(row.project_id), graphId: String(row.graph_id), id: String(row.id), nodeId: String(row.node_id), status: row.status as RunStatus, submissionSequence: String(row.sequence), inputDigest: String(row.input_digest), createdAt: String(row.created_at), historyState: row.history_state as Run['historyState'], ...(row.status === 'accepted' && executionStart ? { executionStart } : {}), ...(chainBatch ? {chainBatch} : {}), ...(row.pending_generation_candidate ? {hasPendingGenerationCandidate: true} : {}), ...(chainControl ? {chainControl} : {}) };
   }
   list(projectId?: string): Run[] {
-    const rows = projectId === undefined ? this.db.prepare('SELECT id FROM runs ORDER BY sequence').all() : this.db.prepare('SELECT id FROM runs WHERE project_id=? ORDER BY sequence').all(projectId);
-    return rows.map(row => this.get(String(row.id)));
+    const rows = projectId === undefined ? this.statement(this.selection + ' ORDER BY r.sequence').all() : this.statement(this.selection + ' WHERE r.project_id=? ORDER BY r.sequence').all(projectId);
+    return rows.map(row => this.fromRow(row));
+  }
+  unfinished(): Run[] {
+    return this.statement(this.selection + ` WHERE r.status NOT IN (${terminalSql}) ORDER BY r.sequence`).all().map(row => this.fromRow(row));
+  }
+  active(epoch?: string): Run[] {
+    // Keep unfinished runs as the outer lookup. An rt.epoch predicate on the
+    // LEFT JOIN lets SQLite start with a scan of every historical runtime row.
+    const selection = this.selection.replace('FROM runs r ', 'FROM runs r INDEXED BY runs_pending_status_sequence ');
+    const sql = selection + ` WHERE r.status NOT IN (${terminalSql}) AND r.status NOT IN ('accepted','queued','paused_restore')` + (epoch === undefined ? '' : ' AND (SELECT owner.epoch FROM run_runtime owner WHERE owner.run_id=r.id)=?') + ' ORDER BY r.sequence';
+    return this.statement(sql).all(...(epoch === undefined ? [] : [epoch])).map(row => this.fromRow(row));
+  }
+  pendingDependencies(): Run[] {
+    return this.statement(this.selection + ` WHERE r.status NOT IN (${terminalSql}) AND r.status='accepted' AND json_extract(rt.details,'$.executionStart')='dependencies' ORDER BY r.sequence`).all().map(row => this.fromRow(row));
+  }
+  latestForNode(nodeId: string): Run | undefined {
+    const row = this.statement(this.selection + ' WHERE r.node_id=? ORDER BY r.sequence DESC LIMIT 1').get(nodeId);
+    return row ? this.fromRow(row) : undefined;
   }
   notifications(): RunNotification[] {
     return this.db.prepare(`SELECT n.run_id,n.revision,n.created_at FROM run_notifications n JOIN runs r ON r.id=n.run_id WHERE n.read_at IS NULL AND n.status=r.status ORDER BY n.created_at,n.run_id`).all().map(row => ({
@@ -194,10 +221,10 @@ export class Runs {
         SELECT r.id FROM runs r
         JOIN projects p ON p.id=r.project_id
         JOIN run_runtime rt ON rt.run_id=r.id
-        WHERE r.status='queued' AND p.state='active'
+        WHERE r.status='queued' AND r.status NOT IN (${terminalSql}) AND p.state='active'
           AND p.canonical_path=json_extract(rt.details,'$.canonicalPath')
           ${exclusion} ORDER BY r.sequence
-      `).all(...excludedProjectIds);
+      ` + (eligible ? '' : ' LIMIT 1')).all(...excludedProjectIds);
       const selected = rows.find(row => {
         const run = this.get(String(row.id));
         return !eligible || eligible(run, this.snapshot(run.id));

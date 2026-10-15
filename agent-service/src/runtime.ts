@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { subscribeDatabaseChanges } from './persistence/changes.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
 import type { AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
@@ -41,6 +42,7 @@ import { VisualizeInputs } from './visualize-inputs.js';
 import { VisualizeBridge } from './visualize-bridge.js';
 import { prepareVisualizeRunSlot } from './visualize-run-slots.js';
 import { prepareVisualizePromptSlot } from './visualize-prompt-slots.js';
+import { prepareVisualizeContentSlot } from './visualize-content-slots.js';
 import { VisualizeAssetExport } from './visualize-asset-export.js';
 import { VisualizeSuccessors } from './visualize-successors.js';
 import { discoverCodexSkills } from './skills-api.js';
@@ -103,6 +105,10 @@ export class WorkflowRuntime {
   private readonly productionAgents: boolean;
   private availableModels: BackendModel[];
   private timer: NodeJS.Timeout | undefined;
+  private pumpWork: Promise<void> | undefined;
+  private chainPumpWork: Promise<void> | undefined;
+  private pumpAgain = false;
+  private stopPumpSubscription: (() => void) | undefined;
   private starting: Promise<void> | undefined;
   private catalogRefresh: Promise<void> | undefined;
   private catalogRpc: StdioRpc | undefined;
@@ -141,7 +147,7 @@ export class WorkflowRuntime {
       }
     });
     const assetExport = new VisualizeAssetExport(this.visualize);
-    this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args), prepareRunSlot: (...args) => prepareVisualizeRunSlot(this, ...args), preparePromptSlot: (...args) => prepareVisualizePromptSlot(this.graphs, ...args) });
+    this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args), prepareRunSlot: (...args) => prepareVisualizeRunSlot(this, ...args), preparePromptSlot: (...args) => prepareVisualizePromptSlot(this.graphs, ...args), prepareContentSlot: (...args) => prepareVisualizeContentSlot(this.graphs, this.resources, ...args) });
     this.graphs.history.backfillActiveGates();
     this.graphFiles = new GraphFiles(db,directories.runs);
     this.executionSettings = new ExecutionSettingsStore(db);
@@ -163,7 +169,7 @@ export class WorkflowRuntime {
     const codexBackend = options.backend ?? (this.adapter ? new RuntimeBackend(this.runs, directories, this.adapter, this.probe, this.skillSessions) : { start: async () => { throw new AgentError('runtime_unavailable'); }, cancel: async () => 'unknown' as const });
     this.agentRouter = options.agentRegistry ? new AgentRouter(this.runs, directories, id => options.agentRegistry!.get(id), (snapshot, kind) => assertFrozenAgent(options.agentRegistry!, snapshot, String(kind)), codexBackend, this.probe, this.skillSessions, {}, this.productionAgents ? (run, snapshot) => resolveProductionSelection(options.agentRegistry!, snapshot, this.runs.runtime(run.id).details) : undefined) : undefined;
     const backend = new RoutedImageBackend(this.agentRouter ?? codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
-    this.scheduler = new Scheduler(this.runs, backend, { publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
+    this.scheduler = new Scheduler(this.runs, backend, { projectLockRetryMs: 1000, publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
   get catalog(): BackendModel[] { return structuredClone(this.availableModels); }
   private agentEligible(runId: string, snapshot: import('@openworkgraph/protocol').InputSnapshot, kind: string): boolean {
@@ -199,8 +205,7 @@ export class WorkflowRuntime {
       if (!plugin.projectPermissions) throw new AgentError('capability_unsupported');
       const native = plugin.projectPermissions(permissions.project, { runsPath: this.directories.runs });
       const query = { options: normalizeConfiguration(plugin.descriptor.configuration, { ...current.options, ...selection.options, ...native }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
-      const catalog = await this.agentDiscovery.listModels(selection.backendId, query);
-      const diagnosis = await this.agentDiscovery.diagnose(selection.backendId, query);
+      const [catalog, diagnosis] = await Promise.all([this.agentDiscovery.listModels(selection.backendId, query), this.agentDiscovery.diagnose(selection.backendId, query)]);
       if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
       return { frozen: this.agentConfiguration.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null, runsPath: this.directories.runs }), independent: true };
     }
@@ -209,8 +214,7 @@ export class WorkflowRuntime {
     if (selection.configRevision !== current.revision) throw new ServiceError('REVISION_CONFLICT', '执行器设置已变化，请刷新后重试。');
     const descriptor = this.options.agentRegistry.get(selection.backendId).descriptor;
     const query = { options: normalizeConfiguration(descriptor.configuration, { ...current.options, ...selection.options }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
-    const catalog = await this.agentDiscovery.listModels(selection.backendId, query);
-    const diagnosis = await this.agentDiscovery.diagnose(selection.backendId, query);
+    const [catalog, diagnosis] = await Promise.all([this.agentDiscovery.listModels(selection.backendId, query), this.agentDiscovery.diagnose(selection.backendId, query)]);
     if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
     return { frozen: this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null }), independent: true, ...(availability ? { availabilityRevision: availability.revision } : {}) };
   }
@@ -561,13 +565,37 @@ export class WorkflowRuntime {
     });
   }
   get ready(): Promise<void> { return this.starting ?? this.start(); }
-  private active(): Run[] { return this.runs.list().filter(run => !isTerminalRunStatus(run.status) && !['queued', 'accepted', 'paused_restore'].includes(run.status)); }
-  private async pump(): Promise<void> {
+  private active(): Run[] { return this.runs.active(); }
+  private schedulePump(delayMs = 1000): void {
     if (this.closed) return;
-    if(!this.closing)await this.executionChains.pump();
-    await this.scheduler.tick();
-    await this.agentRouter?.releaseFinished();
-    if (this.closing && !this.active().length) this.finishClose();
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.pump().catch(() => { /* Durable state remains available for reconciliation. */ }); }, delayMs);
+    this.timer.unref();
+  }
+  private wakePump(): void {
+    if (this.closed) return;
+    if (this.pumpWork) { this.pumpAgain = true; return; }
+    this.schedulePump(0);
+  }
+  private pump(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.pumpWork) { this.pumpAgain = true; return this.pumpWork; }
+    this.pumpAgain = false;
+    const work = Promise.resolve().then(async () => {
+      if (!this.closing && !this.chainPumpWork) {
+        const chains = this.executionChains.pump().catch(() => { /* Retry durable submissions on the next wake. */ }).finally(() => { if (this.chainPumpWork === chains) this.chainPumpWork = undefined; });
+        this.chainPumpWork = chains;
+      }
+      await this.scheduler.tick();
+      // Plugin cleanup and input materialization must not hold up cancellation.
+      void this.agentRouter?.releaseFinished().catch(() => {});
+      if (this.closing && !this.active().length) this.finishClose();
+    }).finally(() => {
+      this.pumpWork = undefined;
+      this.schedulePump(this.pumpAgain ? 0 : 1000);
+    });
+    this.pumpWork = work;
+    return work;
   }
   async start(): Promise<void> {
     if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Workspace closed');
@@ -580,7 +608,9 @@ export class WorkflowRuntime {
       if (this.closed || this.closing) return;
       await this.graphFiles.drain();
       if (!this.stopping) atomic(this.db, () => this.db.prepare("UPDATE settings SET value='true' WHERE key='acceptingRuns'").run());
-      this.timer = setInterval(() => { void this.pump().catch(() => { /* preserve durable state; host can inspect */ }); }, 100); this.timer.unref();
+      this.stopPumpSubscription = subscribeDatabaseChanges(this.db, () => this.wakePump());
+      await this.pump();
+      await this.chainPumpWork;
       await this.pump();
     })();
     return this.starting;
@@ -609,7 +639,7 @@ export class WorkflowRuntime {
   /** A host shutdown cancels durable queued work as well as active responders. */
   stopRuns(): void {
     this.stopAccepting();
-    for (const run of this.runs.list()) {
+    for (const run of this.runs.unfinished()) {
       if (!isTerminalRunStatus(run.status)) this.runs.cancel(run.id, randomUUID(), 'host');
     }
   }
@@ -620,11 +650,12 @@ export class WorkflowRuntime {
       await this.pump(); await delay(25);
     }
     await this.scheduler.settled();
+    await this.chainPumpWork;
     await this.agentRouter?.disposeDrained();
   }
   private finishClose(): void {
     this.visualizeBridge.dispose();
-    if (this.closed) return; this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; this.probe.close();
+    if (this.closed) return; this.closed = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.stopPumpSubscription?.(); this.stopPumpSubscription = undefined; this.probe.close();
     this.catalogRpc?.close();
     this.agentConfiguration?.close();
     void this.agentDiscovery?.dispose().catch(() => {});
@@ -634,6 +665,6 @@ export class WorkflowRuntime {
   close(): void {
     if (this.closed) return; this.stopAccepting(); this.closing = true;
     if (!this.active().length) this.finishClose();
-    else if (!this.timer) { this.timer = setInterval(() => { void this.pump().catch(() => {}); }, 100); this.timer.unref(); }
+    else if (!this.timer) this.schedulePump(0);
   }
 }

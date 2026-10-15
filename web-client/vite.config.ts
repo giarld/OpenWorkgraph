@@ -31,6 +31,7 @@ export default defineConfig({
         const bundles = Array.isArray(result) ? result : [result];
         const chunk = bundles.flatMap(bundle => "output" in bundle ? bundle.output : []).find(output => output.type === "chunk");
         if (!chunk || chunk.type !== "chunk") throw new Error("Visualize SDK bundle is unavailable");
+        for (const moduleId of Object.keys(chunk.modules)) this.addWatchFile(moduleId);
         return "export default " + JSON.stringify(chunk.code) + ";";
       },
     },

@@ -10,6 +10,16 @@ import { canonicalJson } from './persistence/repositories.js';
 import type { VisualizeFormSnapshot, VisualizeInputSnapshot, VisualizeNodeContent } from '@openworkgraph/protocol';
 
 export interface InputBudget { maxItemBytes: number; maxTotalBytes: number; maxResourceItemBytes: number; maxResourceTotalBytes: number; maxResources: number }
+/** Form versions/resources identify visualize business output. The node version
+ * remains provenance, but also changes for view state and generation settings. */
+export function visualizeInputDigest(graphId: string, nodeId: string, inputs: VisualizeInputSnapshot['inputs']): string {
+  const business = inputs.map(input => {
+    if (!input.form) return input;
+    const { contentVersion: _provenance, ...value } = input;
+    return value;
+  });
+  return createHash('sha256').update(canonicalJson({ graphId, nodeId, inputs: business } as unknown as Json)).digest('hex');
+}
 export interface PreparedRepresentation { state: 'processing' | 'ready' | 'failed'; resourceSha256: string; representationVersion: number | null; text: string | null; contentHash: string | null }
 export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<InputBudget>; readRepresentation?: (resource: CanvasResourceVersion) => PreparedRepresentation | null }
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
@@ -52,7 +62,7 @@ export class InputPreparation {
       if (content.inputBindings.some(binding => !edges.has(binding.edgeId))) throw new ServiceError('INPUT_BLOCKED', '输入绑定必须指向当前节点的参考连线。');
       const inputs = preview.sources.map(source => ({ name: bindings.get(source.edgeId) ?? source.edgeId, edgeId: source.edgeId, sourceNodeId: source.sourceNodeId, sourceNodeTitle: source.sourceNodeTitle ?? '', contentVersion: source.contentVersion, resources: source.resourceIndexes.map(index => preview.resources[index]!), ...(source.projectFileIndexes.length ? { projectFiles: source.projectFileIndexes.map(index => preview.projectFiles[index]!) } : {}), ...(source.form ? { form: source.form } : {}), ...(source.preview ? { preview: source.preview } : {}) }));
       if (new Set(inputs.map(input => input.name)).size !== inputs.length) throw new ServiceError('INPUT_BLOCKED', '输入绑定名称与未命名参考连线标识冲突。');
-      const digest = createHash('sha256').update(canonicalJson({ graphId, nodeId, inputs } as unknown as Json)).digest('hex');
+      const digest = visualizeInputDigest(graphId, nodeId, inputs);
       this.db.exec('RELEASE visualize_input_read');
       return freeze({ version: 1, digest, inputs });
     } catch (error) { this.db.exec('ROLLBACK TO visualize_input_read; RELEASE visualize_input_read'); throw error; }

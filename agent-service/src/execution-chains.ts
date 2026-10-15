@@ -119,7 +119,7 @@ export class ExecutionChains {
     if(this.stopped || this.pumping || this.runs.repo.setting('acceptingRuns')!==true)return;
     this.pumping=true;
     try {
-      for(const run of this.runs.list().filter(r=>r.status==='accepted'&&r.executionStart==='dependencies')) {
+      for(const run of this.runs.pendingDependencies()) {
         if (this.runs.get(run.id).status !== 'accepted') continue;
         const runtime=this.runs.runtime(run.id);
         const dependencies=(runtime.details.chainDependencies as string[]).map(id=>this.runs.get(id));

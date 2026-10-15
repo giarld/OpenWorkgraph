@@ -3,6 +3,7 @@ import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import type { ModelSelection } from '../../../packages/protocol/src/index';
 import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
 import { VisualizeNodePreview } from './VisualizeNodePreview';
+import { readVisualizeImportFile } from './visualize-file-import';
 import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandaloneUrl } from './visualize-download';
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
@@ -292,6 +293,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     observe(); return editor.subscribe(observe);
   }, [editor, visualizeSessions]);
   useEffect(() => { visualizeSessions.signals.observe(editor.getConfirmedSnapshot(), props.runs); }, [editor, visualizeSessions, props.runs]);
+  useEffect(() => {
+    const changed = (event: Event) => visualizeSessions.signals.observeEvent((event as CustomEvent<import('../../../packages/protocol/src/index').ServiceEvent>).detail);
+    window.addEventListener('openworkgraph:service-event', changed);
+    return () => window.removeEventListener('openworkgraph:service-event', changed);
+  }, [visualizeSessions]);
   const [selected, setSelected] = useState<string[]>([]);
   const [selectionRevision, setSelectionRevision] = useState(0);
   const agents = useWorkspaceAgents(props.agentStore);
@@ -566,8 +572,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     editor.setOnline(props.online && props.projectActive, !props.projectActive);
   }, [editor, props.online, props.projectActive]);
   useEffect(() => {
-    if (props.online) void editor.refresh().catch(props.onError);
-  }, [editor, props.refreshToken, props.online]);
+    // The parent already read this authoritative snapshot. Accept it directly
+    // instead of fetching the same Work Graph again after each service event.
+    if (props.online) {
+      try { editor.acceptCommitted(props.graph); } catch (error) { props.onError(error); }
+    }
+  }, [editor, props.graph, props.refreshToken, props.online]);
   const imageModelControls = props.graph.nodes.some(item => selected.includes(item.id) && item.type === 'image');
   useEffect(() => {
     let live = true; setModels(undefined);
@@ -1143,7 +1153,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     for (const edge of editor.getSnapshot().graph.edges) {
       if (!ids.includes(edge.sourceId)) continue;
       if (locked(edge.targetId)) throw Error(t('The downstream task has not finished, so its reference content cannot be deleted.'));
-      if (edge.kind === "delivery" && !ids.includes(edge.targetId)) throw Error(t('Hide or select all outputs of this task first.'));
+      if (edge.kind === "delivery") {
+        for (const successor of graph.edges.filter(candidate => candidate.sourceId === edge.targetId))
+          if (locked(successor.targetId)) throw Error(t('The downstream task has not finished, so its reference content cannot be deleted.'));
+      }
     }
   };
   const canDelete = (ids: string[]) => { try { guardDelete(ids); return true; } catch { return false; } };
@@ -1709,7 +1722,32 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }));
   const previewNavigation: PreviewDialogNavigation = { layers: linkedPreviewLayers, pending: markdownLinkPending, onBack: backMarkdownPreview };
   const hasPreviewRoot = !!(reference || documentNode || promptProjectFile || generatedOutputNode);
-  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onOpenStandalone={() => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); if (expanded) closePreviewDialogs(); }} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => { void editor.refresh().then(() => props.onChanged()).catch(props.onError); }} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setNodeEditorOpen(wire.id, true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
+  const importVisualizeFile = async (nodeId: string, file: File) => {
+    guardLayout([nodeId]);
+    const pkg = await readVisualizeImportFile(file, props.visualizeCompatibility);
+    await editor.flush(); guardLayout([nodeId]);
+    const current = editor.getSnapshot().graph;
+    const target = current.nodes.find(item => item.id === nodeId);
+    if (!target || target.type !== 'visualize' || object(target.content).page) throw Error(t('The original node changed. Select the replacement file again.'));
+    const body = { package: pkg, expectedContentVersion: target.contentVersion, expectedExecutionRevision: current.executionRevision, expectedLayoutRevision: current.layoutRevision, idempotencyKey: randomId() };
+    setSavingVisualizeAssets(ids => new Set(ids).add(nodeId));
+    try {
+      let result: { nodeId: string; snapshot: GraphSnapshot };
+      for (let attempt = 0; ; attempt++) {
+        try { result = await props.request(graphPath(current.projectId, current.graphId) + '/visualize/' + encodeURIComponent(nodeId) + '/import', body); break; }
+        catch (error) {
+          if (!mounted.current || attempt >= 2 || !(error instanceof TypeError || ['NETWORK_ERROR', 'TIMEOUT', 'SERVICE_UNAVAILABLE', 'INTERNAL_ERROR'].includes(errorCode(error)))) throw error;
+        }
+      }
+      if (!mounted.current) return;
+      editor.acceptCommitted(result.snapshot);
+      latest.current.onChanged();
+    } catch (error) {
+      if (mounted.current && errorCode(error) === 'REVISION_CONFLICT') await editor.refresh().catch(() => undefined);
+      throw error;
+    } finally { if (mounted.current) setSavingVisualizeAssets(ids => { const next = new Set(ids); next.delete(nodeId); return next; }); }
+  };
+  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onImportFile={file => importVisualizeFile(wire.id, file)} importDisabled={locked(wire.id)} onOpenStandalone={() => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); if (expanded) closePreviewDialogs(); }} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => editor.refresh().then(() => { if (mounted.current) latest.current.onChanged(); }).catch(reason => { if (mounted.current) latest.current.onError(reason); })} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setNodeEditorOpen(wire.id, true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);

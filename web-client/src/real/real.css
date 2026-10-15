@@ -131,7 +131,7 @@
   gap: 6px;
   margin: 10px 0;
 }
-.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.management-panel input[type=checkbox]):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
+.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.management-panel input[type=checkbox]):not(.agent-settings input[type=checkbox]):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
   min-width: 0;
   width: 100%;
 }

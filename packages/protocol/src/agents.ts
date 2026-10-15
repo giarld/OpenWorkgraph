@@ -31,7 +31,9 @@ export interface AgentDescriptor {
 }
 export const AGENT_FAILURE_REASONS = ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown', 'authentication_required', 'quota_exceeded', 'permission_denied'] as const;
 export type AgentFailureReason = typeof AGENT_FAILURE_REASONS[number];
-export interface AgentAvailability { status: 'available' | 'unavailable' | 'unknown'; reason: AgentFailureReason | null; message: string; runtimeVersion?: string }
+/** Presence on the Workspace device; separate from authentication and execution readiness. */
+export type AgentInstallationStatus = 'installed' | 'missing' | 'unknown';
+export interface AgentAvailability { status: 'available' | 'unavailable' | 'unknown'; reason: AgentFailureReason | null; message: string; runtimeVersion?: string; installation?: AgentInstallationStatus }
 /** reasoningEfforts are declared in increasing strength order by the plugin. */
 export interface AgentModelOption { id: string; reasoningEfforts: string[]; defaultReasoningEffort?: string | null }
 /** All options are public validated values, never environment/credentials/paths. */

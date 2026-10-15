@@ -35,6 +35,7 @@ import type { CanvasHandle, Point } from '../canvas/Canvas';
 import { executionUnavailableReason } from './execution-availability';
 import { GraphEditor } from "./editor";
 import { createAuthoritativeLoader } from "./authoritative-loader";
+import { createBatchedRefresh, GRAPH_REFRESH_BATCH_MS } from './batched-refresh';
 export { createAuthoritativeLoader } from "./authoritative-loader";
 import { readProjectGraphPages } from "./graph-pages";
 import { groupLibraryGraphs } from './library-graphs';
@@ -2000,6 +2001,7 @@ function ServiceMonitor({
         });
     };
     let stream: EventSubscription | undefined;
+    const graphRefresh = createBatchedRefresh(load, error => { if (alive && !isLifecycleCancellation(error)) stream?.reconnect(); }, GRAPH_REFRESH_BATCH_MS);
     const startStream = (cursor: string) => {
       if (!alive) return;
       registry.assertCurrent(lease);
@@ -2011,8 +2013,10 @@ function ServiceMonitor({
             // Preparing/copying resource bytes does not change graph topology.
             // The subsequent graph.changed event publishes the atomic placement.
             if (event.type.startsWith('canvas_resource.')) return;
+            window.dispatchEvent(new CustomEvent('openworkgraph:service-event', {detail:event}));
             if (event.type === 'project.files.changed') window.dispatchEvent(new CustomEvent('openworkgraph:project-files-changed', { detail:{ serviceId:event.serviceId, projectId:event.projectId, payload:event.payload } }));
-            await load();
+            if (event.type === 'graph.changed') graphRefresh.schedule();
+            else void load().catch(error => { if (alive && !isLifecycleCancellation(error)) stream?.reconnect(); });
           },
           reloadSnapshot: load,
           onError: (error) => {
@@ -2057,6 +2061,7 @@ function ServiceMonitor({
     trigger.current();
     return () => {
       alive = false;
+      graphRefresh.dispose();
       unregisterRefresh();
       clearTimeout(bootstrapRetry);
       clearInterval(infoRefreshTimer);

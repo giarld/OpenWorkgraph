@@ -3,6 +3,7 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type { Json, ServiceEvent } from '@openworkgraph/protocol';
 import { ServiceError } from '../errors.js';
 import { atomic, transaction } from './database.js';
+import { notifyDatabaseChange } from './changes.js';
 export function canonicalJson(value: Json): string {
   if (value === null || typeof value !== 'object') {
     if (typeof value === 'number' && !Number.isFinite(value)) throw new ServiceError('INVALID_REQUEST', 'Non-finite JSON number');
@@ -82,6 +83,7 @@ export class Repositories {
   appendEvent(event: Omit<ServiceEvent, 'cursor' | 'serviceId'>): string {
     if (!this.db.isTransaction) throw new Error('Events must be persisted inside the business transaction');
     const result = this.db.prepare('INSERT INTO events(id,type,project_id,graph_id,entity_id,revision,occurred_at,payload) VALUES(?,?,?,?,?,?,?,?)').run(event.eventId,event.type,event.projectId,event.graphId,event.entityId,event.revision,event.occurredAt,canonicalJson(event.payload));
+    notifyDatabaseChange(this.db);
     return String(result.lastInsertRowid);
   }
 }

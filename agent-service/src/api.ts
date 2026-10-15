@@ -17,6 +17,8 @@ import { GraphTransfer } from './graph-transfer.js';
 import { PluginApi } from './plugin-api.js';
 import { PluginManagement } from './plugin-management.js';
 import { Repositories } from './persistence/repositories.js';
+import { atomic } from './persistence/database.js';
+import { prepareDeletedOutputHistory } from './execution-output-history.js';
 import { ProjectFilesApi } from './project-files-api.js';
 import { SkillsApi } from './skills-api.js';
 import { SkillsManagementApi } from './skills-management-api.js';
@@ -80,6 +82,33 @@ export class BusinessApi {
     if(!match)return {handled:false};
     this.auth.withSession(token,origin,()=>undefined);
     const body=request.method==='POST'?await readJson(request,16*1024*1024):undefined;
+    if(request.method==='POST'&&match[2]&&match[3]==='commands'&&body){
+      if(Object.keys(body).some(key=>!['idempotencyKey','expectedExecutionRevision','expectedLayoutRevision','operations'].includes(key)))throw new ServiceError('INVALID_REQUEST','图命令包含未知字段。');
+      const command={...body,serviceId:this.serviceId,projectId:match[1]!,graphId:match[2]} as unknown as GraphCommand;
+      if(typeof command.idempotencyKey!=='string'||!Number.isSafeInteger(command.expectedExecutionRevision)||!Number.isSafeInteger(command.expectedLayoutRevision)||!Array.isArray(command.operations)||!command.operations.length||command.operations.length>1000||command.operations.some(op=>!op||typeof op!=='object'))throw new ServiceError('INVALID_REQUEST','图命令需要幂等键、整数版本和有效操作。');
+      const replay=()=>this.auth.withSession(token,origin,current=>new Repositories(this.db).replay(current.id+':graph.command:'+command.graphId,command.idempotencyKey,command as unknown as Json));
+      const prior=replay();
+      if(prior!==undefined){
+        await this.runtime.resources.drainFileDeletions();await this.runtime.graphFiles.drain();
+        this.auth.assertActive(token,origin);return {handled:true,body:prior};
+      }
+      const cleanups:(()=>unknown)[]=[];
+      try {
+        const preserve=command.operations.some(op=>op.type==='node.delete')
+          ?await prepareDeletedOutputHistory(this.graphs,this.runtime.resources,command,cleanups):undefined;
+        const snapshot=this.auth.withSession(token,origin,current=>{
+          const result=this.graphs.command(command,current.id,preserve);
+          this.runtime.resources.collectGarbage();return result;
+        });
+        return {handled:true,body:snapshot};
+      } catch(error) {
+        const duplicate=replay();if(duplicate!==undefined)return {handled:true,body:duplicate};throw error;
+      } finally {
+        if(cleanups.length)atomic(this.db,()=>{for(const cleanup of cleanups)cleanup();});
+        await this.runtime.resources.drainFileDeletions();await this.runtime.graphFiles.drain();
+        this.auth.assertActive(token,origin);
+      }
+    }
     const result=this.auth.withSession(token,origin,current=>{
       const projectId=match[1]!,graphId=match[2],action=match[3];
       if(request.method==='GET'&&!graphId)return {handled:true,body:this.graphs.list(projectId)};
@@ -112,12 +141,6 @@ export class BusinessApi {
         const snapshot=this.graphs.history.travel({...body,serviceId:this.serviceId,projectId,graphId} as unknown as GraphHistoryTravel,current.id);
         this.runtime.resources.collectGarbage();
         return {handled:true,body:snapshot};
-      }
-      if(request.method==='POST'&&graphId&&action==='commands'&&body){
-        if(Object.keys(body).some(key=>!['idempotencyKey','expectedExecutionRevision','expectedLayoutRevision','operations'].includes(key)))throw new ServiceError('INVALID_REQUEST','图命令包含未知字段。');
-        const command={...body,serviceId:this.serviceId,projectId,graphId} as unknown as GraphCommand;
-        if(typeof command.idempotencyKey!=='string'||!Number.isSafeInteger(command.expectedExecutionRevision)||!Number.isSafeInteger(command.expectedLayoutRevision))throw new ServiceError('INVALID_REQUEST','图命令需要幂等键和整数版本。');
-        const snapshot=this.graphs.command(command,current.id);this.runtime.resources.collectGarbage();return {handled:true,body:snapshot};
       }
       throw new ServiceError('NOT_FOUND','图接口不存在。');
     });

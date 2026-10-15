@@ -25,6 +25,8 @@ export interface SchedulerOptions {
   epoch?: string;
   /** Injectable monotonic-enough wall clock for bounded publication retries. */
   now?: () => number;
+  /** Avoid event-driven busy retries when another workspace owns the project. */
+  projectLockRetryMs?: number;
   /** Must publish and transition finalizing -> succeeded in the SAME database txn.
    * Replayed after crashes; manifest/hash/publication-key validation belongs here. */
   publish?: (run: Run, token: RunToken) => Promise<void> | void;
@@ -39,7 +41,7 @@ export class Scheduler {
   private readonly lockAcquisitions = new Map<string, Promise<boolean>>();
   private readonly pendingReplies = new Set<string>();
   private readonly replyBuffers = new Map<string, BackendEvent[]>();
-  private readonly contendedProjects = new Set<string>();
+  private readonly contendedProjects = new Map<string, number>();
   private readonly publicationRetries = new Map<string, { attempts: number; nextAt: number; message: string; recordedAt: number }>();
   private ticking = false;
   private dispatched = false;
@@ -137,7 +139,7 @@ export class Scheduler {
         if (!this.owned(run.id)) return;
         if (this.runs.get(run.id).status === 'cancelling') this.emit(run.id, { type: 'stopped' });
         else if (this.runs.get(run.id).status === 'preparing') this.runs.requeueUnstarted(run.id, this.runs.runtime(run.id));
-        this.contendedProjects.add(run.projectId);
+        this.deferProject(run.projectId);
         // Refill immediately even with capacity=1; retry this project next tick.
         this.dispatch();
         return;
@@ -160,13 +162,16 @@ export class Scheduler {
   }
   private dispatch(): void {
     let claimed: Run | null;
-    while ((claimed = this.runs.claimNext(this.epoch, [...this.contendedProjects]))) {
+    while ((claimed = this.runs.claimNext(this.epoch, [...this.contendedProjects.keys()]))) {
       const run = claimed;
       if (this.jobs.has('start:' + run.id)) {
-        this.runs.requeueUnstarted(run.id, this.runs.runtime(run.id)); this.contendedProjects.add(run.projectId); continue;
+        this.runs.requeueUnstarted(run.id, this.runs.runtime(run.id)); this.deferProject(run.projectId); continue;
       }
       this.launch('start:' + run.id, () => this.start(run));
     }
+  }
+  private deferProject(projectId: string): void {
+    this.contendedProjects.set(projectId, (this.options.now?.() ?? Date.now()) + (this.options.projectLockRetryMs ?? 0));
   }
   private async cancel(run: Run): Promise<void> {
     // A start call may still be acquiring a lock or spawning. Do not confirm stop
@@ -229,11 +234,14 @@ export class Scheduler {
     if (this.runs.db.isTransaction) throw new ServiceError('CONFLICT', 'Scheduler cannot dispatch inside a database transaction');
     this.dispatched = true;
     if (this.ticking) return; this.ticking = true;
-    this.contendedProjects.clear();
+    const now = this.options.now?.() ?? Date.now();
+    for (const [id, nextAt] of this.contendedProjects) if (nextAt <= now) this.contendedProjects.delete(id);
     try {
-      for (const run of this.runs.list()) {
-        if (!this.owned(run.id)) continue;
-        if (isTerminalRunStatus(run.status)) { this.publicationRetries.delete(run.id); this.release(run.id); continue; }
+      // Terminal history is never scheduling work. Reconcile the small set of
+      // locks/retries we actually own, including externally cancelled runs.
+      for (const [path, release] of this.releases) if (!this.activeProjectRuns(path)) { release(); this.releases.delete(path); }
+      for (const id of this.publicationRetries.keys()) if (isTerminalRunStatus(this.runs.get(id).status)) this.publicationRetries.delete(id);
+      for (const run of this.runs.active(this.epoch)) {
         if (run.status === 'cancelling') this.launch('cancel:' + run.id, () => this.cancel(run));
         if (run.status === 'reconciling') this.launch('reconcile:' + run.id, () => this.reconcile(run));
         if (run.status === 'agent_completed') this.runs.transition(run.id, this.runs.runtime(run.id), 'finalizing');

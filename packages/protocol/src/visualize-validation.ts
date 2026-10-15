@@ -1,7 +1,8 @@
 import type { Json } from './index.js';
+import { WORKGRAPH_NODE_MIN_SIZE } from './node-layout.js';
 import { validateVisualizeLogoSvg } from './visualize-logo.js';
 import {
-  VISUALIZE_BRIDGE_VERSION, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE,
+  VISUALIZE_BRIDGE_VERSION, VISUALIZE_GENERATION_MAX_SIZE,
   VISUALIZE_PAGE_VERSION, VISUALIZE_SCHEMA_DIALECT,
 } from './visualize.js';
 import type { VisualizeErrorCode, VisualizeFieldError, VisualizeFormSchema, VisualizeNodeContent, VisualizePagePackage, VisualizeSize } from './visualize.js';
@@ -164,18 +165,18 @@ export function validateVisualizeForm(schema: unknown, value: unknown, mode: 'sa
   if (errors.length) throw new VisualizeValidationError(errors.every(error => error.keyword === 'required') ? 'FORM_REQUIRED' : 'FORM_INVALID', 'Form validation failed', errors);
   return data as { [key: string]: Json };
 }
-/** Manual maximum is passed by the host from its ordinary-node geometry rule. */
-export function validateVisualizeSize(value: unknown, mode: 'generation' | 'manual', manualMaximum?: VisualizeSize): VisualizeSize {
+/** Host maximum follows ordinary-node geometry; snapshots also preserve small generated sizes. */
+export function validateVisualizeSize(value: unknown, mode: 'generation' | 'manual' | 'snapshot', hostMaximum?: VisualizeSize): VisualizeSize {
   const size = checkedVisualizeJson(value, 256, 2);
   if (!object(size)) fail('INVALID_REQUEST', 'Invalid layout');
   fields(size, ['width', 'height']);
-  if (mode !== 'generation' && mode !== 'manual') fail('INVALID_REQUEST', 'Invalid layout mode');
-  const max = mode === 'generation' ? VISUALIZE_GENERATION_MAX_SIZE : manualMaximum;
-  if (!max || ![max.width, max.height].every(number => Number.isFinite(number) && number > 0)) fail('INVALID_REQUEST', 'Manual maximum must come from ordinary-node rules');
+  if (mode !== 'generation' && mode !== 'manual' && mode !== 'snapshot') fail('INVALID_REQUEST', 'Invalid layout mode');
+  const max = mode === 'generation' ? VISUALIZE_GENERATION_MAX_SIZE : hostMaximum;
+  if (!max || ![max.width, max.height].every(number => Number.isFinite(number) && number > 0)) fail('INVALID_REQUEST', 'Host maximum must come from ordinary-node rules');
   for (const key of ['width', 'height'] as const) {
     const axis = size[key];
     if (typeof axis !== 'number' || !Number.isFinite(axis) || axis <= 0) fail('INVALID_REQUEST', `Invalid layout ${key}`);
-    if (mode === 'manual' && axis < VISUALIZE_DEFAULT_SIZE[key] || axis > max[key]) fail('INVALID_REQUEST', `Invalid layout ${key}`);
+    if (mode === 'manual' && axis < WORKGRAPH_NODE_MIN_SIZE[key] || axis > max[key]) fail('INVALID_REQUEST', `Invalid layout ${key}`);
   }
   return size as unknown as VisualizeSize;
 }

@@ -13,7 +13,7 @@ import { visualizeChecked } from './visualize-content.js';
 export class VisualizeApi {
   constructor(readonly pages: VisualizePages, readonly auth: Auth, readonly inputs: VisualizeInputs, readonly bridge: VisualizeBridge) {}
   async handle(request: IncomingMessage, path: string, token: string, origin: string): Promise<ApiResult> {
-    const match = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs[/]([a-zA-Z0-9_-]+)[/]visualize[/]([a-zA-Z0-9_-]+)([/]inputs|[/]bridge(?:[/]([a-zA-Z0-9_-]+)([/]asset)?)?)?$/.exec(path);
+    const match = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs[/]([a-zA-Z0-9_-]+)[/]visualize[/]([a-zA-Z0-9_-]+)([/]inputs|[/]bridge(?:[/]([a-zA-Z0-9_-]+)([/](?:asset|keepalive))?)?)?$/.exec(path);
     if (!match) return { handled: false };
     const principal = this.auth.withSession(token, origin, session => session.id);
     const scope = { serviceId: this.pages.graphs.serviceId, projectId: match[1]!, graphId: match[2]! }, nodeId = match[3]!;
@@ -21,6 +21,11 @@ export class VisualizeApi {
       const guard = <T>(work: () => T): T => this.auth.withSession(token, origin, work);
       if (request.method === 'DELETE' && match[5] && !match[6]) return guard(() => { this.bridge.close(scope, nodeId, match[5]!, principal); return { handled: true, body: { closed: true } }; });
       if (request.method !== 'POST') throw new ServiceError('NOT_FOUND', '可视化页面桥接口不存在。');
+      if (match[6] === '/keepalive') {
+        const body = await readJson(request);
+        if (Object.keys(body).length) throw new ServiceError('INVALID_REQUEST', '页面会话续期不接受附加字段。');
+        return guard(() => ({ handled: true, body: visualizeChecked(() => this.bridge.keepAlive(scope, nodeId, match[5]!, principal)) }));
+      }
       if (match[6]) {
         if (request.headers['content-type'] !== VISUALIZE_ASSET_BINARY_MIME) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', '资产导出须使用二进制协议。');
         const binary = await readBinary(request, VISUALIZE_ASSET_MAX_BYTES + VISUALIZE_ASSET_HEADER_MAX_BYTES + 4);

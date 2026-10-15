@@ -1,5 +1,5 @@
-import type { GraphSnapshot, Json, Node, Run, RunStatus, VisualizeBridgeRequest, NodeSignalCause, NodeSignalConnection, NodeSignalMessage, NodeSignalName, NodeSignalRelation } from '../../../packages/protocol/src/index';
-import { NODE_SIGNALS, VisualizeValidationError, validateNodeSignalCommand } from '../../../packages/protocol/src/index';
+import type { GraphSnapshot, Json, Node, Run, RunStatus, ServiceEvent, VisualizeBridgeRequest, NodeSignalCause, NodeSignalConnection, NodeSignalMessage, NodeSignalName, NodeSignalRelation } from '../../../packages/protocol/src/index';
+import { NODE_SIGNALS, nodeContentSlotMatches, isNodeContentSlot, validateNodeContentSlotParams, VisualizeValidationError, validateNodeSignalCommand, validateNodeSignalCause } from '../../../packages/protocol/src/index';
 import { randomId } from '../adapter/random';
 
 type Binding = { nodeId: string; sessionId: string; active(): boolean; send(message: NodeSignalMessage): void; slots: Set<string>; connections: Map<string, NodeSignalConnection>; receipts: Map<string, { payload: string; value: Json }> };
@@ -26,6 +26,7 @@ export class NodeSignals {
   private writeCauses = new Map<string, { kind: 'form' | 'content'; version: number; cause: NodeSignalCause }>();
   private events: Event[] = [];
   private draining = false;
+  private readonly earlyChanges = new Map<string,{nodeId:string;contentVersion:number;revision:number}>();
   bind(nodeId: string, sessionId: string, send: Binding['send'], active: Binding['active']): () => void {
     this.close(nodeId);
     const binding: Binding = { nodeId, sessionId, send, active, slots: new Set(), connections: new Map(), receipts: new Map() };
@@ -39,7 +40,37 @@ export class NodeSignals {
     for (const job of [...this.pending.values()]) if (job.owner === binding || job.receiver === binding || job.event.nodeId === nodeId) this.remove(job);
     binding.connections.clear(); binding.slots.clear(); binding.receipts.clear();
   }
-  dispose(): void { for (const id of [...this.bindings.keys()]) this.close(id); this.events = []; this.writeCauses.clear(); }
+  dispose(): void { for (const id of [...this.bindings.keys()]) this.close(id); this.events = []; this.writeCauses.clear(); this.earlyChanges.clear(); }
+  /** Committed event metadata can deliver signals before any graph snapshot read. */
+  observeEvent(event: ServiceEvent): void {
+    if (!event || typeof event !== 'object') return;
+    const graph = this.graph;
+    if (!graph || event.type !== 'graph.changed' || event.serviceId !== graph.serviceId || event.projectId !== graph.projectId || event.graphId !== graph.graphId) return;
+    const payload = object(event.payload), revision = payload.executionRevision;
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < graph.executionRevision || !Array.isArray(payload.nodeChanges) || payload.nodeChanges.length > 1000) return;
+    for (const raw of payload.nodeChanges) {
+      const change = object(raw), id = change.nodeId, version = change.contentVersion;
+      if (typeof id !== 'string' || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1 || typeof change.outputsChanged !== 'boolean' || (change.formVersion !== undefined && (typeof change.formVersion !== 'number' || !Number.isSafeInteger(change.formVersion) || change.formVersion < 1))) continue;
+      let committedCause: NodeSignalCause | undefined;
+      if (change.cause !== undefined) {
+        try { committedCause = validateNodeSignalCause(change.cause); } catch { continue; }
+      }
+      const node = graph.nodes.find(node => node.id === id), key = revision + ':' + id + ':' + version;
+      if (!node || node.contentVersion === version || this.earlyChanges.has(key)) continue;
+      this.earlyChanges.set(key,{nodeId:id,contentVersion:version,revision});
+      if (this.earlyChanges.size > 2048) this.earlyChanges.delete(this.earlyChanges.keys().next().value!);
+      const write = this.writeCauses.get(id), observed = write?.kind === 'content' ? version : change.formVersion;
+      // The transaction associates this cause with the actual committed version,
+      // even when SSE arrives before its HTTP receipt or a full graph refresh.
+      const cause = committedCause ?? (write && write.version === observed ? write.cause : undefined);
+      this.publish(id,'content.changed',{contentVersion:version},cause);
+      if (change.outputsChanged) {
+        this.publish(id,'outputs.changed',{contentVersion:version},cause);
+        if (node.type === 'visualize' && typeof change.formVersion === 'number') this.publish(id,'form.changed',{formVersion:change.formVersion},cause);
+        for (const target of this.neighbors(id,'successors')) if (graph.nodes.some(node => node.id === target && node.type === 'visualize')) this.publish(target,'inputs.invalidated',{sourceNodeId:id},cause);
+      }
+    }
+  }
   private neighbors(id: string, direction: 'predecessors' | 'successors', graph = this.graph): string[] {
     return [...new Set(graph?.edges.filter(e => e.kind === 'reference' && (direction === 'predecessors' ? e.targetId : e.sourceId) === id).map(e => direction === 'predecessors' ? e.sourceId : e.targetId) ?? [])];
   }
@@ -60,10 +91,12 @@ export class NodeSignals {
   }
   private alive(binding: Binding): boolean { return this.bindings.get(binding.nodeId) === binding && binding.active(); }
   private valid(job: Invocation): boolean {
+    const slot = job.connection.target.slot;
     return this.alive(job.owner) && this.alive(job.receiver) && job.owner.connections.get(job.connection.id) === job.connection
       && (job.event.signal === 'removed' || !!this.related(job.owner.nodeId, job.event.nodeId) && this.resolve(job.connection.source.nodeId, job.owner.nodeId).includes(job.event.nodeId))
       && this.resolve(job.connection.target.nodeId, job.owner.nodeId).includes(job.targetId)
-      && (job.targetId === job.owner.nodeId || this.neighbors(job.owner.nodeId, 'successors').includes(job.targetId));
+      && (job.targetId === job.owner.nodeId || this.neighbors(job.owner.nodeId, 'successors').includes(job.targetId))
+      && (!isNodeContentSlot(slot) || !!this.graph?.nodes.some(node => node.id === job.targetId && nodeContentSlotMatches(slot, node)));
   }
   command(nodeId: string, request: Extract<VisualizeBridgeRequest, { method: 'signals' }>): Json {
     const binding = this.bindings.get(nodeId);
@@ -116,8 +149,9 @@ export class NodeSignals {
   }
   noteContentWrite(nodeId: string, contentVersion: number | undefined, cause?: NodeSignalCause): void {
     const observed = this.graph?.nodes.find(node => node.id === nodeId)?.contentVersion ?? 0;
-    const version = contentVersion ?? observed + 1;
-    if (cause && version > observed) this.writeCauses.set(nodeId, { kind: 'content', version, cause }); else this.writeCauses.delete(nodeId);
+    // Only confirmed receipt versions may back up snapshot-based delivery.
+    // Early SSE carries the transaction's cause and never needs a prediction.
+    if (cause && contentVersion !== undefined && contentVersion > observed) this.writeCauses.set(nodeId, { kind: 'content', version: contentVersion, cause }); else this.writeCauses.delete(nodeId);
   }
   publish(nodeId: string, signal: NodeSignalName, payload: Json, cause?: NodeSignalCause, previous?: GraphSnapshot): string {
     const id = randomId();
@@ -149,10 +183,16 @@ export class NodeSignals {
     if (targetId !== owner.nodeId && !this.neighbors(owner.nodeId, 'successors').includes(targetId)) return;
     const target = this.graph?.nodes.find(n => n.id === targetId), slot = connection.target.slot;
     const execution = slot === 'prompt.update' || slot === 'run.submit' || slot === 'run.cancel';
-    const receiver = execution ? owner : this.bindings.get(targetId);
+    const content = isNodeContentSlot(slot);
+    const hosted = execution || content;
+    const receiver = hosted ? owner : this.bindings.get(targetId);
     const cause = { traceId: event.cause.traceId, connections: [...event.cause.connections, key] };
-    if (!receiver || !this.alive(receiver) || (execution ? target?.type !== 'execution' : target?.type !== 'visualize') || (!execution && slot !== 'inputs.refresh' && !receiver.slots.has(slot))) {
+    if (!receiver || !this.alive(receiver) || (content ? !target || !nodeContentSlotMatches(slot, target) : execution ? target?.type !== 'execution' : target?.type !== 'visualize') || (!hosted && slot !== 'inputs.refresh' && !receiver.slots.has(slot))) {
       this.publish(owner.nodeId, 'invocation.failed', { connectionId: connection.id, targetNodeId: targetId, slot, result: { code: 'INPUT_BLOCKED', message: '目标节点槽未处于活动状态。' } }, cause); return;
+    }
+    if (content) {
+      try { validateNodeContentSlotParams(slot, connection.params ?? event.payload); }
+      catch { this.publish(owner.nodeId, 'invocation.failed', { connectionId: connection.id, targetNodeId: targetId, slot, result: { code: 'INVALID_REQUEST', message: '内容更新参数与目标节点类型不匹配。' } }, cause); return; }
     }
     if (this.pending.size >= 128) { this.publish(owner.nodeId, 'invocation.failed', { connectionId: connection.id, result: { code: 'INPUT_BLOCKED', message: '待处理的节点动作过多。' } }, cause); return; }
     // At most one not-yet-started refresh per target; the read takes the latest snapshot.
@@ -183,6 +223,7 @@ export class NodeSignals {
         const node = graph.nodes.find(n => n.id === old.id);
         if (!node) { this.publish(old.id, 'removed', { nodeId: old.id }, undefined, before); this.close(old.id); this.writeCauses.delete(old.id); continue; }
         if (node.contentVersion === old.contentVersion) continue;
+        if ([...this.earlyChanges.values()].some(change => change.nodeId === node.id && change.contentVersion === node.contentVersion && change.revision <= graph.executionRevision)) { this.writeCauses.delete(node.id); continue; }
         const write = this.writeCauses.get(node.id);
         const version = write?.kind === 'content' ? node.contentVersion : Number(object(object(node.content).form).version);
         const cause = write?.version === version ? write.cause : undefined;
@@ -204,6 +245,7 @@ export class NodeSignals {
       }
       for (const job of [...this.pending.values()]) if (!this.valid(job)) this.remove(job);
     }
+    for (const [key,change] of this.earlyChanges) if (change.revision <= graph.executionRevision) this.earlyChanges.delete(key);
     if (runs) {
       const current = runs.filter(r => r.graphId === graph.graphId && r.projectId === graph.projectId && r.serviceId === graph.serviceId);
       for (const run of current) {

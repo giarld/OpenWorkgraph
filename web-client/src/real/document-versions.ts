@@ -13,7 +13,8 @@ export interface DocumentTimeline {
   layoutRevision: number;
 }
 type VisualizeData = { form: VisualizeFormSnapshot; state: VisualizeStateSnapshot };
-export interface VersionedDocument { graph: GraphSnapshot; timeline?: DocumentTimeline; nodeVersions?: Record<string, number>; visualizeData?: Record<string, VisualizeData> }
+type VisualizeVersions = { page: number; form: number; state: number };
+export interface VersionedDocument { graph: GraphSnapshot; timeline?: DocumentTimeline; nodeVersions?: Record<string, number>; visualizeData?: Record<string, VisualizeData>; visualizeVersions?: Record<string, VisualizeVersions> }
 const TTL = 24 * 60 * 60 * 1000;
 const empty = () => ({ cursor:null, canUndo:false, canRedo:false, expiresAt:null });
 const content = (g: GraphSnapshot) => ({ title:g.title, nodes:g.nodes.map(({contentVersion:_, ...n}) => n.type==='visualize' ? { ...n, content:visualizeGraphContent(n.content) } : n), edges:g.edges, hiddenExecutionOutputs:g.hiddenExecutionOutputs });
@@ -25,8 +26,32 @@ function rememberVisualizeData(record: VersionedDocument, graph: GraphSnapshot, 
   record.visualizeData ??= {};
   for (const n of graph.nodes) if (n.type==='visualize' && (!nodeId || n.id===nodeId)) {
     const content = validateVisualizeNodeContent(n.content), key = dataKey(n.id, n.content);
-    if (key && content.form && content.state) record.visualizeData[key] = structuredClone({form:content.form, state:content.state});
+    if (key && content.form && content.state) {
+      rememberVisualizeVersions(record, n.id, content.page!.revision, content.form.version, content.state.version);
+      record.visualizeData[key] = structuredClone({form:content.form, state:content.state});
+    }
   }
+}
+function rememberVisualizeVersions(record: VersionedDocument, id: string, page: number, form: number, state: number) {
+  const versions = (record.visualizeVersions ??= {}), before = versions[id];
+  if (before) { before.page = Math.max(before.page, page); before.form = Math.max(before.form, form); before.state = Math.max(before.state, state); }
+  else versions[id] = { page, form, state };
+}
+/** Counters survive redo truncation and history expiry. Legacy records are
+ * seeded once, only when importing a page, never by scanning on a page save. */
+export function nextVisualizeVersions(record: VersionedDocument, nodeId: string): VisualizeVersions {
+  if (!record.visualizeVersions?.[nodeId]) {
+    for (const graph of [record.graph, ...(record.timeline?.versions.map(v => v.graph) ?? [])]) {
+      const node = graph.nodes.find(n => n.id === nodeId && n.type === 'visualize');
+      if (!node) continue;
+      const content = validateVisualizeNodeContent(node.content);
+      if (content.page && content.form && content.state) rememberVisualizeVersions(record, nodeId, content.page.revision, content.form.version, content.state.version);
+    }
+    for (const [key, data] of Object.entries(record.visualizeData ?? {})) if (JSON.parse(key)[0] === nodeId)
+      rememberVisualizeVersions(record, nodeId, data.form.pageRevision, data.form.version, data.state.version);
+  }
+  const before = record.visualizeVersions?.[nodeId];
+  return { page: (before?.page ?? 0) + 1, form: (before?.form ?? 0) + 1, state: (before?.state ?? 0) + 1 };
 }
 function pruneVisualizeData(record: VersionedDocument) {
   const retained = new Set<string>();

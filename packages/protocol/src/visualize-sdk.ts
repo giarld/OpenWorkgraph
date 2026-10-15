@@ -6,7 +6,7 @@ import type {
 import { checkedVisualizeJson, VisualizeValidationError } from './visualize-validation.js';
 import { validateVisualizeBridgeRequest, validateVisualizeBridgeResponse, validateVisualizeCapabilityUpdate } from './visualize-bridge.js';
 import type { Json } from './index.js';
-import { validateNodeSignalMessage } from './node-signals.js';
+import { validateNodeSignalMessage, isNodeContentSlot } from './node-signals.js';
 import type { NodeSignalCause, NodeSignalEvent, NodeSignalSource, NodeSignalSdk, NodeSignalDescription } from './node-signals.js';
 
 export interface VisualizeSdkClient extends VisualizePageSdk { dispose(): void }
@@ -53,43 +53,57 @@ export function createVisualizePageSdk(options: {
   let revisions: VisualizeExpectedRevisions = {
     pageRevision: 0, formVersion: 0, stateVersion: 0, inputVersion: 0, executionRevision: 0, layoutRevision: 0,
   };
+  type Fence = { settled: boolean; error?: unknown };
   type Job = {
     method: VisualizeBridgeMethod; params: VisualizeBridgeMethods[VisualizeBridgeMethod]['params'];
     resolve(value: unknown): void; reject(reason: unknown): void; bytes?: ArrayBuffer | undefined;
     cause?: NodeSignalCause;
     inputRecovery?: boolean;
+    fence: Fence;
+    waitFor: Fence[];
   };
   type Pending = { job: Job; request: VisualizeBridgeRequest; attempts: number; timer?: number };
   const queue: Job[] = [];
   let pending: Pending | undefined;
+  const signalQueue: Job[] = [];
+  let signalPending: Pending | undefined;
+  const isPending = (current: Pending) => pending === current || signalPending === current;
+  const mutation = (method: VisualizeBridgeMethod) => !['initialize', 'readInputs', 'signals'].includes(method);
+  const emission = (job: Pick<Job, 'method' | 'params'>) => job.method === 'signals' && (job.params as VisualizeBridgeMethods['signals']['params']).action === 'emit';
+
+  function settle(job: Job, error?: unknown, value?: unknown): void {
+    job.fence.settled = true;
+    if (error !== undefined) { job.fence.error = error; job.reject(error); }
+    else job.resolve(value);
+  }
 
   function recoverInputs(): void {
     capabilities = undefined;
-    if (queue[0]?.method !== 'initialize') queue.unshift({ method: 'initialize', params: {}, inputRecovery: true, resolve: () => undefined, reject: () => undefined });
+    if (queue[0]?.method !== 'initialize') queue.unshift({ method: 'initialize', params: {}, inputRecovery: true, fence: { settled: false }, waitFor: [], resolve: () => undefined, reject: () => undefined });
   }
 
-  function finish(error?: unknown, value?: unknown): void {
-    const current = pending;
-    if (!current) return;
-    pending = undefined;
+  function finish(current: Pending, error?: unknown, value?: unknown): void {
+    if (!isPending(current)) return;
+    if (pending === current) pending = undefined;
+    if (signalPending === current) signalPending = undefined;
     if (current.timer !== undefined) pageWindow.clearTimeout(current.timer);
-    if (error !== undefined) current.job.reject(error); else current.job.resolve(value);
+    settle(current.job, error, value);
     pump();
   }
 
   function send(current: Pending): void {
-    if (disposed || pending !== current) return;
+    if (disposed || !isPending(current)) return;
     current.attempts++;
     const refresh = current.request.method === 'readInputs' && current.request.params.refresh;
     // Arm before posting: synchronous fake transports are supported too.
     current.timer = pageWindow.setTimeout(() => {
-      if (pending !== current) return;
+      if (!isPending(current)) return;
       if (current.attempts <= retries) send(current);
       else {
         // A refresh may already have advanced the host snapshot while media is
         // still loading. Resync before releasing queued calls with old revisions.
         if (refresh) recoverInputs();
-        finish(protocolError('INTERNAL_ERROR', 'Visualize host response timed out', true));
+        finish(current, protocolError('INTERNAL_ERROR', 'Visualize host response timed out', true));
       }
     }, current.request.method === 'exportAsset' || refresh ? Math.max(timeoutMs, 60_000) : timeoutMs);
     try {
@@ -97,16 +111,30 @@ export function createVisualizePageSdk(options: {
       else hostWindow.postMessage(current.request, hostOrigin);
     }
     catch {
-      if (pending === current) finish(protocolError('INTERNAL_ERROR', 'Unable to send visualize request'));
+      if (isPending(current)) finish(current, protocolError('INTERNAL_ERROR', 'Unable to send visualize request'));
     }
   }
 
   function pump(): void {
-    if (disposed || pending) return;
+    pumpQueue(false);
+    pumpQueue(true);
+  }
+  function pumpQueue(signals: boolean): void {
+    if (disposed || (signals ? signalPending : pending)) return;
+    // Recovery preempts both lanes. Other dependencies are captured when called,
+    // so an emission can bypass a read without overtaking a preceding save.
+    if (signals && (pending?.request.method === 'initialize' || queue.some(job => job.inputRecovery))) return;
+    const jobs = signals ? signalQueue : queue;
     let job: Job | undefined;
     // Drain locally rejected jobs without recursing through a potentially long queue.
-    while ((job = queue.shift())) {
+    while (jobs.length) {
+      if (jobs[0]!.waitFor.some(fence => !fence.settled)) return;
+      job = jobs.shift()!;
       let blocked: Error | undefined;
+      const failedWrite = emission(job) ? job.waitFor.find(fence => fence.error !== undefined) : undefined;
+      if (failedWrite) {
+        settle(job, failedWrite.error); queueMicrotask(pump); job = undefined; continue;
+      }
       if (job.method !== 'initialize' && !capabilities) {
         blocked = protocolError('INVALID_REQUEST', 'Initialize the visualize SDK first');
       } else if (job.method !== 'initialize' && job.method !== 'readInputs' && job.method !== 'signals') {
@@ -123,7 +151,7 @@ export function createVisualizePageSdk(options: {
         catch (error) { blocked = error instanceof VisualizeValidationError ? protocolError(error.code, error.message) : protocolError('INVALID_REQUEST', 'Invalid visualize parameters'); }
       }
       if (!blocked) break;
-      job.reject(blocked);
+      settle(job, blocked); queueMicrotask(pump); job = undefined;
     }
     if (!job) return;
     const request = {
@@ -131,8 +159,9 @@ export function createVisualizePageSdk(options: {
       sessionId, nodeId, requestId: `${prefix}-${++sequence}`, method: job.method,
       expected: { ...revisions }, params: job.params, ...(job.cause ? { cause: job.cause } : {}),
     } as VisualizeBridgeRequest;
-    pending = { job, request, attempts: 0 };
-    send(pending);
+    const current = { job, request, attempts: 0 };
+    if (signals) signalPending = current; else pending = current;
+    send(current);
   }
 
   function onMessage(event: MessageEvent): void {
@@ -158,8 +187,20 @@ export function createVisualizePageSdk(options: {
             let value: Json = null, ok = true;
             try {
               if (message.slot === 'inputs.refresh' && message.targetNodeId === nodeId) {
-                const refreshed = await call('readInputs', { refresh: true });
+                let refreshed: VisualizeBridgeMethods['readInputs']['result'];
+                // This slot follows current state, so a predecessor changing
+                // during verification can be read again. Never retry writes or
+                // permission/resource/session failures as revision conflicts.
+                for (let attempt = 0; ; attempt++) {
+                  try { refreshed = await call('readInputs', { refresh: true }); break; }
+                  catch (error) {
+                    if (attempt >= 2 || (error as { code?: string } | null)?.code !== 'REVISION_CONFLICT') throw error;
+                  }
+                }
                 value = { inputVersion: refreshed.inputs.version, digest: refreshed.inputs.digest };
+              }
+              else if (isNodeContentSlot(message.slot)) {
+                value = await call('contentSlot', { targetNodeId: message.targetNodeId, invocationId: message.invocationId, slot: message.slot, update: message.params as unknown as VisualizeBridgeMethods['contentSlot']['params']['update'] }) as unknown as Json;
               }
               else if (message.slot === 'prompt.update') {
                 // Keep malformed payloads intact for validation; never turn a missing prompt into an empty update.
@@ -187,10 +228,11 @@ export function createVisualizePageSdk(options: {
       if (capabilities && update.sessionId === sessionId && update.nodeId === nodeId) capabilities = { ...update.capabilities };
       return;
     } catch { /* Ordinary responses continue through their strict validator. */ }
-    if (!pending) return;
     let response: VisualizeBridgeResponse;
     try { response = validateVisualizeBridgeResponse(event.data); } catch { return; }
-    const request = pending.request;
+    const current = pending?.request.requestId === response.requestId ? pending : signalPending?.request.requestId === response.requestId ? signalPending : undefined;
+    if (!current) return;
+    const request = current.request;
     if (response.channel !== request.channel || response.version !== request.version ||
         response.type !== 'response' || response.sessionId !== sessionId || response.nodeId !== nodeId ||
         response.requestId !== request.requestId || response.method !== request.method) return;
@@ -201,14 +243,14 @@ export function createVisualizePageSdk(options: {
       // Media preparation follows the committed input refresh. Its failure does
       // not roll back that version, so recover before sending queued requests.
       if (request.method === 'readInputs' && request.params.refresh && response.error.code === 'RESOURCE_UNAVAILABLE') recoverInputs();
-      finish(error);
+      finish(current, error);
       return;
     }
     switch (response.method) {
       case 'initialize':
         // Automatic input recovery does not deliver the form/state to page code.
         // Keep their known versions so unseen edits still cause CAS conflicts.
-        revisions = { ...response.result.revisions, ...(pending.job.inputRecovery ? { formVersion: revisions.formVersion, stateVersion: revisions.stateVersion } : {}) };
+        revisions = { ...response.result.revisions, ...(current.job.inputRecovery ? { formVersion: revisions.formVersion, stateVersion: revisions.stateVersion } : {}) };
         capabilities = { ...response.result.capabilities };
         break;
       case 'saveState':
@@ -222,13 +264,13 @@ export function createVisualizePageSdk(options: {
       case 'exportAsset':
         revisions = { ...response.result.revisions, formVersion: revisions.formVersion, stateVersion: revisions.stateVersion, inputVersion: revisions.inputVersion };
         break;
-      case 'promptSlot':
+      case 'contentSlot': case 'promptSlot':
         revisions = { ...revisions, executionRevision: Math.max(revisions.executionRevision, response.result.executionRevision) };
         break;
       case 'readInputs': revisions.inputVersion = response.result.inputs.version; break;
       case 'requestLayout': revisions.layoutRevision = response.result.layoutRevision; break;
     }
-    finish(undefined, response.result);
+    finish(current, undefined, response.result);
   }
 
   function call<M extends VisualizeBridgeMethod>(method: M, params: VisualizeBridgeMethods[M]['params'], bytes?: ArrayBuffer): Promise<VisualizeBridgeMethods[M]['result']> {
@@ -243,7 +285,13 @@ export function createVisualizePageSdk(options: {
       return Promise.reject(failure);
     }
     return new Promise((resolve, reject) => {
-      queue.push({ method, params: snapshot, bytes, ...(cause ? { cause: structuredClone(cause) } : {}), resolve: value => resolve(value as VisualizeBridgeMethods[M]['result']), reject });
+      const job: Job = { method, params: snapshot, bytes, fence: { settled: false }, waitFor: [], ...(cause ? { cause: structuredClone(cause) } : {}), resolve: value => resolve(value as VisualizeBridgeMethods[M]['result']), reject };
+      if (method === 'signals') {
+        job.waitFor = [...(pending ? [pending.job] : []), ...queue].filter(prior => prior.method === 'initialize' || emission(job) && mutation(prior.method)).map(prior => prior.fence);
+      } else if (mutation(method)) {
+        job.waitFor = [...(signalPending ? [signalPending.job] : []), ...signalQueue].filter(emission).map(prior => prior.fence);
+      }
+      (method === 'signals' ? signalQueue : queue).push(job);
       pump();
     });
   }
@@ -285,8 +333,10 @@ export function createVisualizePageSdk(options: {
       signalListeners.clear(); signalSlots.clear();
       pageWindow.removeEventListener('message', onMessage);
       const error = protocolError('SESSION_EXPIRED', 'Visualize SDK is disposed');
-      finish(error);
-      for (const job of queue.splice(0)) job.reject(error);
+      if (pending) finish(pending, error);
+      if (signalPending) finish(signalPending, error);
+      for (const job of queue.splice(0)) settle(job, error);
+      for (const job of signalQueue.splice(0)) settle(job, error);
     },
   };
 }

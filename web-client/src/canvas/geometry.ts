@@ -1,3 +1,5 @@
+import { WORKGRAPH_NODE_MIN_SIZE } from '../../../packages/protocol/src/node-layout';
+
 export interface Point {
   x: number;
   y: number;
@@ -164,7 +166,7 @@ export function resizeBy(
   size: Size,
   delta: Point,
   zoom: number,
-  minimum: Size = { width: 220, height: 160 },
+  minimum: Size = WORKGRAPH_NODE_MIN_SIZE,
 ): Size {
   return {
     width: Math.max(minimum.width, size.width + delta.x / zoom),
@@ -179,7 +181,7 @@ export function resizeRect(
   zoom: number,
   corner: ResizeCorner,
   keepRatio = false,
-  minimum: Size = { width: 220, height: 160 },
+  minimum: Size = WORKGRAPH_NODE_MIN_SIZE,
   snapGrid?: number,
 ): Rect {
   const dx = delta.x / zoom,

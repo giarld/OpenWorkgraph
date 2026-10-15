@@ -249,5 +249,9 @@ PRAGMA legacy_alter_table=OFF;
 CREATE UNIQUE INDEX one_active_run_per_node ON runs(node_id) WHERE status NOT IN ('succeeded','failed','cancelled','interrupted');
 CREATE INDEX runs_project_sequence ON runs(project_id,sequence);
 CREATE UNIQUE INDEX runs_id_graph ON runs(id,graph_id);
-` }, { version: 27, sql: ASSET_PRESENTATION_SCHEMA }];
-export const SCHEMA_VERSION = 27;
+` }, { version: 27, sql: ASSET_PRESENTATION_SCHEMA }, { version: 28, sql: `
+CREATE INDEX runs_pending_status_sequence ON runs(status,sequence) WHERE status NOT IN ('succeeded','failed','cancelled','interrupted');
+CREATE INDEX runs_node_sequence ON runs(node_id,sequence);
+CREATE INDEX run_runtime_chain_batch ON run_runtime(json_extract(details,'$.chainBatch'),run_id);
+` }];
+export const SCHEMA_VERSION = 28;

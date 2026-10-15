@@ -72,7 +72,9 @@ export class AgentDiscovery {
         if (operation === 'models') return validateAgentModels(plugin.listModels ? await plugin.listModels(context) : [], plugin.descriptor.models.effort);
         return plugin.diagnose ? safeAvailability(await plugin.diagnose(context)) : { status: 'unknown', reason: null, message: '执行器未提供运行诊断。' };
       }, platform, options).then(value => {
-        if (this.ttlMs > 0 && !controller.signal.aborted && !this.closed) {
+        // A user may install the CLI then immediately retry onboarding.
+        const retryInstallation = !Array.isArray(value) && value.installation !== undefined && value.installation !== 'installed';
+        if (this.ttlMs > 0 && !retryInstallation && !controller.signal.aborted && !this.closed) {
           this.cache.set(key, { expires: Date.now() + this.ttlMs, value: structuredClone(value) });
           while (this.cache.size > this.maxEntries) this.cache.delete(this.cache.keys().next().value!);
         }

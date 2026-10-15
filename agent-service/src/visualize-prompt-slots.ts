@@ -34,8 +34,8 @@ export async function prepareVisualizePromptSlot(graphs: Graphs, scope: GraphSco
       const syncedFeatures = syncBuiltinFeatureMentions(previous, prompt, features);
       if (content.features !== undefined || syncedFeatures.length) next.features = syncedFeatures as unknown as Json;
       if (canonicalJson(next) === canonicalJson(current.content)) return { nodeId: targetNodeId, contentVersion: current.contentVersion, executionRevision: graph.executionRevision };
-      const saved = graphs.command({ ...scope, idempotencyKey: invocationId, expectedExecutionRevision: graph.executionRevision, expectedLayoutRevision: graph.layoutRevision, operations: [{ type: 'node.content', nodeId: targetNodeId, expectedContentVersion: originalVersion, content: next }] }, namespace + ':content');
-      return { nodeId: targetNodeId, contentVersion: saved.nodes.find(node => node.id === targetNodeId)!.contentVersion, executionRevision: saved.executionRevision };
+      graphs.applyWithoutSnapshot({ ...scope, idempotencyKey: invocationId, expectedExecutionRevision: graph.executionRevision, expectedLayoutRevision: graph.layoutRevision, operations: [{ type: 'node.content', nodeId: targetNodeId, expectedContentVersion: originalVersion, content: next }] }, namespace + ':content', request.cause);
+      return { nodeId: targetNodeId, contentVersion: originalVersion + 1, executionRevision: graph.executionRevision + 1 };
     }) as unknown as { nodeId: string; contentVersion: number; executionRevision: number };
   }, dispose: async () => {} };
 }

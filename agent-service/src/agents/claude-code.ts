@@ -26,7 +26,7 @@ import { AgentOperations } from './operations.js';
 import { ClaudeSessionStore } from './claude/sessions.js';
 import { redactClaudeOutput } from './claude/output.js';
 import { claudeModels } from './claude/models.js';
-import { claudeVersion, launchClaude, signalClaude, claudeGroupAlive, type ClaudeDeviceOptions } from './claude/process.js';
+import { claudeVersion, launchClaude, signalClaude, claudeGroupAlive, ClaudeExecutableNotFoundError, type ClaudeDeviceOptions } from './claude/process.js';
 
 export type ClaudePluginOptions = ClaudeDeviceOptions;
 const descriptor: AgentDescriptor = {
@@ -481,8 +481,8 @@ export function createClaudePlugin(options: ClaudePluginOptions = {}): AgentPlug
     async diagnose(context): Promise<AgentAvailability> {
       context.signal.throwIfAborted();
       if (!descriptor.capabilities.platforms!.includes(context.platform)) return { status: 'unavailable', reason: 'capability_unsupported', message: 'Claude 当前不支持此工作空间平台。' };
-      try { const runtimeVersion = await claudeVersion(privateOptions, context); return { status: 'unknown', reason: null, message: 'CLI 版本查询通过；认证与模型调用尚未通过推理验证。', runtimeVersion }; }
-      catch (error) { if (context.signal.aborted) throw error; const reason = error instanceof AgentError ? error.reason : 'runtime_unavailable'; return { status: 'unavailable', reason, message: new AgentError(reason).message }; }
+      try { const runtimeVersion = await claudeVersion(privateOptions, context); return { status: 'unknown', reason: null, message: 'CLI 版本查询通过；认证与模型调用尚未通过推理验证。', runtimeVersion, installation: 'installed' }; }
+      catch (error) { if (context.signal.aborted) throw error; const reason = error instanceof AgentError ? error.reason : 'runtime_unavailable'; return { status: 'unavailable', reason, message: new AgentError(reason).message, installation: error instanceof ClaudeExecutableNotFoundError ? 'missing' : 'unknown' }; }
     },
     evaluateTask(requirements) {
       const available = supported(requirements) && requirements.inputKinds.every(kind => descriptor.capabilities.inputKinds.includes(kind));

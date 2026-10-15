@@ -1,5 +1,4 @@
 import type { AgentSelection, GraphScope, Json, ModelSelection, SubmitRun, VisualizeBridgeRequest } from '@openworkgraph/protocol';
-import { isTerminalRunStatus } from '@openworkgraph/protocol';
 import type { WorkflowRuntime } from './runtime.js';
 import { atomic } from './persistence/database.js';
 import { ServiceError } from './errors.js';
@@ -27,11 +26,11 @@ export async function prepareVisualizeRunSlot(rt: WorkflowRuntime, scope: GraphS
     let commit: (() => { id: string; status: string });
     if (action === 'cancel') commit = () => rt.runs.cancel(runId!, invocationId);
     else {
-      if (rt.runs.list(scope.projectId).some(run => run.graphId === scope.graphId && run.nodeId === targetNodeId && !isTerminalRunStatus(run.status))) throw new ServiceError('ACTIVE_RUN', '后继节点已有待处理或执行中的任务。');
+      if (rt.graphs.activeNode(targetNodeId)) throw new ServiceError('ACTIVE_RUN', '后继节点已有待处理或执行中的任务。');
       const content = object(target.content);
       let preference = object(content.agentModelOverride), legacy = object(content.modelOverride);
       if (content.agentModelOverride === undefined && !legacy.model) {
-        const previous = rt.runs.list(scope.projectId).filter(r => r.graphId === scope.graphId && r.nodeId === targetNodeId).at(-1);
+        const previous = rt.runs.latestForNode(targetNodeId);
         if (previous) { const snapshot = rt.runs.snapshot(previous.id); if (snapshot.agent) preference = { backendId: snapshot.agent.backendId, model: snapshot.agent.model as unknown as Json }; else if (snapshot.model) preference = { backendId: 'codex', model: snapshot.model as unknown as Json }; }
       }
       let agent: AgentSelection | undefined;

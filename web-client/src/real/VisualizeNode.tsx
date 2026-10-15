@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Maximize, RefreshCw } from "lucide-react";
+import { ExternalLink, Maximize, RefreshCw, Upload } from "lucide-react";
 import sdkSource from "virtual:visualize-sdk";
 import { bindVisualizeIframe, validateVisualizeLogoSvg, VISUALIZE_DEFAULT_LOGO_SVG, VisualizeValidationError } from "../../../packages/protocol/src/index";
 import { NodeSignals } from './node-signals';
@@ -12,16 +12,24 @@ import { randomId } from "../adapter/random";
 import { useI18n } from "../i18n/I18nProvider";
 import { coordinateVisualizePresentation, type VisualizePresentationStatus } from './visualize-presentation';
 import { useVisualizeDetail } from './use-visualize-detail';
+import { createBatchedRefresh, GRAPH_REFRESH_BATCH_MS } from './batched-refresh';
 import "./VisualizeNode.css";
 
 type Bridge = Awaited<ReturnType<typeof openVisualizeBridge>>;
-type Entry = { revision: number; bridge: Promise<Bridge>; context?: VisualizeHostContext; tail: Promise<unknown>; failedWrites: Map<string, unknown> };
+type Entry = { revision: number; bridge: Promise<Bridge>; context?: VisualizeHostContext; stored?: VisualizeStoredNode; bootstrap?: boolean; tail: Promise<unknown>; failedWrites: Map<string, unknown> };
 /** The graph owns capabilities; changing views never recaptures accepted inputs. */
 export class VisualizeSessions {
   readonly signals = new NodeSignals();
   private entries = new Map<string, Entry>();
   private closing = new Map<string, Promise<void>>();
+  private savedRefresh?: ReturnType<typeof createBatchedRefresh>;
+  private savedCallbacks?: { changed(): void; error(reason: unknown): void };
   constructor(readonly request: Request, readonly scope: GraphScope) {}
+  notifySaved(changed: () => void, error: (reason: unknown) => void): void {
+    this.savedCallbacks = { changed, error };
+    this.savedRefresh ??= createBatchedRefresh(async () => { await this.savedCallbacks?.changed(); }, reason => this.savedCallbacks?.error(reason), GRAPH_REFRESH_BATCH_MS);
+    this.savedRefresh.schedule();
+  }
   async acquire(nodeId: string, revision: number, presentation: Pick<VisualizeHostContext, "theme" | "locale" | "viewport">): Promise<Entry> {
     await this.closing.get(nodeId);
     let entry = this.entries.get(nodeId);
@@ -32,13 +40,19 @@ export class VisualizeSessions {
       const captured = entry;
       void entry.bridge.catch(() => { if (this.entries.get(nodeId) === captured) this.entries.delete(nodeId); });
     }
-    await entry.bridge;
+    const bridge = await entry.bridge;
+    entry.stored ??= bridge.stored;
+    if (!entry.context && bridge.context) { entry.context = structuredClone(bridge.context); entry.bootstrap = true; }
     return entry;
   }
   dispatch(entry: Entry, request: VisualizeBridgeRequest, bytes?: ArrayBuffer): Promise<VisualizeBridgeResponse> {
     const write = ['saveState', 'updateForm', 'requestLayout', 'createSuccessors', 'exportAsset'].includes(request.method);
     const work = entry.tail.catch(() => undefined).then(async () => {
-      const response = await (await entry.bridge).dispatch(request, bytes);
+      let response: VisualizeBridgeResponse;
+      if (request.method === 'initialize' && entry.bootstrap && entry.context) {
+        entry.bootstrap = false;
+        response = { channel: request.channel, version: request.version, sessionId: request.sessionId, nodeId: request.nodeId, requestId: request.requestId, type: 'response', method: 'initialize', ok: true, result: structuredClone(entry.context) };
+      } else response = await (await entry.bridge).dispatch(request, bytes);
       if (write) {
         if (response.ok) entry.failedWrites.delete(request.method);
         else entry.failedWrites.set(request.method, Object.assign(new Error(response.error.message), response.error));
@@ -59,6 +73,9 @@ export class VisualizeSessions {
     entry.tail = work;
     return work;
   }
+  async keepAlive(entry: Entry): Promise<VisualizeHostContext['capabilities']> {
+    return (await entry.bridge).keepAlive();
+  }
   async settle(nodeId: string): Promise<void> {
     let tail: Promise<unknown> | undefined;
     do {
@@ -77,10 +94,13 @@ export class VisualizeSessions {
     this.closing.set(nodeId, closing); return closing;
   }
   retain(ids: string[]): void { for (const id of this.entries.keys()) if (!ids.includes(id)) this.close(id); }
-  dispose(): void { this.signals.dispose(); for (const id of this.entries.keys()) this.close(id); }
+  dispose(): void {
+    this.savedRefresh?.dispose(); this.savedRefresh = undefined; this.savedCallbacks = undefined;
+    this.signals.dispose(); for (const id of this.entries.keys()) this.close(id);
+  }
 }
 
-type VisualizeNodeProps = { owner: VisualizeSessions; nodeId: string; pageRevision?: number; theme?: "light" | "dark"; locale?: string; online: boolean; readOnly: boolean; temporary?: boolean; expanded?: boolean; standalone?: boolean; onDismiss?(): void; onChanged(): void; onAssetsChanged?(): void; onError(error: unknown): void; onOpenPrompt(): void; onOpenContent?(): void; onOpenStandalone?(): void; onOpenInputs?(): void; boundInputNames?: string[] };
+type VisualizeNodeProps = { owner: VisualizeSessions; nodeId: string; pageRevision?: number; theme?: "light" | "dark"; locale?: string; online: boolean; readOnly: boolean; temporary?: boolean; expanded?: boolean; standalone?: boolean; onDismiss?(): void; onChanged(): void; onAssetsChanged?(): void; onError(error: unknown): void; onOpenPrompt(): void; onImportFile?(file: File): Promise<void>; importDisabled?: boolean; onOpenContent?(): void; onOpenStandalone?(): void; onOpenInputs?(): void; boundInputNames?: string[] };
 
 export function VisualizeNode(props: VisualizeNodeProps) {
   const { t } = useI18n();
@@ -203,16 +223,22 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
     const responseIdentity = (request: VisualizeBridgeRequest) => ({ channel: request.channel, version: request.version, sessionId: request.sessionId, nodeId, requestId: request.requestId, type: 'response' as const, method: 'initialize' as const });
     const failure = (request: VisualizeBridgeRequest, code: "OFFLINE" | "READ_ONLY" | "INPUT_BLOCKED", message: string): VisualizeBridgeResponse => ({ channel: request.channel, version: request.version, sessionId: request.sessionId, nodeId, requestId: request.requestId, type: "response", method: request.method, ok: false, error: { code, message, retryable: code === "OFFLINE" } });
     void (async () => {
-      const stored = await owner.request<VisualizeStoredNode>(graphPath(owner.scope.projectId, owner.scope.graphId) + "/visualize/" + encodeURIComponent(nodeId));
+      if (props.pageRevision === 0) { setEmpty(true); finishRefresh(); return; }
+      const view = presentation();
+      let stored: VisualizeStoredNode | undefined;
+      if (props.pageRevision === undefined) {
+        stored = await owner.request<VisualizeStoredNode>(graphPath(owner.scope.projectId, owner.scope.graphId) + "/visualize/" + encodeURIComponent(nodeId));
+        if (!stored.page) { setEmpty(true); finishRefresh(); return; }
+      }
+      const entry = await owner.acquire(nodeId, props.pageRevision ?? stored!.content.page!.revision, view);
+      const identity = await entry.bridge; activeEntry.current = entry;
+      stored ??= entry.stored ?? await owner.request<VisualizeStoredNode>(graphPath(owner.scope.projectId, owner.scope.graphId) + "/visualize/" + encodeURIComponent(nodeId));
       if (!live || !props.canRender()) return;
       if (!visibleRef.current) { setAwaitingViewport(true); finishRefresh(); return; }
       if (!stored.page || !stored.content.page || !stored.content.form || !stored.content.state) { setEmpty(true); finishRefresh(); return; }
       const page = stored.page;
       setLogoSvg(validateVisualizeLogoSvg(page.logoSvg) === null ? page.logoSvg! : VISUALIZE_DEFAULT_LOGO_SVG);
       setInputNames(props.boundInputNames ? page.inputNames ?? [] : (page.inputNames ?? []).filter(name => !stored.content.inputBindings.some(binding => binding.name === name)));
-      const view = presentation();
-      let entry: Entry | undefined; let identity: { sessionId: string; nodeId: string };
-      entry = await owner.acquire(nodeId, stored.content.page.revision, view); identity = await entry.bridge; activeEntry.current = entry;
       if (!live) return;
       const receivePageStatus = (event: MessageEvent) => {
         const data = event.data;
@@ -256,11 +282,9 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         else if (current.readOnly && !["initialize", "readInputs"].includes(request.method)) response = failure(request, "READ_ONLY", t("The current Work Graph is read-only."));
         else {
           if (request.method === 'updateForm') owner.signals.noteWrite(nodeId, request.expected.formVersion + 1, request.cause);
-          if (request.method === 'promptSlot') owner.signals.noteContentWrite(request.params.targetNodeId, request.params.expectedContentVersion === undefined ? undefined : request.params.expectedContentVersion + 1, request.cause);
           try { response = await owner.dispatch(entry!, request, bytes); }
-          catch (error) { if (request.method === 'updateForm') owner.signals.noteWrite(nodeId, 0); if (request.method === 'promptSlot') owner.signals.noteContentWrite(request.params.targetNodeId, 0); throw error; }
+          catch (error) { if (request.method === 'updateForm') owner.signals.noteWrite(nodeId, 0); throw error; }
           if (!response.ok && request.method === 'updateForm') owner.signals.noteWrite(nodeId, 0);
-          if (!response.ok && request.method === 'promptSlot') owner.signals.noteContentWrite(request.params.targetNodeId, 0);
         }
         if (live && response.ok && request.method === "readInputs" && request.params.refresh) {
           const inputs = (response.result as { inputs: VisualizeInputSnapshot }).inputs;
@@ -268,7 +292,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
           if (live && props.canRender() && previousDigest !== inputs.digest) owner.signals.publish(nodeId, 'inputs.updated', response.result as unknown as import('../../../packages/protocol/src/index').Json, request.cause);
         }
         if (live && response.ok && response.method === 'updateForm') owner.signals.noteWrite(nodeId, response.result.form.version, request.cause);
-        if (live && response.ok && response.method === 'promptSlot') owner.signals.noteContentWrite(response.result.nodeId, response.result.contentVersion, request.cause);
+        if (live && response.ok && (response.method === 'promptSlot' || response.method === 'contentSlot')) owner.signals.noteContentWrite(response.result.nodeId, response.result.contentVersion, request.cause);
         if (response.ok && request.method === "initialize") {
           const result = response.result as VisualizeHostContext;
           response = { ...response, method: "initialize", result: { ...result, ...presentation(), capabilities: { ...result.capabilities, readOnly: current.readOnly || result.capabilities.readOnly, online: current.temporary || current.online, canCreateSuccessors: !current.temporary && current.online && !current.readOnly && result.capabilities.canCreateSuccessors, canExportAssets: !current.temporary && current.online && !current.readOnly && !!result.capabilities.canExportAssets } } };
@@ -279,15 +303,16 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
             if (response.error.code === "SESSION_EXPIRED") { owner.close(nodeId); setError(response.error.message); }
           }
           else if (request.method === "readInputs") setChanged((response.result as { inputsChanged: boolean }).inputsChanged);
-          else if (request.method === 'runSlot' || request.method === 'promptSlot') current.onChanged();
+          else if (request.method === 'runSlot' || request.method === 'promptSlot' || request.method === 'contentSlot') current.onChanged();
           else if (["saveState", "updateForm", "createSuccessors", "requestLayout", "exportAsset"].includes(request.method)) {
             setNotice(t(request.method === "createSuccessors" ? "Successors created. Run them manually when ready." : request.method === "exportAsset" ? "Output added to the Work Graph." : "Saved"));
-            current.onChanged();
+            if (request.method === 'updateForm' || request.method === 'saveState') owner.notifySaved(current.onChanged, current.onError);
+            else current.onChanged();
           }
         }
         return response;
       };
-      if (entry) {
+      if (!entry.context) {
         const bridge = await entry.bridge;
         const initialized = await owner.dispatch(entry, { channel: "openworkgraph.visualize", version: 1, sessionId: bridge.sessionId, nodeId, requestId: randomId(), type: "request", method: "initialize", expected: context.revisions, params: {} });
         if (!initialized.ok) throw Object.assign(new Error(initialized.error.message), initialized.error);
@@ -326,6 +351,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         } });
         const source = iframe.current.contentWindow;
         releaseAssets.push(owner.signals.bind(nodeId, identity.sessionId, message => {
+          if (live && message.type === 'event' && message.event.signal === 'inputs.invalidated') setChanged(true);
           if (live && source && iframe.current?.contentWindow === source && iframe.current.isConnected) source.postMessage(message, '*');
         }, () => live && visibleRef.current && latest.current.canRender() && (latest.current.online || !!latest.current.temporary)));
         pushCapabilities.current(); pushVisibility.current(); setFrameLoaded(true);
@@ -344,45 +370,39 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       else setError(message);
     });
     return () => { live = false; for (const release of releaseAssets) release(); binding.current?.dispose(); binding.current = null; attach.current = () => undefined; pushCapabilities.current = () => undefined; pushVisibility.current = () => undefined; };
-  }, [entered, props.owner, props.nodeId, props.pageRevision, props.theme, props.locale, props.temporary, retry, t]);
+    // Keep the running document until a page replacement or an explicit reload.
+    // Theme/locale and ordinary graph snapshots do not recreate its runtime.
+  }, [entered, props.owner, props.nodeId, props.pageRevision, props.temporary, retry]);
   useEffect(() => {
     if (visible && awaitingViewport) setRetry(value => value + 1);
   }, [visible, awaitingViewport]);
   useEffect(() => {
     pushVisibility.current();
-    if (!visible || !document || !props.online || props.temporary) return;
-    let live = true; let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      const entry = activeEntry.current;
-      try { if (live && visibleRef.current && entry?.context) {
-        const bridge = await entry.bridge;
-        if (!live) return;
-        const response = await props.owner.dispatch(entry, { channel: 'openworkgraph.visualize', version: 1, sessionId: bridge.sessionId, nodeId: props.nodeId, requestId: randomId(), type: 'request', method: 'readInputs', expected: { ...entry.context.revisions }, params: { refresh: false } });
-        if (live && response.ok) setChanged((response.result as { inputsChanged: boolean }).inputsChanged);
-      } } catch { /* Retry only while visible. */ }
-      if (live) timer = setTimeout(() => void poll(), 3000);
-    };
-    timer = setTimeout(() => void poll(), 3000);
-    return () => { live = false; clearTimeout(timer); };
-  }, [visible, document, props.online, props.temporary, props.owner, props.nodeId]);
+  }, [visible, document]);
   useEffect(() => {
     if (!visible || !waitingForConnection || !props.online || props.temporary) return;
     const timer = setTimeout(() => setRetry(value => value + 1), Math.min(5000, 300 * 2 ** Math.min(connectionRetries.current++, 4)));
     return () => clearTimeout(timer);
   }, [visible, waitingForConnection, props.online, props.temporary, retry]);
   useEffect(() => {
-    let live = true;
     pushCapabilities.current();
-    const entry = activeEntry.current;
-    if (visible && props.online && !props.readOnly && !props.temporary && entry?.context) {
-      void entry.bridge.then(bridge => props.owner.dispatch(entry, { channel: "openworkgraph.visualize", version: 1, sessionId: bridge.sessionId, nodeId: props.nodeId, requestId: randomId(), type: "request", method: "initialize", expected: { ...entry.context!.revisions }, params: {} })).then(response => {
-        if (!live) return;
-        if (response.ok) pushCapabilities.current();
-        else if (response.error.code === "SESSION_EXPIRED") setError(response.error.message);
-      }).catch(reason => { if (live) setNotice(messageOf(reason)); });
-    }
-    return () => { live = false; };
-  }, [visible, props.online, props.readOnly, document, props.owner, props.nodeId, props.temporary]);
+    if (!document || !props.online || props.temporary) return;
+    let live = true; let timer: ReturnType<typeof setTimeout>;
+    const keepAlive = async () => {
+      const entry = activeEntry.current;
+      try {
+        if (entry?.context) {
+          const capabilities = await props.owner.keepAlive(entry);
+          if (live && activeEntry.current === entry) entry.context.capabilities = capabilities;
+        }
+        if (live) pushCapabilities.current();
+      } catch (reason) { if (live) setNotice(messageOf(reason)); }
+      // Renew identity/permissions only; never read form/state/input snapshots.
+      if (live) timer = setTimeout(() => void keepAlive(), 300_000);
+    };
+    void keepAlive();
+    return () => { live = false; clearTimeout(timer); };
+  }, [props.online, props.readOnly, document, props.owner, props.nodeId, props.temporary]);
   const reload = () => {
     if (refreshPending.current || (!props.online && !props.temporary)) return;
     clearTimeout(refreshUnlockTimer.current); refreshUnlockTimer.current = undefined;
@@ -399,7 +419,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   const statusText = [pageStatusText, disconnected && t("Workspace disconnected · Saved page remains visible"), props.readOnly && t("Read-only"), notice, inputLoadError, missingInputNames.length > 0 && t("Reconnect inputs: {names}", { names: missingInputNames.join('、') })].filter(Boolean).join(' · ');
   return <div ref={box} className={"ow-visualize-node" + (props.expanded ? " ow-visualize-expanded" : "")} data-visualize-active={visible} data-visualize-compact={compact} data-canvas-draggable={compact ? true : undefined} data-canvas-interactive={empty || compact ? undefined : true}>
     {compact && <div className="ow-visualize-compact-logo" aria-hidden="true"><img src={'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(logoSvg)} alt="" draggable={false}/></div>}
-    {empty ? <button type="button" onClick={props.onOpenPrompt}>{t("Open prompt to generate an interactive page")}</button> : <>
+    {empty ? <VisualizeEmptyPage {...props}/> : <>
       <div className="ow-visualize-status" role="status" aria-label={t('Node page status')} data-page-status={pageStatus}>
         <span className="ow-visualize-status-message" data-canvas-draggable={props.expanded ? undefined : true}>
           <img className="ow-visualize-node-logo" src={'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(logoSvg)} width={24} height={24} alt="" aria-hidden="true" draggable={false} />
@@ -420,5 +440,30 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       </div>
       {error ? <div role="alert">{error}<button type="button" disabled={refreshLocked || (!props.online && !props.temporary)} onClick={reload}>{t("Reload page")}</button></div> : document && (visible || frameLoaded) ? <iframe ref={iframe} title={t("Interactive page")} tabIndex={0} sandbox={VISUALIZE_HTML_SANDBOX} allow={VISUALIZE_HTML_PERMISSIONS} referrerPolicy="no-referrer" srcDoc={document} onLoad={() => attach.current()}/> : <p role="status">{t("Loading interactive page…")}</p>}
     </>}
+  </div>;
+}
+
+function VisualizeEmptyPage(props: VisualizeNodeProps) {
+  const { t } = useI18n();
+  const input = useRef<HTMLInputElement>(null);
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const disabled = busy || props.readOnly || props.importDisabled || (!props.online && !props.temporary);
+  return <div className="ow-visualize-empty" aria-busy={busy}>
+    <button className="ow-visualize-empty-prompt" type="button" onClick={props.onOpenPrompt}>{t("Open prompt to generate an interactive page")}</button>
+    {props.onImportFile && <>
+      <button className="ow-visualize-upload" type="button" disabled={disabled} onPointerDown={event => event.stopPropagation()} onClick={() => input.current?.click()}>
+        <Upload size={16} aria-hidden="true"/>{t(busy ? 'Uploading…' : 'Upload .owgv')}
+      </button>
+      <input ref={input} type="file" accept=".owgv" hidden disabled={disabled} aria-label={t('Upload .owgv')} onChange={event => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = '';
+        if (!file || pending.current || disabled) return;
+        pending.current = true; setBusy(true); setError('');
+        void props.onImportFile!(file).catch(reason => setError(messageOf(reason))).finally(() => { pending.current = false; setBusy(false); });
+      }}/>
+    </>}
+    {error && <p className="ow-visualize-import-error" role="alert">{error}</p>}
   </div>;
 }

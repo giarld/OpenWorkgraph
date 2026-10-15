@@ -1,4 +1,5 @@
 import { limitNodeTitle } from '../../../packages/protocol/src/node-title';
+import { WORKGRAPH_NODE_MIN_SIZE } from '../../../packages/protocol/src/node-layout';
 import { NodeViewport } from './NodeViewport';
 import { EditorPanel } from './EditorPanel';
 import { editorFreeArea } from './editor-panel-layout';
@@ -173,7 +174,6 @@ const acceptsInput = (node: WorkNode) =>
   ["text", "image", "execution", "file", "preview", "visualize"].includes(node.type);
 const suppliesOutput = (node: WorkNode) =>
   node.type !== "execution" && node.type !== "group";
-const resizeMinimum = (node: WorkNode): Size => node.type === 'visualize' ? ({ width: 480, height: 360 }) : ({ width: 220, height: 160 });
 type MoveGesture = Extract<Gesture, { kind: 'move' }>;
 function moveGeometry(g: MoveGesture) {
   const delta = { x: (g.current.x - g.start.x) / g.viewport.k, y: (g.current.y - g.start.y) / g.viewport.k };
@@ -847,7 +847,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           g.viewport.k,
           g.corner,
           g.node.type === "image" ? g.shiftKey : g.node.type === "video",
-          resizeMinimum(g.node),
+          WORKGRAPH_NODE_MIN_SIZE,
           g.snapToGrid ? GRID_SIZE / 2 : undefined,
         ),
       });
@@ -1004,7 +1004,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               g.node.type === "image"
                 ? g.shiftKey
                 : g.node.type === "video",
-              resizeMinimum(g.node),
+              WORKGRAPH_NODE_MIN_SIZE,
               g.snapToGrid ? GRID_SIZE / 2 : undefined,
             );
             commitLayout({ [g.node.id]: next }, () => {

@@ -8,7 +8,28 @@ export const NODE_SIGNALS = ['content.changed', 'outputs.changed', 'removed',
   'run.started', 'run.succeeded', 'run.failed', 'run.cancelled',
   'invocation.completed', 'invocation.failed'] as const;
 export type NodeSignalName = typeof NODE_SIGNALS[number] | `custom.${string}`;
-export type NodeSlotName = 'inputs.refresh' | 'prompt.update' | 'run.submit' | 'run.cancel' | `custom.${string}`;
+/** One source of truth for target checks, payload validation and host dispatch.
+ * Add a content slot here with its payload kind when extending node types. */
+export const NODE_CONTENT_SLOTS = {
+  'text.update': { nodeType: 'text', schemaVersion: 1, payload: 'text', resourceMimePrefix: '' },
+  'image.update': { nodeType: 'image', schemaVersion: 1, payload: 'resource', resourceMimePrefix: 'image/' },
+  'document.update': { nodeType: 'document', schemaVersion: 1, payload: 'text', resourceMimePrefix: '' },
+  'file.update': { nodeType: 'file', schemaVersion: 1, payload: 'resource', resourceMimePrefix: '' },
+} as const satisfies Record<string, { nodeType: string; schemaVersion: number; payload: 'text' | 'resource'; resourceMimePrefix: string }>;
+export type NodeContentSlotName = keyof typeof NODE_CONTENT_SLOTS;
+export const isNodeContentSlot = (value: unknown): value is NodeContentSlotName => typeof value === 'string' && Object.hasOwn(NODE_CONTENT_SLOTS, value);
+export const nodeContentSlotMatches = (slot: NodeContentSlotName, node: { type: string; schemaVersion: number }): boolean => node.type === NODE_CONTENT_SLOTS[slot].nodeType && node.schemaVersion === NODE_CONTENT_SLOTS[slot].schemaVersion;
+export type NodeContentSlotParams = { expectedContentVersion?: number } & ({ text: string } | { resourceId: string; resourceVersion: number });
+export function validateNodeContentSlotParams(slot: NodeContentSlotName, value: unknown): NodeContentSlotParams {
+  const params = object(checkedVisualizeJson(value, 65_536));
+  const required = NODE_CONTENT_SLOTS[slot].payload === 'text' ? ['text'] : ['resourceId', 'resourceVersion'];
+  keys(params, required, ['expectedContentVersion']);
+  if (params.expectedContentVersion !== undefined && (!Number.isSafeInteger(params.expectedContentVersion) || Number(params.expectedContentVersion) < 1)) fail();
+  if (NODE_CONTENT_SLOTS[slot].payload === 'text') { if (typeof params.text !== 'string') fail(); }
+  else if (!id(params.resourceId) || !Number.isSafeInteger(params.resourceVersion) || Number(params.resourceVersion) < 1) fail();
+  return params as NodeContentSlotParams;
+}
+export type NodeSlotName = NodeContentSlotName | 'inputs.refresh' | 'prompt.update' | 'run.submit' | 'run.cancel' | `custom.${string}`;
 /** Selectors resolve against current reference edges, never execution-chain edges. */
 export interface NodeSignalSource { nodeId: string; signal: NodeSignalName }
 export interface NodeSignalConnection { id: string; source: NodeSignalSource; target: { nodeId: string; slot: NodeSlotName }; params?: Json }
@@ -41,7 +62,7 @@ const fail = (): never => { throw new VisualizeValidationError('INVALID_REQUEST'
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(v);
 export const isCustomNodeSignal = (v: unknown): v is `custom.${string}` => typeof v === 'string' && /^custom\.[a-zA-Z][a-zA-Z0-9_.-]{0,95}$/.test(v);
 export const isNodeSignal = (v: unknown): v is NodeSignalName => (NODE_SIGNALS as readonly unknown[]).includes(v) || isCustomNodeSignal(v);
-export const isNodeSlot = (v: unknown): v is NodeSlotName => ['inputs.refresh', 'prompt.update', 'run.submit', 'run.cancel'].includes(v as string) || isCustomNodeSignal(v);
+export const isNodeSlot = (v: unknown): v is NodeSlotName => isNodeContentSlot(v) || ['inputs.refresh', 'prompt.update', 'run.submit', 'run.cancel'].includes(v as string) || isCustomNodeSignal(v);
 function object(v: unknown): Record<string, unknown> { if (!v || typeof v !== 'object' || Array.isArray(v)) fail(); return v as Record<string, unknown>; }
 function keys(v: Record<string, unknown>, required: string[], optional: string[] = []) { if (required.some(k => !Object.hasOwn(v, k)) || Object.keys(v).some(k => !required.includes(k) && !optional.includes(k))) fail(); }
 export function validateNodeSignalCause(value: unknown): NodeSignalCause {

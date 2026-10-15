@@ -6,31 +6,49 @@ type ProbeResult = {path:string; value?:Inspection; error?:ErrorCode};
 /** Filesystem calls run outside the event loop and SQLite transactions.
  * Timed-out workers retain their capacity slot until actual exit (bounded stuck mounts). */
 export class ProjectProbe {
-  private readonly workers = new Map<Worker,() => void>();
+  private readonly workers = new Map<Worker,(error?: ServiceError) => void>();
+  private readonly idle: Worker[] = [];
+  private readonly inspections = new Map<string, Promise<ProbeResult[]>>();
   private closed = false;
   constructor(private readonly options: {timeoutMs?:number; maxWorkers?:number; workerUrl?:URL} = {}) {}
   private run<T>(job: unknown): Promise<T> {
-    if (this.closed || this.workers.size >= (this.options.maxWorkers ?? 4)) return Promise.reject(new ServiceError('PROJECT_UNAVAILABLE','目录探测繁忙，请稍后重试。'));
+    if (this.closed || (!this.idle.length && this.workers.size >= (this.options.maxWorkers ?? 4))) return Promise.reject(new ServiceError('PROJECT_UNAVAILABLE','目录探测繁忙，请稍后重试。'));
+    const reusable = !this.options.workerUrl;
+    const retained = this.idle.pop();
+    const worker = retained ?? new Worker(this.options.workerUrl ?? new URL('./project-probe-worker.js',import.meta.url),{workerData:reusable ? {persistent:true} : job});
+    if (!retained) {
+      worker.on('error',()=>this.workers.get(worker)?.(new ServiceError('PROJECT_UNAVAILABLE','目录探测失败；请检查本机目录。')));
+      worker.on('exit',()=>{
+        const cancel = this.workers.get(worker); this.workers.delete(worker);
+        const index = this.idle.indexOf(worker); if (index >= 0) this.idle.splice(index,1);
+        cancel?.(new ServiceError('PROJECT_UNAVAILABLE','目录探测未完成。'));
+      });
+    }
     return new Promise((resolve,reject) => {
-      const worker = new Worker(this.options.workerUrl ?? new URL('./project-probe-worker.js',import.meta.url),{workerData:job});
       let settled = false;
       const finish = (error: Error | null, value?: T) => {
-        if (settled) return; settled=true; clearTimeout(timer);
+        if (settled) return; settled=true; clearTimeout(timer); worker.off('message', onMessage);
+        if (!error && reusable && !this.closed) { this.workers.set(worker,()=>{}); this.idle.push(worker); }
         if (error) reject(error); else resolve(value!);
       };
+      const onMessage = (value:T) => finish(null,value);
       const timer = setTimeout(() => {
         finish(new ServiceError('PROJECT_UNAVAILABLE','目录探测超时，未修改项目；请检查挂载设备后重试。'));
         void worker.terminate();
       },this.options.timeoutMs ?? 5000);
-      this.workers.set(worker,() => finish(new ServiceError('PROJECT_UNAVAILABLE','服务停止，目录探测已取消。')));
-      worker.on('message',(value:T)=>finish(null,value));
-      worker.on('error',()=>finish(new ServiceError('PROJECT_UNAVAILABLE','目录探测失败；请检查本机目录。')));
-      worker.on('exit',()=>{this.workers.delete(worker);finish(new ServiceError('PROJECT_UNAVAILABLE','目录探测未完成。'));});
+      this.workers.set(worker,error => finish(error ?? new ServiceError('PROJECT_UNAVAILABLE','服务停止，目录探测已取消。')));
+      worker.once('message',onMessage);
+      if (reusable) worker.postMessage(job);
       worker.unref();
     });
   }
   async inspect(paths: string[]): Promise<(path:string) => Inspection> {
-    const results = await this.run<ProbeResult[]>({kind:'inspect',paths:[...new Set(paths)]});
+    if (this.closed) throw new ServiceError('PROJECT_UNAVAILABLE','目录探测已关闭。');
+    const unique = [...new Set(paths)], key = JSON.stringify([...unique].sort());
+    let pending = this.inspections.get(key);
+    if (!pending) { pending = this.run<ProbeResult[]>({kind:'inspect',paths:unique}); this.inspections.set(key,pending); }
+    let results: ProbeResult[];
+    try { results = await pending; } finally { if (this.inspections.get(key) === pending) this.inspections.delete(key); }
     const byPath = new Map(results.map(result=>[result.path,result]));
     for (const result of results) if (result.value && !byPath.has(result.value.canonicalPath)) byPath.set(result.value.canonicalPath,result);
     return path => {

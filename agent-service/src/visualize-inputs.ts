@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { GraphScope, Json, VisualizeInputSnapshot, VisualizeProjectFileSnapshot } from '@openworkgraph/protocol';
 import { Graphs } from './graphs.js';
-import { InputPreparation } from './inputs.js';
+import { InputPreparation, visualizeInputDigest } from './inputs.js';
 import { Resources } from './resources.js';
 import { ProjectFiles, classifyProjectFile } from './project-files.js';
 import { canonicalJson } from './persistence/repositories.js';
@@ -102,7 +102,7 @@ export class VisualizeInputs {
       this.identity(scope, nodeId);
       if (this.preparation.visualizeInputs(scope.graphId, nodeId).digest !== initial.digest) throw new ServiceError('REVISION_CONFLICT', '前驱输入在读取过程中变化，请重试。');
     });
-    const digest = createHash('sha256').update(canonicalJson({ graphId: scope.graphId, nodeId, inputs } as unknown as Json)).digest('hex');
+    const digest = visualizeInputDigest(scope.graphId, nodeId, inputs);
     return immutable({ version: 1, digest, inputs });
   }
   async open(scope: GraphScope, nodeId: string): Promise<{ session: VisualizeInputSession; value: VisualizeInputRead }> {
@@ -112,6 +112,13 @@ export class VisualizeInputs {
     const session = Object.freeze({ nodeId });
     this.sessions.set(session, { scope: structuredClone(scope), nodeId, pageRevision, inputs });
     return { session, value: { inputs, inputsChanged: false } };
+  }
+  /** Reattaching a page must reuse accepted inputs without inspecting live files. */
+  current(token: VisualizeInputSession): VisualizeInputRead {
+    const session = this.sessions.get(token);
+    if (!session) throw new ServiceError('CONFLICT', '输入会话已失效。');
+    this.check(token, session);
+    return { inputs: session.inputs, inputsChanged: false };
   }
   async read(token: VisualizeInputSession, refresh = false, expectedInputVersion?: number): Promise<VisualizeInputRead> {
     const session = this.sessions.get(token);

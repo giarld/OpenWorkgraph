@@ -88,7 +88,13 @@ export function WelcomeAgentSetup({ registry, serviceId, onBusy, onModelsChanged
     }
   }
 
-  if (!legacyAgents) return <WelcomeStepLayout actions={<WelcomeStepActions busy={saving} disabled onSkip={onComplete} onConfirm={() => {}} />}><AgentSettingsPanel key={serviceId + ':' + registry.get(serviceId)?.generation} store={agentStore} onBusyChange={onBusy} onChanged={onModelsChanged} onReady={onComplete}/></WelcomeStepLayout>;
+  if (!legacyAgents) return <WelcomeStepLayout contentClassName="welcome-agent-settings" actions={<WelcomeStepActions busy={saving} disabled onSkip={onComplete} onConfirm={() => {}} />}>
+    <header>
+      <span className="welcome-agent-icon"><Bot size={22} aria-hidden="true" /></span>
+      <h2>{t('Set up Agent')}</h2>
+    </header>
+    <AgentSettingsPanel key={serviceId + ':' + registry.get(serviceId)?.generation} store={agentStore} onBusyChange={onBusy} onChanged={onModelsChanged} onReady={onComplete}/>
+  </WelcomeStepLayout>;
 
   return <WelcomeStepLayout actions={<WelcomeStepActions busy={saving} disabled={!ready} onSkip={onComplete} onConfirm={() => void save()} />}>
     <header>

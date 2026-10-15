@@ -206,6 +206,10 @@ export interface VisualizeBridgeMethods {
     params: { targetNodeId: string; invocationId: string; prompt: string; expectedContentVersion?: number };
     result: { nodeId: string; contentVersion: number; executionRevision: number };
   };
+  contentSlot: {
+    params: { targetNodeId: string; invocationId: string; slot: import('./node-signals.js').NodeContentSlotName; update: import('./node-signals.js').NodeContentSlotParams };
+    result: { nodeId: string; contentVersion: number; executionRevision: number };
+  };
   /** Creates a resource node directly; optional asset fields only occur in legacy receipts. */
   exportAsset: {
     params: { name: string; mime: string; bytes: number };

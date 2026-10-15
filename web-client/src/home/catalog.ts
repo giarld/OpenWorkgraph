@@ -22,7 +22,7 @@ export const homeZhCN: Record<string, string> = {
   'Bring your materials, thinking, and conclusions together.': '让收集的资料、思考过程与结论在一处汇合。',
   'A workflow of your own': '属于你的工作流',
   'Give your next project a shape that works for you.': '为下一个项目，找到适合自己的组织方式。',
-  'Less hassle. Greater efficiency. Bring ideas to life faster.': '更少操心，更高效率，让创意更快落地。',
+  'AI is the magic of creation. Workgraph puts the wand in your hands.': 'AI 是创造万象的魔法，Workgraph 是执掌魔法的魔杖。',
 };
 
 Object.assign(zhCN, homeZhCN);

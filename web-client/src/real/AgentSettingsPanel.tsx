@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ChevronDown, RefreshCw, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
 import type { AgentBackendConfiguration, AgentPlatform, AgentConfigurationUpdate } from '../../../packages/protocol/src/agents';
-import { AgentConfigurationForm } from './AgentConfigurationForm';
 import { agentModelKey, initialEffort, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
 import { useI18n } from '../i18n/I18nProvider';
 import './AgentSettingsPanel.css';
 import { AgentMark } from './AgentMark';
 import { backendConfigurationFields, type BackendConfigurationFields } from './agent-settings-fields';
+
+const installationGuides: Record<string, string> = {
+  codex: 'https://developers.openai.com/codex/cli/',
+  'claude-code': 'https://code.claude.com/docs/en/setup',
+};
 
 /** New configuration sections use an independent gateway, never old settings keys. */
 export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady, onBusyChange }: {
@@ -41,6 +45,9 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   const onboardingDefaultBlocked = !!onReady && !(chosenBackend && chosenBackend.revision > 0 && chosenBackend.schemaVersion > 0);
   const chosenModel = chosen && state.resources[chosen.backendId]?.models?.find(item => item.id === chosen.model.model);
   const disabled = readOnly || busy;
+  useEffect(() => {
+    if (onReady && state.mode === 'agents') for (const item of state.descriptors) void store.checkInstallation(item.id);
+  }, [store, !!onReady, state.mode, state.descriptors]);
   useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => { if (!selected && backend) setSelected(backend.id); }, [selected, backend?.id]);
   useEffect(() => { setEditing(undefined); }, [backend?.id, settings]);
@@ -61,10 +68,10 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     catch (value) { setError(value instanceof Error ? value.message : String(value)); await store.refresh(); }
     finally { setBusy(false); }
   }
-  const saveBackend = async (options = fields?.options) => {
-    if (!backend || !fields || !options || !settings) return;
+  const saveBackend = async () => {
+    if (!backend || !fields || !settings) return;
     const update: AgentConfigurationUpdate = { section: 'backend', backendId: backend.id, expectedRevision: settings.revision, schemaVersion: settings.schemaVersion,
-      enabled: fields.enabled, options, models: fields.models };
+      enabled: fields.enabled, options: fields.options, models: fields.models };
     await store.saveConfiguration(update);
     setEditing(undefined);
   };
@@ -93,6 +100,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     </fieldset>
     <div className="agent-settings-section agent-editor">
     <div className="agent-settings-toolbar"><h3>{text('Agent 与模型', 'Agents and models')}</h3><button type="button" disabled={disabled || !configurationSupported} aria-pressed={sortMode} onClick={() => setSortMode(value => !value)}>{text('调整 Agent 顺序', 'Reorder Agents')}</button></div>
+    {onReady && <p>{text('选择你常用的 Agent，单选或多选', 'Choose the Agents you use most, one or more.')}</p>}
     <div className="agent-backend-list" role="group" aria-label={text('Agent 模型管理', 'Agent model management')}>
       {(order ?? agents.map(item => item.id)).map((id, index, list) => {
         const item = state.descriptors.find(entry => entry.id === id); if (!item) return null;
@@ -107,6 +115,10 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
         }}><button type="button" aria-pressed={backend?.id === id} onClick={() => setSelected(id)}><AgentMark descriptor={item}/><span className="agent-backend-name">{item.name}</span>{configured && <span className="agent-configured"><Check size={16} aria-hidden="true"/>{text('已配置', 'Configured')}</span>}{state.resources[id]?.settings?.enabled === false && <span>{text('已停用', 'Disabled')}</span>}</button>
           <button type="button" aria-label={text('上移 ', 'Move up ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === 0} onClick={() => move(id, -1)}><ArrowUp size={16}/></button>
           <button type="button" aria-label={text('下移 ', 'Move down ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === list.length - 1} onClick={() => move(id, 1)}><ArrowDown size={16}/></button>
+          {onReady && state.resources[id]?.installation === 'missing' && <div className="agent-installation-help">
+            <span>{text('工作空间未检测到安装', 'Installation not found in this Workspace')}</span>
+            {installationGuides[id] && <a href={installationGuides[id]} target="_blank" rel="noopener noreferrer">{text('安装 ', 'Install ') + item.name}<ExternalLink size={14} aria-hidden="true"/></a>}
+          </div>}
         </div>;
       })}
       {(sortMode || order) && <button type="button" disabled={disabled || !configurationSupported || !order} onClick={() => void save(async () => { await store.saveConfiguration({ section: 'order', backendIds: order!, expectedRevision: configuration!.order.revision }); setOrder(undefined); }, text('Agent 顺序已保存。', 'Agent order saved.'))}>{text('保存顺序', 'Save order')}</button>}
@@ -117,12 +129,6 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
       {!backendUnsupported && !settings && !resource?.settingsError && <p role="status">{text('正在加载插件配置…', 'Loading plugin settings…')}</p>}
       {!backendUnsupported && fields && settings && <>
         <label className="management-checkbox"><input type="checkbox" disabled={disabled} checked={fields.enabled} onChange={event => update({ enabled: event.target.checked })}/><span>{text('启用 ', 'Enable ') + backend.name}</span></label>
-        <details className="agent-native-settings" open={onReady ? true : undefined}>
-          <summary><span>{text('原生配置', 'Native configuration')}</span><ChevronDown size={16} aria-hidden="true"/></summary>
-        {configuration?.platform ? <AgentConfigurationForm descriptor={backend} platform={configuration.platform as AgentPlatform} value={fields.options} disabled={disabled} onChange={options => update({ options })} onSubmit={value => void save(async () => {
-          await saveBackend(value.options);
-        }, text('插件配置已保存。', 'Plugin settings saved.'))}/> : <p role="status">{text('工作空间未提供设备平台，暂不能编辑原生选项。模型管理仍可保存。', 'The Workspace did not report its device platform. Native option editing is unavailable; model management can still be saved.')}</p>}
-        </details>
         <fieldset className="agent-model-settings" disabled={disabled || !configurationSupported}><legend>{text('模型可见性', 'Model visibility')}</legend>
           {backend.models.allowCustom && <label>{text('手动模型 ID', 'Custom model ID')}<input aria-label={text('手动模型 ID', 'Custom model ID')} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); const id = event.currentTarget.value.trim(); if (id && !fields.models.some(model => model.id === id)) update({ models: [...fields.models, { id, visible: true }] }); event.currentTarget.value = ''; } }}/><span>{text('按 Enter 添加', 'Press Enter to add')}</span></label>}
 

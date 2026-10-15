@@ -2,11 +2,18 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentQueryContext } from '../contracts.js';
 import { AgentError } from '../errors.js';
 import { claudeDeviceEnvironment } from './environment.js';
+import { claudeCommand } from './command.js';
 
 /** Device options are never accepted from browser configuration or frozen snapshots. */
 export interface ClaudeDeviceOptions { executable?: string; launcherArgs?: readonly string[]; queryTimeoutMs?: number; stopTimeoutMs?: number; runTimeoutMs?: number }
+/** Private spawn evidence, never inferred from generic runtime failures. */
+export class ClaudeExecutableNotFoundError extends AgentError {
+  constructor() { super('runtime_unavailable'); }
+}
 export function launchClaude(options: ClaudeDeviceOptions, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv = process.env): ChildProcessWithoutNullStreams {
-  return spawn(options.executable ?? 'claude', [...(options.launcherArgs ?? []), ...args], { cwd, env: claudeDeviceEnvironment(env), stdio: 'pipe', detached: process.platform !== 'win32', windowsHide: true });
+  const environment = claudeDeviceEnvironment(env);
+  const command = claudeCommand(options.executable, [...(options.launcherArgs ?? []), ...args], environment);
+  return spawn(command.executable, command.args, { cwd, env: environment, stdio: 'pipe', shell: false, detached: process.platform !== 'win32', windowsHide: true });
 }
 export function signalClaude(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): boolean {
   if (!child.pid) return false;
@@ -47,15 +54,18 @@ export async function claudeVersion(options: ClaudeDeviceOptions, context: Agent
     const fail = (reason: 'protocol_error' | 'runtime_unavailable') => { failed = true; clearTimeout(timer); abort(); reject(new AgentError(reason)); };
     native.stdout.on('data', chunk => { bytes += chunk.length; if (bytes > 4096) fail('protocol_error'); else output += chunk.toString('utf8'); });
     native.stderr.on('data', chunk => { bytes += chunk.length; if (bytes > 4096) fail('protocol_error'); });
-    native.once('error', () => fail('runtime_unavailable'));
+    native.once('error', (error: NodeJS.ErrnoException) => {
+      failed = true; clearTimeout(timer); abort();
+      reject(error.code === 'ENOENT' ? new ClaudeExecutableNotFoundError() : new AgentError('runtime_unavailable'));
+    });
     native.once('close', (code, signal) => {
       clearTimeout(timer); if (failed) return;
       if (context.signal.aborted) { reject(context.signal.reason); return; }
       const match = /^([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)/.exec(output.trim());
       if (code !== 0 || signal || !match || claudeGroupAlive(native)) { reject(new AgentError(code === 0 ? 'protocol_error' : 'runtime_unavailable')); return; }
       const parts = match[1]!.split('.').map(Number);
-      // This is the measured CLI surface, not a promise about older releases.
-      if (parts[0]! < 2 || parts[0] === 2 && (parts[1]! < 1 || parts[1] === 1 && parts[2]! < 296)) { reject(new AgentError('capability_unsupported')); return; }
+      // Minimum accepted CLI version: 2.1.0.
+      if (parts[0]! < 2 || parts[0] === 2 && parts[1]! < 1) { reject(new AgentError('capability_unsupported')); return; }
       resolve(match[1]!);
     });
   });

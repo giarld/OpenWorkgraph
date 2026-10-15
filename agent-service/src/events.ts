@@ -4,8 +4,11 @@ import type { Json, ServiceEvent } from "@openworkgraph/protocol";
 import { Auth } from "./auth.js";
 import { ServiceError } from "./errors.js";
 import { atomic } from "./persistence/database.js";
+import { subscribeDatabaseChanges } from './persistence/changes.js';
 export class Events {
   private readonly closers = new Map<() => void, string>();
+  private readonly flushers = new Set<() => void>();
+  private stopNotifications: (() => void) | undefined;
   constructor(
     readonly db: DatabaseSync,
     readonly serviceId: string,
@@ -132,6 +135,8 @@ export class Events {
       stopped = true;
       clearInterval(timer);
       this.closers.delete(close);
+      this.flushers.delete(flush);
+      if (!this.flushers.size) { this.stopNotifications?.(); this.stopNotifications = undefined; }
       response.end();
     };
     const flush = () => {
@@ -176,13 +181,18 @@ export class Events {
         close();
       }
     };
-    const timer = setInterval(flush, 100);
+    // In-process commits wake streams immediately; cross-process writes and
+    // revocation are reconciled without 100ms polling per connection.
+    const timer = setInterval(flush, 1000);
     timer.unref();
     this.closers.set(close, session.id);
+    this.flushers.add(flush);
+    this.stopNotifications ??= subscribeDatabaseChanges(this.db, () => { for (const flush of [...this.flushers]) flush(); });
     response.on("close", close);
     flush();
   }
   close(): void {
+    this.stopNotifications?.(); this.stopNotifications = undefined;
     for (const close of [...this.closers.keys()]) close();
   }
 }

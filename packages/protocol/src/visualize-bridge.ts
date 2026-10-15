@@ -3,11 +3,11 @@ import type { VisualizeBridgeRequest, VisualizeBridgeResponse, VisualizeCapabili
 import { VISUALIZE_BRIDGE_VERSION, VISUALIZE_ERROR_CODES, isVisualizeFeatureSelection } from './visualize.js';
 import { checkedVisualizeJson, validateVisualizeSize, VisualizeValidationError } from './visualize-validation.js';
 import { isSkillIdentity, isSkillName } from './skills.js';
-import { validateNodeSignalCommand, validateNodeSignalCause } from './node-signals.js';
+import { validateNodeSignalCommand, validateNodeSignalCause, isNodeContentSlot, validateNodeContentSlotParams } from './node-signals.js';
 
 export const VISUALIZE_BRIDGE_REQUEST_BYTES = 2_097_152;
 export const VISUALIZE_BRIDGE_RESPONSE_BYTES = 50_331_648;
-const methods = ['initialize', 'readInputs', 'saveState', 'updateForm', 'createSuccessors', 'requestLayout', 'exportAsset', 'signals', 'runSlot', 'promptSlot'];
+const methods = ['initialize', 'readInputs', 'saveState', 'updateForm', 'createSuccessors', 'requestLayout', 'exportAsset', 'signals', 'runSlot', 'promptSlot', 'contentSlot'];
 const revisionKeys = ['pageRevision', 'formVersion', 'stateVersion', 'inputVersion', 'executionRevision', 'layoutRevision'];
 const fail = (message: string): never => { throw new VisualizeValidationError('INVALID_REQUEST', message); };
 function record(value: unknown): Record<string, unknown> {
@@ -46,6 +46,11 @@ export function validateVisualizeBridgeRequest(value: unknown): VisualizeBridgeR
   const params = record(request.params);
   switch (request.method) {
     case 'signals': validateNodeSignalCommand(params); break;
+    case 'contentSlot':
+      keys(params, ['targetNodeId', 'invocationId', 'slot', 'update']);
+      if (!text(params.targetNodeId) || !text(params.invocationId) || !isNodeContentSlot(params.slot)) fail('Invalid content slot');
+      validateNodeContentSlotParams(params.slot as import('./node-signals.js').NodeContentSlotName, params.update);
+      break;
     case 'promptSlot':
       keys(params, ['targetNodeId', 'invocationId', 'prompt'], ['expectedContentVersion']);
       if (!text(params.targetNodeId) || !text(params.invocationId) || typeof params.prompt !== 'string' || params.prompt.length > 1_048_576 || (params.expectedContentVersion !== undefined && !integer(params.expectedContentVersion, 1))) fail('Invalid prompt slot');
@@ -123,7 +128,7 @@ export function validateVisualizeBridgeResponse(value: unknown): VisualizeBridge
     const result = record(response.result);
     switch (response.method) {
       case 'signals': keys(result, ['value']); break;
-      case 'promptSlot':
+      case 'contentSlot': case 'promptSlot':
         keys(result, ['nodeId', 'contentVersion', 'executionRevision']);
         if (!text(result.nodeId) || !integer(result.contentVersion, 1) || !integer(result.executionRevision)) fail('Invalid prompt slot result');
         break;

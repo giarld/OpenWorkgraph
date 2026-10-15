@@ -1,10 +1,33 @@
-import { useEffect, useLayoutEffect, useState } from 'react';
-import { ArrowDown, ArrowRight, Code2, FileText, GitBranch, Moon, Sparkles, Sun } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDown, ArrowRight, Bot, Box, ChartNoAxesCombined, Code2, Database, FileText, Film, GitBranch, Globe, Image, Moon, Music2, Palette, Presentation, Sun } from 'lucide-react';
 import { useI18n } from '../i18n/I18nProvider';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher';
 import webClientPackage from '../../package.json';
 import './catalog';
 import './home.css';
+
+// Shared SVG coordinates keep every connection attached at all viewport sizes.
+const resourcePath = (x: number, y: number) => `M 136 240 C 214 240 ${x - 128} ${y} ${x - 30} ${y}`;
+
+const creationResources = [
+  { id: 'code', Icon: Code2, x: 278, y: 62, tone: 'blue' },
+  { id: 'document', Icon: FileText, x: 314, y: 174, tone: 'green' },
+  { id: 'image', Icon: Image, x: 414, y: 116, tone: 'violet' },
+  { id: 'website', Icon: Globe, x: 538, y: 52, tone: 'blue' },
+  { id: 'video', Icon: Film, x: 552, y: 166, tone: 'rose' },
+  { id: 'presentation', Icon: Presentation, x: 432, y: 240, tone: 'amber' },
+  { id: 'design', Icon: Palette, x: 560, y: 278, tone: 'violet' },
+  { id: 'audio', Icon: Music2, x: 416, y: 364, tone: 'rose' },
+  { id: 'data', Icon: Database, x: 314, y: 306, tone: 'blue' },
+  { id: 'chart', Icon: ChartNoAxesCombined, x: 540, y: 396, tone: 'green' },
+  { id: 'model', Icon: Box, x: 278, y: 418, tone: 'amber' },
+  { id: 'workflow', Icon: GitBranch, x: 428, y: 458, tone: 'green' },
+].map((resource, index) => ({
+  ...resource,
+  path: resourcePath(resource.x, resource.y),
+  period: 18 + (index % 5) * 2,
+  phase: index * 2.4,
+}));
 
 export function HomePage() {
   const { t, language } = useI18n();
@@ -12,6 +35,7 @@ export function HomePage() {
     try { return localStorage.getItem('openworkgraph:theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
   });
   const [hidden, setHidden] = useState(document.hidden);
+  const creationRef = useRef<SVGSVGElement>(null);
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#181715' : '#f4f2ed');
@@ -19,9 +43,49 @@ export function HomePage() {
   }, [theme]);
   useEffect(() => { document.title = t('OpenWorkgraph · Visual Agent Workbench'); }, [t]);
   useEffect(() => {
-    const sync = () => setHidden(document.hidden);
+    const svg = creationRef.current;
+    if (!svg) return;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const nodes = svg.querySelectorAll<SVGGElement>('.home-resource');
+    const wires = svg.querySelectorAll<SVGPathElement>('.home-wires path');
+    const signals = svg.querySelectorAll<SVGPathElement>('.home-signal');
+    let frame = 0;
+    let elapsed = 0;
+    let previousTime: number | null = null;
+
+    const positionResources = (moving: boolean) => {
+      creationResources.forEach((resource, index) => {
+        const angle = elapsed / resource.period * Math.PI * 2 + resource.phase;
+        const x = resource.x + (moving ? Math.cos(angle) * 6 : 0);
+        const y = resource.y + (moving ? Math.sin(angle) * 8 : 0);
+        const path = resourcePath(x, y);
+        nodes[index].setAttribute('transform', `translate(${x} ${y})`);
+        wires[index].setAttribute('d', path);
+        signals[index].setAttribute('d', path);
+      });
+    };
+    const animate = (time: number) => {
+      if (previousTime !== null) elapsed += (time - previousTime) / 1000;
+      previousTime = time;
+      // Update nodes and both wire layers together without rerendering the page.
+      positionResources(true);
+      frame = requestAnimationFrame(animate);
+    };
+    const sync = () => {
+      setHidden(document.hidden);
+      cancelAnimationFrame(frame);
+      previousTime = null;
+      if (reducedMotion.matches) positionResources(false);
+      else if (!document.hidden) frame = requestAnimationFrame(animate);
+    };
+    sync();
     document.addEventListener('visibilitychange', sync);
-    return () => document.removeEventListener('visibilitychange', sync);
+    reducedMotion.addEventListener('change', sync);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('visibilitychange', sync);
+      reducedMotion.removeEventListener('change', sync);
+    };
   }, []);
   return <div className="home-page">
     <header className="home-header">
@@ -46,16 +110,31 @@ export function HomePage() {
         </div>
         <div className="home-visual" data-paused={hidden}>
           <div className="home-graph" aria-hidden="true">
-            <svg className="home-wires" viewBox="0 0 600 480" fill="none">
-              <path d="M140 130 C240 130 190 242 294 242 M140 350 C240 350 190 242 294 242 M294 242 C415 242 370 130 478 130 M294 242 C415 242 370 350 478 350"/>
-              <path className="home-flow" d="M140 130 C240 130 190 242 294 242 M140 350 C240 350 190 242 294 242 M294 242 C415 242 370 130 478 130 M294 242 C415 242 370 350 478 350"/>
-              <circle cx="294" cy="242" r="105" className="home-orbit"/>
+            <svg ref={creationRef} className="home-creation" viewBox="0 0 600 510" fill="none" focusable="false">
+              <g className="home-wires">
+                {creationResources.map(resource => <path key={resource.id} d={resource.path}/>)}
+              </g>
+              <g className="home-flow">
+                {creationResources.map((resource, index) => <path
+                  key={resource.id}
+                  className={`home-signal home-tone-${resource.tone}`}
+                  d={resource.path}
+                  pathLength={100}
+                  style={{ animationDelay: `${index * -.65}s` }}
+                />)}
+              </g>
+              {creationResources.map(({ id, Icon, x, y, tone }) => <g key={id} className={`home-resource home-tone-${tone}`} transform={`translate(${x} ${y})`}>
+                <rect className="home-resource-card" x={-30} y={-30} width={60} height={60} rx={16}/>
+                <circle className="home-resource-port" cx={-30} cy={0} r={3}/>
+                <Icon x={-13} y={-13} size={26} strokeWidth={1.65}/>
+              </g>)}
+              <g className="home-agent" transform="translate(88 240)">
+                <rect className="home-agent-halo" x={-61} y={-61} width={122} height={122} rx={36}/>
+                <rect className="home-agent-card" x={-48} y={-48} width={96} height={96} rx={27}/>
+                <Bot x={-26} y={-26} size={52} strokeWidth={1.5}/>
+                <circle className="home-agent-port" cx={48} cy={0} r={4}/>
+              </g>
             </svg>
-            <div className="home-node home-node-idea"><span className="home-node-icon"><FileText size={21}/></span><strong>{t('An idea')}</strong><span className="home-node-lines"/></div>
-            <div className="home-node home-node-plan"><span className="home-node-icon"><GitBranch size={21}/></span><strong>{t('A clear plan')}</strong><span className="home-node-lines"/></div>
-            <div className="home-node home-node-code"><span className="home-node-icon"><Code2 size={21}/></span><strong>{t('Build together')}</strong><span className="home-node-lines"/></div>
-            <div className="home-node home-node-result"><span className="home-node-icon"><Sparkles size={21}/></span><strong>{t('Something real')}</strong><span className="home-node-lines"/></div>
-            <div className="home-hub"><img src="/brand/openworkgraph-mark.svg" width="76" height="76" alt=""/></div>
           </div>
         </div>
       </section>
@@ -66,6 +145,6 @@ export function HomePage() {
         </div>
       </section>
     </main>
-    <footer className="home-footer"><span>OpenWorkgraph</span><span>{t('Less hassle. Greater efficiency. Bring ideas to life faster.')}</span></footer>
+    <footer className="home-footer"><span>OpenWorkgraph</span><span>{t('AI is the magic of creation. Workgraph puts the wand in your hands.')}</span></footer>
   </div>;
 }

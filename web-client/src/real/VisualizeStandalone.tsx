@@ -9,6 +9,8 @@ import { graphPath, messageOf, type Request } from './contracts';
 import { TemporaryCanvasStore } from './temporary-store';
 import { VisualizeNode, VisualizeSessions } from './VisualizeNode';
 import { VisualizeNodePreview } from './VisualizeNodePreview';
+import { createAuthoritativeLoader } from './authoritative-loader';
+import { createBatchedRefresh, GRAPH_REFRESH_BATCH_MS } from './batched-refresh';
 
 function standaloneSelection(): { scope: GraphScope; nodeId: string; temporary: boolean; theme: 'light' | 'dark' } | undefined {
   const query = new URLSearchParams(location.search);
@@ -34,11 +36,12 @@ export function VisualizeStandalone() {
   }, [selection]);
   useEffect(() => {
     if (!selection) return;
-    let active = true, sequence = 0;
+    let active = true;
     const { scope, temporary } = selection;
     const registry = temporary ? undefined : new ConnectionRegistry();
     let sessions: VisualizeSessions | undefined, stream: EventSubscription | undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
+    let graphRefresh: ReturnType<typeof createBatchedRefresh> | undefined;
     setOwner(undefined); setGraph(undefined); setOnline(false); setError('');
     const fail = (reason: unknown) => { if (active) setError(messageOf(reason)); };
     const start = async () => {
@@ -53,30 +56,35 @@ export function VisualizeStandalone() {
         transport = new Transport(registry!, scope.serviceId);
         request = transport.request.bind(transport);
       }
-      const load = async () => {
-        const ticket = ++sequence;
+      const readAuthority = createAuthoritativeLoader(async () => {
         const cursor = transport ? (await request<{ cursor: string }>('/v1/events/cursor')).cursor : '';
         const [snapshot, projects, runs] = await Promise.all([
           request<GraphSnapshot>(graphPath(scope.projectId, scope.graphId)),
           transport ? request<Project[]>('/v1/projects/all') : Promise.resolve(undefined),
           transport ? request<import('../../../packages/protocol/src/index').Run[]>(graphPath(scope.projectId, scope.graphId) + '/runs') : Promise.resolve([]),
         ]);
-        if (active && ticket === sequence) {
+        return {cursor,snapshot,projects,runs};
+      }, ({snapshot,projects,runs}) => {
           sessions?.signals.observe(snapshot, runs);
           sessions?.retain(snapshot.nodes.filter(node => node.type === 'visualize').map(node => node.id));
           setGraph(snapshot); setError('');
           setProjectActive(!projects || projects.some(project => project.projectId === scope.projectId && project.state === 'active' && project.availability === 'available'));
-        }
-        return cursor;
-      };
+      }, () => { if (!active) throw Error('Page session ended'); });
+      const load = async () => (await readAuthority()).cursor;
       refresh.current = load;
+      graphRefresh = createBatchedRefresh(load, reason => { fail(reason); stream?.reconnect(); }, GRAPH_REFRESH_BATCH_MS);
       sessions = new VisualizeSessions(request, scope);
       const cursor = await load();
       if (!active) return;
       setOwner(sessions);
       if (transport) {
         stream = new EventSubscription(transport, scope.serviceId, {
-          onEvent: async event => { if (event.projectId === scope.projectId) await load(); },
+          onEvent: async event => {
+            if (event.projectId !== scope.projectId || event.type.startsWith('canvas_resource.')) return;
+            sessions?.signals.observeEvent(event);
+            if (event.type === 'graph.changed') graphRefresh?.schedule();
+            else void load().catch(reason => { fail(reason); stream?.reconnect(); });
+          },
           reloadSnapshot: load,
           onError: fail,
           onStatus: status => { if (active) setOnline(status === 'connected'); },
@@ -91,7 +99,7 @@ export function VisualizeStandalone() {
     void start().catch(fail);
     const focus = () => { void refresh.current().catch(fail); };
     window.addEventListener('focus', focus);
-    return () => { active = false; ++sequence; clearInterval(timer); stream?.stop(); sessions?.dispose(); registry?.dispose(); refresh.current = async () => undefined; window.removeEventListener('focus', focus); };
+    return () => { active = false; clearInterval(timer); graphRefresh?.dispose(); stream?.stop(); sessions?.dispose(); registry?.dispose(); refresh.current = async () => undefined; window.removeEventListener('focus', focus); };
   }, [selection, retry, t]);
   const node = graph?.nodes.find(item => item.id === selection?.nodeId && item.type === 'visualize');
   const content = object(node?.content);
@@ -102,7 +110,7 @@ export function VisualizeStandalone() {
     {!selection || (graph && !node) ? <p role="alert">{t('The visualization node is unavailable.')}</p> : <>
       {error && <div role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry')}</button></div>}
       {owner && graph && node ? <VisualizeNodePreview owner={owner} nodeId={node.id} contentVersion={node.contentVersion}>
-        <VisualizeNode owner={owner} nodeId={node.id} pageRevision={Number(object(content.page).revision ?? 0)} theme={selection.theme} locale={locale} online={online} readOnly={!projectActive || graph.archived || graph.trashed || node.readOnly} temporary={selection.temporary} expanded standalone onChanged={() => { void refresh.current().catch(reason => setError(messageOf(reason))); }} onError={reason => setError(messageOf(reason))} onOpenPrompt={() => setError(t('Generate an interactive page before downloading it.'))}/>
+        <VisualizeNode owner={owner} nodeId={node.id} pageRevision={Number(object(content.page).revision ?? 0)} theme={selection.theme} locale={locale} online={online} readOnly={!projectActive || graph.archived || graph.trashed || node.readOnly} temporary={selection.temporary} expanded standalone onChanged={() => refresh.current().then(() => undefined).catch(reason => setError(messageOf(reason)))} onError={reason => setError(messageOf(reason))} onOpenPrompt={() => setError(t('Generate an interactive page before downloading it.'))}/>
       </VisualizeNodePreview> : !error && <p role="status">{t('Loading interactive page…')}</p>}
     </>}
   </main>;

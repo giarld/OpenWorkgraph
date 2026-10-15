@@ -182,8 +182,12 @@ export function createCodexPlugin(options: CodexPluginOptions = {}): AgentPlugin
     },
     listModels: context => codexQuery(privateOptions, context, async rpc => { await connect(rpc); return listModels(rpc); }),
     async diagnose(context): Promise<AgentAvailability> {
-      try { const runtimeVersion = await codexQuery(privateOptions, context, initialize); return { status: 'unknown', reason: null, message: '原生握手成功；尚未执行模型调用。', runtimeVersion }; }
-      catch (error) { if (context.signal.aborted) throw error; return { status: 'unavailable', reason: failure(error).reason, message: failure(error).message }; }
+      try { const runtimeVersion = await codexQuery(privateOptions, context, initialize); return { status: 'unknown', reason: null, message: '原生握手成功；尚未执行模型调用。', runtimeVersion, installation: 'installed' }; }
+      catch (error) {
+        if (context.signal.aborted) throw error;
+        const missing = codexQueryFailure(error)?.details.reason === 'executable_not_found';
+        return { status: 'unavailable', reason: failure(error).reason, message: failure(error).message, installation: missing ? 'missing' : 'unknown' };
+      }
     },
     evaluateTask(requirements) {
       try { normalizeConfiguration(descriptor.configuration, requirements.options, 1, requirements.platform); } catch { return { status: 'unavailable', reason: 'invalid_configuration', message: '原生权限配置无效。' }; }

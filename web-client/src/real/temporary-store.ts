@@ -1,5 +1,5 @@
 import { portableSkillContent } from "./project-file-mentions";
-import { documentSnapshot, recordDocumentVersion, recordVisualizeInteraction, travelDocumentVersion, type VersionedDocument } from './document-versions';
+import { documentSnapshot, recordDocumentVersion, recordVisualizeInteraction, travelDocumentVersion, nextVisualizeVersions, type VersionedDocument } from './document-versions';
 import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '../../../packages/protocol/src/index';
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
@@ -283,7 +283,7 @@ export function applyTemporaryOperations(source: GraphSnapshot, operations: Grap
 
 export class TemporaryCanvasStore {
   private database?: Promise<IDBDatabase>;
-  private visualizeSessions = new Map<string, { graphId: string; nodeId: string; presentation: Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> }>();
+  private visualizeSessions = new Map<string, { graphId: string; nodeId: string; pageRevision: number; presentation: Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> }>();
   private open() {
     return this.database ??= new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(TEMPORARY_DATABASE, 1);
@@ -630,15 +630,17 @@ export class TemporaryCanvasStore {
         return prior.result;
       }) as Promise<T>;
     }
-    if ((suffix === '/visualize-assets/install' || suffix === '/visualize-assets/import') && body !== undefined) {
-      const command = body as { package: unknown; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string; assertCurrent?: () => void };
-      if (!command || typeof command.idempotencyKey !== 'string' || !command.idempotencyKey || !Number.isFinite(command.x) || !Number.isFinite(command.y)) throw Error(translate('Invalid visualization paste request.'));
+    const fill = /^[/]visualize[/]([^/]+)[/]import$/.exec(suffix);
+    if ((suffix === '/visualize-assets/install' || suffix === '/visualize-assets/import' || fill) && body !== undefined) {
+      const command = body as { package: unknown; x: number; y: number; expectedContentVersion?: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string; assertCurrent?: () => void };
+      if (!command || typeof command.idempotencyKey !== 'string' || !command.idempotencyKey || (fill ? !Number.isSafeInteger(command.expectedContentVersion) || Number(command.expectedContentVersion) < 1 : !Number.isFinite(command.x) || !Number.isFinite(command.y))) throw Error(translate('Invalid visualization paste request.'));
+      if (fill && ['serviceId', 'projectId', 'graphId', 'nodeId', 'x', 'y'].some(key => Object.hasOwn(command, key))) throw Error(translate('Invalid visualization paste request.'));
       const pkg = await validateVisualizeAssetPackageBytes(command.package);
       const { package: _package, assertCurrent, ...intent } = command;
-      const key = 'visualize-install:' + command.idempotencyKey, signature = JSON.stringify(intent);
+      const key = (fill ? 'visualize-fill:' + fill[1] + ':' : 'visualize-install:') + command.idempotencyKey, signature = JSON.stringify(intent);
       const packageDigest = bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(pkg))));
       const mapping = new Map(pkg.resources.map(resource => [visualizeLibraryResourceKey(resource.resourceId, resource.version), { resourceId: randomId(), resourceVersion: 1 }]));
-      const installed = remapVisualizeAssetPackage(pkg, mapping), nodeId = randomId();
+      const installed = remapVisualizeAssetPackage(pkg, mapping), nodeId = fill ? fill[1]! : randomId();
       const staged: Record<string, TemporaryResource> = Object.create(null);
       for (const resource of installed.resources) staged[resource.resourceId] = { name: resource.name, blob: new Blob([Uint8Array.from(atob(resource.base64), char => char.charCodeAt(0))], { type: resource.mime }) };
       const candidate: GraphSnapshot['nodes'][number] = { id: nodeId, type: 'visualize', schemaVersion: 1, contentVersion: 1, readOnly: false, x: command.x, y: command.y, width: installed.node.width, height: installed.node.height, content: { ...installed.node.content, title: installed.node.title } as unknown as Json };
@@ -652,8 +654,21 @@ export class TemporaryCanvasStore {
         if (record.graph.archived || record.graph.trashed) throw Object.assign(Error(translate('Archived or trashed Work Graphs are read-only.')), { code: 'READ_ONLY' });
         if (record.graph.executionRevision !== command.expectedExecutionRevision || record.graph.layoutRevision !== command.expectedLayoutRevision) throw conflict();
         const next = structuredClone(record.graph);
-        next.nodes.push(candidate);
-        next.executionRevision++; next.layoutRevision++; next.updatedAt = new Date().toISOString();
+        if (fill) {
+          const target = next.nodes.find(node => node.id === nodeId);
+          if (!target || target.type !== 'visualize') throw Object.assign(Error(translate('The visualization node is unavailable.')), { code: 'NOT_FOUND' });
+          if (target.readOnly) throw Object.assign(Error(translate('The node does not exist or is read-only.')), { code: 'READ_ONLY' });
+          const previous = validateVisualizeNodeContent(target.content);
+          if (target.contentVersion !== command.expectedContentVersion || previous.page) throw conflict();
+          const versions = nextVisualizeVersions(record, nodeId), content = installed.node.content;
+          target.content = { ...content, title: installed.node.title, inputBindings: previous.inputBindings,
+            page: { ...content.page!, revision: versions.page },
+            form: { ...content.form!, pageRevision: versions.page, version: versions.form },
+            state: { ...content.state!, pageRevision: versions.page, version: versions.state },
+          } as unknown as Json;
+          target.contentVersion++;
+        } else { next.nodes.push(candidate); next.layoutRevision++; }
+        next.executionRevision++; next.updatedAt = new Date().toISOString();
         Object.assign(record.resources, staged); recordDocumentVersion(record, next);
         const result = { nodeId, snapshot: record.graph };
         (record.serviceOperations ??= {})[key] = { signature, packageDigest, result };
@@ -698,7 +713,7 @@ export class TemporaryCanvasStore {
       if (!sessionId) {
         const stored = await this.request<import('../../../packages/protocol/src/visualize').VisualizeStoredNode>(graphPath('temporary', id) + '/visualize/' + nodeId);
         if (!stored.page) throw Error(translate('The saved interactive page is unavailable.'));
-        const sessionId = randomId(); this.visualizeSessions.set(sessionId, { graphId: id, nodeId, presentation: body as Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> });
+        const sessionId = randomId(); this.visualizeSessions.set(sessionId, { graphId: id, nodeId, pageRevision: stored.content.page!.revision, presentation: body as Pick<VisualizeHostContext, 'theme' | 'locale' | 'viewport'> });
         return { sessionId, nodeId } as T;
       }
       const session = this.visualizeSessions.get(sessionId);
@@ -711,12 +726,13 @@ export class TemporaryCanvasStore {
       return this.access(id, request.method !== 'initialize' && request.method !== 'readInputs', record => {
         const identity = { channel: request.channel, version: request.version, sessionId, nodeId, requestId: request.requestId, type: 'response', method: request.method };
         const failure = (code: string, message: string) => ({ ...identity, ok: false, error: { code, message, retryable: false } });
-        const prior = record.serviceOperations?.[key];
-        if (prior) return prior.signature === signature ? prior.result : failure('IDEMPOTENCY_CONFLICT', 'Idempotency conflict');
         const node = record.graph.nodes.find(item => item.id === nodeId);
         if (!node) return failure('SESSION_EXPIRED', translate('Node not found'));
         const content = validateVisualizeNodeContent(node.content);
         if (!content.page || !content.form || !content.state) return failure('SESSION_EXPIRED', translate('The saved interactive page is unavailable.'));
+        if (content.page.revision !== session.pageRevision) return failure('SESSION_EXPIRED', translate('The visualization page changed. Reload it before editing.'));
+        const prior = record.serviceOperations?.[key];
+        if (prior) return prior.signature === signature ? prior.result : failure('IDEMPOTENCY_CONFLICT', 'Idempotency conflict');
         const revisions = () => ({ pageRevision: content.page!.revision, formVersion: content.form!.version, stateVersion: content.state!.version, inputVersion: 1, executionRevision: record.graph.executionRevision, layoutRevision: record.graph.layoutRevision });
         const inputs = { version: 1, digest: bytesToHex(sha256(new TextEncoder().encode('[]'))), inputs: [] };
         if (request.method !== 'initialize' && request.expected.pageRevision !== content.page.revision) return failure('REVISION_CONFLICT', translate('The visualization page changed. Reload it before editing.'));
