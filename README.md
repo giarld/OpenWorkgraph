@@ -4,7 +4,9 @@
 > OpenWorkgraph 是基于无限画布思想的全能可视化智能体工作台产品，除了图、文、视频生成、软件开发等工作，还能组织各种用途的 Agent 工作流。
 >
 > 可视化智能体工作台
+>
 > Visual Agent Workbench
+>
 > AI 是创造万象的魔法，Workgraph 是执掌魔法的魔杖。
 
 简体中文 | [English](README.en.md)
