@@ -28,7 +28,7 @@ type Candidate = { baseVersion: number; content: Json; state: 'pending' | 'accep
 type Changes = { state: 'changed' | 'unchanged' | 'unknown'; issues: Json[] };
 type PublicMetadata = { imageRoute: InputSnapshot['imageRoute']; inputMode: string | null; requestId: string | null };
 type Capacity = { capacity: number; occupied: number; available: number };
-type Question = { id: string; text: string; options: string[]; mode: AgentQuestionMode; groupId?: string };
+type Question = { id: string; text: string; options: string[]; mode: AgentQuestionMode; groupId?: string; allowOther?: boolean };
 export type QuestionAnswers = Record<string, string | string[]>;
 export interface RunDetailsData {
   history: History | null; snapshot: InputSnapshot | null; changes: Changes | null;
@@ -80,9 +80,9 @@ export function interactionQuestions(interaction: Interaction): Question[] {
       !Array.isArray(q.options) || q.options.length > 128 || !q.options.every(option => typeof option === 'string' && !!option.trim() && option.length <= 16000) ||
       !['text', 'single', 'multiple'].includes(String(mode)) || (q.strict === true && mode === 'text') ||
       (mode !== 'text' && (!q.options.length || new Set(q.options).size !== q.options.length)) ||
-      (q.groupId !== undefined && typeof q.groupId !== 'string')) return [];
+      (q.groupId !== undefined && typeof q.groupId !== 'string') || (q.allowOther !== undefined && typeof q.allowOther !== 'boolean')) return [];
     result.push({ id: q.id, text: q.text, options: q.options as string[], mode: mode as AgentQuestionMode,
-      ...(typeof q.groupId === 'string' ? { groupId: q.groupId } : {}) });
+      ...(typeof q.groupId === 'string' ? { groupId: q.groupId } : {}), ...(q.allowOther === true ? { allowOther: true } : {}) });
   }
   return new Set(result.map(q => q.id)).size === result.length ? result : [];
 }
@@ -93,7 +93,7 @@ export function questionAnswer(interaction: Interaction, answers: QuestionAnswer
     const values = typeof answer === 'string' ? [answer] : answer;
     if (!Array.isArray(values) || !values.length || values.length > 64 || values.some(value => typeof value !== 'string' || !value.trim() || value.length > 16000) ||
       new Set(values).size !== values.length || (q.mode !== 'multiple' && values.length !== 1) ||
-      (q.mode !== 'text' && values.some(value => !q.options.includes(value)))) throw new Error(translate('Please answer every question completely (up to 16,000 characters each).'));
+      (q.mode !== 'text' && !q.allowOther && values.some(value => !q.options.includes(value)))) throw new Error(translate('Please answer every question completely (up to 16,000 characters each).'));
     return [q.id, [...values]];
   });
   if (!questions.length) throw new Error(translate('The question format is not recognized, so it cannot be submitted. Check again later or contact the Workspace administrator.'));
@@ -217,19 +217,21 @@ function RunSectionSummary({ children }: { children: React.ReactNode }) {
 function FrozenInputs({ snapshot }: { snapshot: InputSnapshot }) {
   const { t } = useI18n();
   const route=snapshot.imageRoute;
+  const model=snapshot.agent?.model ?? snapshot.model;
   const inputModes: Record<string, string> = { text: 'Text to image', image: 'Image to image', text_image: 'Text and image to image' };
-  return <><p>{route?.type==='api' ? t('Image generation API') + ' · ' + route.providerId + ' / ' + route.modelId + ' · ' + t(snapshot.inputMode ? inputModes[snapshot.inputMode] ?? 'Unknown mode' : 'Unknown mode') : snapshot.model ? (route?.type==='codex' ? t('Codex image generation') + ' · ' : '') + snapshot.model.model + ' · ' + (snapshot.model.reasoningEffort || t('Default reasoning effort')) : t('Snapshot model unavailable')}</p><pre>{snapshot.prompt}</pre>
+  return <><p>{route?.type==='api' ? t('Image generation API') + ' · ' + route.providerId + ' / ' + route.modelId + ' · ' + t(snapshot.inputMode ? inputModes[snapshot.inputMode] ?? 'Unknown mode' : 'Unknown mode') : model ? (route?.type==='codex' ? t('Codex image generation') + ' · ' : snapshot.agent ? snapshot.agent.backendId + ' · ' : '') + model.model + ' · ' + (model.reasoningEffort || t('Default reasoning effort')) : t('Snapshot model unavailable')}</p><pre>{snapshot.prompt}</pre>
     {snapshot.resources.map((resource, i) => <article key={i}><strong>{t('Reference {number} · {kind}', { number: i + 1, kind: resource.kind })}</strong>{resource.text !== null && <pre>{resource.text}</pre>}{resource.resource && <p className="muted">{resource.resource.mime} · v{resource.resource.version}</p>}</article>)}</>;
 }
 export function InteractionForm({ interaction, disabled, onReply, onError }: { interaction: Interaction; disabled: boolean; onReply: (answer: Json) => void; onError: (error: unknown) => void }) {
   const { t } = useI18n();
   const [answers, setAnswers] = useState<QuestionAnswers>(() => Object.create(null));
+  const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>(() => Object.create(null));
   const questions = interactionQuestions(interaction);
   const formId = useId();
   const approval = interactionApproval(interaction);
   let valid = false;
   try { questionAnswer(interaction, answers); valid = true; } catch { /* Incomplete answers disable submission. */ }
-  useEffect(() => { setAnswers(Object.create(null)); }, [interaction.id, interaction.epoch]);
+  useEffect(() => { setAnswers(Object.create(null)); setOtherAnswers(Object.create(null)); }, [interaction.id, interaction.epoch]);
   useEffect(() => { if (interaction.kind === 'question' && questions.length === 0) onError(new Error(t('The question format is not recognized, so it cannot be submitted. Check again later or contact the Workspace administrator.'))); }, [interaction.id, interaction.kind, questions.length, onError, t]);
   const { reason, command } = approval;
   return <section className={`interaction-box${interaction.kind === 'approval' ? ' run-approval' : ''}`} aria-label={t('Current question or approval awaiting action')}>
@@ -246,14 +248,22 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
           {!!q.options.length && <span className="muted" style={{ display: 'block' }}>{t('Optional answers: {options}', { options: q.options.join(' / ') })}</span>}
           <textarea aria-label={q.text} value={typeof answers[q.id] === 'string' ? answers[q.id] as string : ''} maxLength={16000} required
             style={{ width: '100%', minHeight: 72, boxSizing: 'border-box' }} onChange={event => setAnswers(current => ({ ...current, [q.id]: event.target.value }))} />
-        </> : q.options.map(option => <label key={option} style={{ display: 'block' }}>
+        </> : q.options.map(option => <label key={option} style={{ display: 'flex', flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', gap: 8 }}>
           <input type={q.mode === 'single' ? 'radio' : 'checkbox'} name={formId + ':' + q.id} value={option}
+            style={{ width: 'auto', flexShrink: 0, margin: 0 }}
             checked={Array.isArray(answers[q.id]) ? (answers[q.id] as string[]).includes(option) : answers[q.id] === option}
-            onChange={event => { const checked = event.target.checked; setAnswers(current => {
+            onChange={event => { const checked = event.target.checked; if (q.mode === 'single') setOtherAnswers(current => ({ ...current, [q.id]: '' })); setAnswers(current => {
               const values = Array.isArray(current[q.id]) ? current[q.id] as string[] : [];
               return { ...current, [q.id]: q.mode === 'single' ? [option] : checked ? [...values, option] : values.filter(value => value !== option) };
             }); }} />{option}
         </label>)}
+        {q.allowOther && q.mode !== 'text' && <label style={{ display: 'block' }}>
+          {t('Other answer')}
+          <input type="text" value={otherAnswers[q.id] ?? ''} maxLength={16000} onChange={event => {
+            const value = event.target.value; setOtherAnswers(current => ({ ...current, [q.id]: value }));
+            setAnswers(current => { const selected = Array.isArray(current[q.id]) ? (current[q.id] as string[]).filter(item => q.options.includes(item)) : []; return { ...current, [q.id]: q.mode === 'single' ? value ? [value] : [] : [...new Set([...selected, ...(value ? [value] : [])])] }; });
+          }} />
+        </label>}
       </fieldset>)}
       <button className="primary-button" disabled={disabled || !valid}>{t('Submit answer')}</button>
     </form> : <>
@@ -400,6 +410,10 @@ export function RunsPanel(props: RunsPanelProps) {
     onClick={() => { setRefreshAnimationKey(n => n + 1); setError(''); setRevision(n => n + 1); onChanged(); }}>
     <RefreshIcon animationKey={refreshAnimationKey} />
   </button>;
+  const stopControl = selected && <>
+    {mode === 'details' && ['preparing', 'running', 'waiting_answer', 'waiting_approval', 'reconciling'].includes(selected.status) && (confirmCancel?.id === selected.id ? <div role="group" aria-label={t('Confirm stopping the run')} className="interaction-box"><p>{t('Stop the current run? The Workspace must still confirm the stop after the request is sent. Closing this panel does not stop the task.')}</p><div className="button-row"><button type="button" className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm stop')}</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Continue run')}</button></div></div> : <button type="button" className="danger-button run-detail-stop" disabled={readOnly || busy} onClick={() => setConfirmCancel(selected)}>{t('Stop run')}</button>)}
+    {mode === 'details' && selected.status === 'cancelling' && <button type="button" className="danger-button run-detail-stop" disabled>{t('Waiting for cancellation confirmation')}</button>}
+  </>;
   return <>
     {queueHeader && <div className="service-panel-heading">
       <h2>{t('Workspace queue')}</h2>
@@ -438,6 +452,7 @@ export function RunsPanel(props: RunsPanelProps) {
       {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
       {selected?.status === 'accepted' && ['manual','confirm'].includes(selected.executionStart ?? '') && <button className="secondary-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), {idempotencyKey:randomId()}, 'POST'))}>{t('Withdraw this submission')}</button>}
       {selected?.status === 'paused_restore' && <div className="interaction-box" role="group" aria-label={t('Paused after restore')}><p>{t('The Workspace will check the saved inputs before continuing this task.')}</p><button type="button" className="primary-button" disabled={readOnly || busy || loading} aria-busy={continuingKey === selectedKey} onClick={() => continueTask(selected)}>{t(continuingKey === selectedKey ? 'Continuing restored run…' : 'Continue restored run')}</button></div>}
+      {!current && stopControl}
       {selected && current && <>
         {current.snapshot?.imageRoute?.type==='api' ? <p>{t('Generation method: Image generation API · {provider} / {model} · Configuration v{config} / Credential v{credential}', { provider: current.snapshot.imageRoute.providerId, model: current.snapshot.imageRoute.modelId, config: current.snapshot.imageRoute.configRevision, credential: current.snapshot.imageRoute.credentialRevision })}</p> : current.snapshot?.imageRoute?.type==='codex' ? <p>{t('Generation method: Codex image generation')}</p> : null}
         {current.publicMetadata?.requestId && <p>{t('Provider request ID: {id}', { id: current.publicMetadata.requestId })}</p>}
@@ -451,7 +466,7 @@ export function RunsPanel(props: RunsPanelProps) {
           {paused && <button className="run-detail-jump" type="button" aria-label={t('Jump to latest record')} title={t('Jump to latest record')} onClick={() => logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })}><ArrowDown size={18} aria-hidden="true" /></button>}
         </div> : <p>{t('The Workspace has no progress records yet.')}</p>}
           {(!current.history || current.history.historyState === 'cleared' || !current.history.records.length) && <RunInteractionRecords interactions={current.interactions} active={current.active} disabled={readOnly || busy || !!current.errors.length || !['waiting_answer', 'waiting_approval'].includes(selected.status)} onReply={answer => void mutate(async () => { await replyToInteraction(request, selected, current.active!, answer, randomId()); setSubmittedInteraction(current.active!.id); })} submittedId={submittedInteraction} onError={onError}/>}
-          {mode === 'details' && selected.status === 'running' && (confirmCancel?.id === selected.id ? <div role="group" aria-label={t('Confirm stopping the run')} className="interaction-box"><p>{t('Stop the current run? The Workspace must still confirm the stop after the request is sent. Closing this panel does not stop the task.')}</p><div className="button-row"><button type="button" className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), { idempotencyKey: randomId() }, 'POST'))}>{t('Confirm stop')}</button><button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirmCancel(null)}>{t('Continue run')}</button></div></div> : <button type="button" className="danger-button run-detail-stop" disabled={readOnly} onClick={() => setConfirmCancel(selected)}>{t('Stop run')}</button>)}
+          {stopControl}
           {selected.chainControl === 'active' && (confirmStopChain === selectedKey ? <div role="group" aria-label={t('Confirm stopping the entire schedule')} className="interaction-box run-detail-chain-control"><p>{t('Stop all unfinished tasks in this chain? Waiting nodes are cancelled immediately, running nodes wait for stop confirmation, and completed outputs are kept.')}</p><div className="button-row"><button className="danger-button" disabled={readOnly || busy} onClick={() => void mutate(async () => { await request(pathFor(selected, 'cancel-chain'), {idempotencyKey:randomId()}, 'POST'); setConfirmStopChain(null); })}>{t('Confirm stop entire schedule')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmStopChain(null)}>{t('Continue execution')}</button></div></div> : <button className="danger-button run-detail-chain-control" disabled={readOnly} onClick={() => setConfirmStopChain(selectedKey)}>{t('Stop entire schedule')}</button>)}
           {selected.chainControl === 'stopping' && <p className="run-detail-chain-control" role="status">{t('The entire schedule has stopped and is waiting for running nodes to confirm stopping…')}</p>}
           {selected.chainControl === 'stopped' && <p className="run-detail-chain-control" role="status">{t('This chain has stopped.')}</p>}

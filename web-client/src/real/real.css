@@ -131,7 +131,7 @@
   gap: 6px;
   margin: 10px 0;
 }
-.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
+.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.management-panel input[type=checkbox]):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
   min-width: 0;
   width: 100%;
 }
@@ -527,7 +527,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .graph-browser { font-size: 12px; margin: 0 0 10px; }
 .graph-browser > summary { padding: 10px 0; cursor: pointer; color: var(--muted); }
 .real-node-sidebar { margin: 0 -16px; }
-.real-node-sidebar .sidebar-search { position: sticky; top: 0; z-index: 9; margin-top: 4px; }
+.real-node-sidebar .node-outline-controls { position: sticky; top: 0; z-index: 9; display: flow-root; background: var(--panel); }
 .real-sidebar .ow-project-file-controls,
 .real-sidebar .ow-assets-controls { top: 54px; }
 .real-node-sidebar .node-list { overflow: visible; }

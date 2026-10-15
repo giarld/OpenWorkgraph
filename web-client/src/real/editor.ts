@@ -1,9 +1,10 @@
+import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import { syncSkillReferences, validSkillReferences } from "./project-file-mentions";
 import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
 import { projectOperations } from './optimistic-operations';
 import { randomId } from "../adapter/random";
 import type { GraphSnapshot, GraphOperation, Json, Request, Run } from "./contracts";
-import type { ImageRoute } from '../../../packages/protocol/src/index';
+import type { ImageRoute, ModelSelection } from '../../../packages/protocol/src/index';
 import { graphPath, errorCode, messageOf } from "./contracts";
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
@@ -35,6 +36,7 @@ type CommandBody = { idempotencyKey: string; expectedExecutionRevision: number; 
 type PendingCommand = { operations: GraphOperation[]; epoch: number; body?: CommandBody; before?: GraphSnapshot; visualizeDraft?: Draft; resolve: (graph: GraphSnapshot) => void; reject: (error: unknown) => void };
 export const COMMAND_MAX_ATTEMPTS = 3;
 /** Service snapshots are authoritative. Drafts never become server state without CAS acknowledgement. */
+export interface RunSubmissionOptions { agent?: AgentSelection; modelOverride?: ModelSelection; imageRoute?: ImageRoute; preserveHistoricalOutputs?: boolean }
 export class GraphEditor {
   private state: EditorState;
   private confirmed: GraphSnapshot;
@@ -529,7 +531,16 @@ export class GraphEditor {
     });
     await this.flushDrafts(draftId);
   }
-  async run(nodeId: string, kind: string, modelOverride?: unknown, imageRoute?: ImageRoute, preserveHistoricalOutputs?: boolean) {
+  async run(nodeId: string, kind: string, selectionOrOverride?: RunSubmissionOptions | ModelSelection, imageRoute?: ImageRoute, preserveHistoricalOutputs?: boolean) {
+    const options = selectionOrOverride && typeof selectionOrOverride === 'object' && ['agent', 'modelOverride', 'imageRoute', 'preserveHistoricalOutputs'].some(key => key in selectionOrOverride)
+      ? structuredClone(selectionOrOverride as RunSubmissionOptions)
+      : structuredClone({ modelOverride: selectionOrOverride, imageRoute, preserveHistoricalOutputs });
+    const captured = options as RunSubmissionOptions;
+    if (captured.agent && captured.modelOverride) throw Error('Agent selection and legacy modelOverride cannot coexist.');
+    if (kind === 'image_generation' && captured.agent) throw Error('Image runs use their existing image route.');
+    const { agent, modelOverride } = captured;
+    imageRoute = captured.imageRoute;
+    preserveHistoricalOutputs = captured.preserveHistoricalOutputs;
     if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
     const epoch = this.connectionEpoch;
     await this.flush();
@@ -568,7 +579,7 @@ export class GraphEditor {
       try {
         return await this.request<Run>(graphPath(current.projectId, current.graphId) + "/runs", {
           nodeId, kind, idempotencyKey: randomId(), expectedExecutionRevision: current.executionRevision,
-          ...(modelOverride ? { modelOverride } : {}),
+          ...(agent ? { agent } : modelOverride ? { modelOverride } : {}),
           ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
           ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
         });

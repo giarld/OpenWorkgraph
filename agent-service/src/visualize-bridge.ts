@@ -12,6 +12,8 @@ export interface VisualizePresentation { theme: VisualizeHostContext['theme']; l
 export interface PreparedVisualizeSuccessors { commit(): VisualizeBridgeMethods['createSuccessors']['result']; dispose(): Promise<void> }
 export interface PreparedVisualizeAssetExport { commit(): VisualizeBridgeMethods['exportAsset']['result']; dispose(): Promise<void> }
 export interface VisualizeBridgeOptions {
+  preparePromptSlot?: (scope: GraphScope, nodeId: string, request: Extract<VisualizeBridgeRequest, { method: 'promptSlot' }>, principal: string) => Promise<{ commit(): VisualizeBridgeMethods['promptSlot']['result']; dispose(): Promise<void> }>;
+  prepareRunSlot?: (scope: GraphScope, nodeId: string, request: Extract<VisualizeBridgeRequest, { method: 'runSlot' }>, principal: string) => Promise<{ commit(): VisualizeBridgeMethods['runSlot']['result']; dispose(): Promise<void> }>;
   prepareAssetExport?: (scope: GraphScope, nodeId: string, request: Extract<VisualizeBridgeRequest, { method: 'exportAsset' }>, bytes: Uint8Array) => Promise<PreparedVisualizeAssetExport>;
   now?: () => number;
   /** P08 supplies the real atomic creation business; no fallback creates a Run. */
@@ -90,7 +92,7 @@ export class VisualizeBridge {
     if (request.method === 'saveState') relevant.push('stateVersion');
     if (request.method === 'requestLayout') relevant.push('layoutRevision');
     if (request.method === 'readInputs' && request.params.refresh) relevant.push('inputVersion');
-    if (request.method === 'createSuccessors' || request.method === 'exportAsset') relevant.push('formVersion', 'inputVersion');
+    if (request.method === 'createSuccessors' || request.method === 'exportAsset' || request.method === 'runSlot' || request.method === 'promptSlot') relevant.push('formVersion', 'inputVersion');
     if (relevant.some(key => actual[key] !== request.expected[key])) reject('REVISION_CONFLICT', '页面内容或工作图已变化，请重新初始化。');
   }
   async handle(scope: GraphScope, nodeId: string, principal: string, value: unknown, guard: Guard = work => work(), bytes?: Uint8Array): Promise<VisualizeBridgeResponse> {
@@ -123,6 +125,7 @@ export class VisualizeBridge {
   }
   private async execute(session: Session, request: VisualizeBridgeRequest, payload: string, guard: Guard, bytes?: Uint8Array): Promise<unknown> {
     const current = guard(() => this.check(session));
+    if (request.method === 'signals') return reject('INVALID_REQUEST', '信号连接由当前节点活动会话管理。');
     const receipt = session.receipts.get(request.requestId);
     if (receipt) { if (receipt.payload !== payload) reject('IDEMPOTENCY_CONFLICT', '同一请求标识不能使用不同内容。'); return receipt.result; }
     if (request.method === 'initialize') { session.value = await this.inputs.read(session.input); return guard(() => this.context(this.check(session), session)); }
@@ -135,6 +138,24 @@ export class VisualizeBridge {
     const replay = guard(() => { if (this.readOnly(session)) reject('READ_ONLY', '当前页面只读。'); return this.pages.graphs.repo.replay(namespace, request.requestId, operation); });
     if (replay !== undefined) return replay;
     guard(() => this.expected(current, session, request));
+    if (request.method === 'promptSlot') {
+      if (!this.options.preparePromptSlot) reject('INPUT_BLOCKED', '当前工作空间尚未支持提示词更新槽。');
+      const prepared = await this.options.preparePromptSlot!(session.scope, session.nodeId, request, session.principal);
+      try { return guard(() => atomic(this.pages.graphs.db, () => {
+        this.expected(this.check(session), session, request);
+        if (this.readOnly(session)) reject('READ_ONLY', '当前页面只读。');
+        return this.pages.graphs.repo.idempotent(namespace, request.requestId, operation, () => { const result = prepared.commit(); validateVisualizeBridgeResponse(this.response(request, result)); return result as unknown as Json; });
+      })); } finally { await prepared.dispose(); }
+    }
+    if (request.method === 'runSlot') {
+      if (!this.options.prepareRunSlot) reject('INPUT_BLOCKED', '当前工作空间尚未支持执行槽。');
+      const prepared = await this.options.prepareRunSlot!(session.scope, session.nodeId, request, session.principal);
+      try { return guard(() => atomic(this.pages.graphs.db, () => {
+        this.expected(this.check(session), session, request);
+        if (this.readOnly(session)) reject('READ_ONLY', '当前页面只读。');
+        return this.pages.graphs.repo.idempotent(namespace, request.requestId, operation, () => { const result = prepared.commit(); validateVisualizeBridgeResponse(this.response(request, result)); return result as unknown as Json; });
+      })); } finally { await prepared.dispose(); }
+    }
     if (request.method === 'exportAsset') {
       if (!this.options.prepareAssetExport) reject('INPUT_BLOCKED', '当前工作空间尚未支持资产导出。');
       const prepared = await this.options.prepareAssetExport!(session.scope, session.nodeId, request, bytes!);

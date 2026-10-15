@@ -107,7 +107,7 @@ export function AgentConfigurationForm({ descriptor, value, onChange, onSubmit, 
         const error = validation.errors[field.name];
         const describedBy = [field.description ? id + ':help' : '', !available ? id + ':platform' : '', error ? id + ':error' : ''].filter(Boolean).join(' ') || undefined;
         const shared = { id, disabled: !available || blocked, required: !!field.required, 'aria-invalid': !!error, 'aria-describedby': describedBy };
-        return <div key={field.name} className="management-field">
+        return <div key={field.name} className={field.type === 'boolean' ? 'management-field management-field-boolean' : 'management-field'}>
           <label htmlFor={id}>{field.label}</label>
           {field.type === 'boolean' ? <input {...shared} required={false} type="checkbox" checked={selected === true} onChange={event => update(field, event.target.checked)} />
             : field.type === 'enum' ? <select {...shared} value={typeof selected === 'string' ? selected : ''} onChange={event => update(field, event.target.value)}>
@@ -123,8 +123,9 @@ export function AgentConfigurationForm({ descriptor, value, onChange, onSubmit, 
       {Object.entries(validation.errors).filter(([name]) => !fields.some(field => field.name === name)).map(([name, error]) => <p key={name} role="alert">{name}: {error}</p>)}
       <button type="submit" className="primary-button" disabled={blocked || !!Object.keys(validation.errors).length}>{t('Save configuration')}</button>
     </fieldset>
-    <fieldset className="management-controls" disabled><legend>{t('Agent capabilities')}</legend>
-      {(Object.keys(capabilityLabels) as Capability[]).map(key => <label key={key}><input type="checkbox" checked={descriptor.capabilities[key]} readOnly disabled />{t(capabilityLabels[key])}</label>)}
+    <details className="agent-capabilities"><summary>{t('Agent capabilities')}</summary><fieldset className="management-controls" disabled aria-label={t('Agent capabilities')}>
+      {(Object.keys(capabilityLabels) as Capability[]).map(key => <label className="management-checkbox" key={key}><input type="checkbox" checked={descriptor.capabilities[key]} readOnly disabled />{t(capabilityLabels[key])}</label>)}
     </fieldset>
+    </details>
   </form>;
 }

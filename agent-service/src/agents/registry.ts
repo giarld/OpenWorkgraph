@@ -1,7 +1,8 @@
-import { AGENT_PLUGIN_API_VERSION } from '@openworkgraph/protocol';
+import { AGENT_PLUGIN_API_VERSION, AGENT_FAILURE_REASONS } from '@openworkgraph/protocol';
 import type { AgentAvailability, AgentDescriptor, AgentPlatform, FrozenAgentSelection } from '@openworkgraph/protocol';
 import type { AgentAdapter, AgentAdapterDependencies, AgentPlugin, AgentTaskRequirements } from './contracts.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText, validateConfigurationSchema, validPlatform } from './configuration.js';
+import { validateSelectionGeneration } from './workspace-configuration-validation.js';
 import { AgentError, agentError } from './errors.js';
 
 const booleanCapabilities = ['cancellation', 'restoredRunStart', 'conversationContinuation', 'reattach', 'approvals', 'userInput', 'historyTools', 'nativeSkills', 'configuredSkills', 'dynamicSkillCommands', 'visualize'] as const;
@@ -18,7 +19,9 @@ function stringList(value: unknown, allowed: readonly string[], nonempty = false
   return Array.isArray(value) && (!nonempty || value.length > 0) && value.length <= allowed.length && value.every(v => typeof v === 'string' && allowed.includes(v)) && new Set(value).size === value.length;
 }
 export function validateAgentDescriptor(value: unknown): asserts value is AgentDescriptor {
-  if (!isPlainRecord(value) || !exactKeys(value, ['id', 'name', 'description', 'implementationVersion', 'apiVersion', 'configuration', 'capabilities', 'models']) || !validAgentId(value.id) || !publicText(value.name, 256) || !publicText(value.description) || typeof value.implementationVersion !== 'string' || !validSemver(value.implementationVersion) || value.apiVersion !== AGENT_PLUGIN_API_VERSION) throw new AgentError('protocol_error');
+  if (!isPlainRecord(value) || !exactKeys(value, ['id', 'name', 'description', 'implementationVersion', 'apiVersion', 'configuration', 'capabilities', 'models', 'logo', 'projectPermissionModes']) || !validAgentId(value.id) || !publicText(value.name, 256) || !publicText(value.description) || typeof value.implementationVersion !== 'string' || !validSemver(value.implementationVersion) || value.apiVersion !== AGENT_PLUGIN_API_VERSION) throw new AgentError('protocol_error');
+  if (value.logo !== undefined && (!isPlainRecord(value.logo) || !exactKeys(value.logo, ['symbol', 'color']) || !publicText(value.logo.symbol, 16) || [...value.logo.symbol].length > 4 || value.logo.symbol !== value.logo.symbol.trim() || /[\p{Cc}\p{Cf}]/u.test(value.logo.symbol) || typeof value.logo.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(value.logo.color))) throw new AgentError('protocol_error');
+  if (value.projectPermissionModes !== undefined && !stringList(value.projectPermissionModes, ['read-only', 'workspace-write', 'danger-full-access'], true)) throw new AgentError('protocol_error');
   validateConfigurationSchema(value.configuration);
   const caps = value.capabilities; const models = value.models;
   if (!isPlainRecord(caps) || !exactKeys(caps, ['kinds', 'inputKinds', 'platforms', ...booleanCapabilities]) || !stringList(caps.kinds, kinds, true) || !stringList(caps.inputKinds, inputKinds) || booleanCapabilities.some(key => typeof caps[key] !== 'boolean') || (caps.platforms !== undefined && (!Array.isArray(caps.platforms) || caps.platforms.length === 0 || caps.platforms.length > 3 || !caps.platforms.every(validPlatform) || new Set(caps.platforms).size !== caps.platforms.length))) throw new AgentError('protocol_error');
@@ -29,7 +32,7 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 export function safeAvailability(value: unknown): AgentAvailability {
-  const reasons = ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown'];
+  const reasons: readonly string[] = AGENT_FAILURE_REASONS;
   if (!isPlainRecord(value) || !exactKeys(value, ['status', 'reason', 'message', 'runtimeVersion']) || !['available', 'unavailable', 'unknown'].includes(String(value.status)) || !(value.reason === null || reasons.includes(String(value.reason))) || !publicText(value.message, 1024) || (value.status === 'available' && value.reason !== null) || (value.runtimeVersion !== undefined && (typeof value.runtimeVersion !== 'string' || !/^[0-9A-Za-z.+_-]{1,128}$/.test(value.runtimeVersion)))) throw new AgentError('protocol_error');
   return { status: value.status as AgentAvailability['status'], reason: value.reason as AgentAvailability['reason'], message: value.message, ...(value.runtimeVersion === undefined ? {} : { runtimeVersion: value.runtimeVersion as string }) };
 }
@@ -45,10 +48,10 @@ export function evaluateAgentTask(plugin: AgentPlugin, requirements: AgentTaskRe
 export class AgentRegistry {
   private readonly plugins = new Map<string, AgentPlugin>();
   register(plugin: AgentPlugin): void {
-    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions'])) throw new AgentError('protocol_error');
+    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions', 'projectPermissions'])) throw new AgentError('protocol_error');
     validateAgentDescriptor(plugin.descriptor);
     if (this.plugins.has(plugin.descriptor.id)) throw new AgentError('protocol_error', '执行器 ID 已注册。');
-    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
+    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask', 'projectPermissions'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
     if (plugin.extensions !== undefined && (!isPlainRecord(plugin.extensions as unknown) || !exactKeys(plugin.extensions as unknown as Record<string, unknown>, Object.keys(extensionMethods)))) throw new AgentError('protocol_error');
     for (const [capability, method] of Object.entries(extensionMethods)) {
       const extension = (plugin.extensions as unknown as Record<string, unknown> | undefined)?.[capability];
@@ -58,6 +61,7 @@ export class AgentRegistry {
     // Detach public data and capture functions, so mutating the registration input
     // cannot silently change a previously validated descriptor or factory.
     const copy: AgentPlugin = { descriptor: deepFreeze(structuredClone(plugin.descriptor)), createAdapter: plugin.createAdapter.bind(plugin) };
+    if (plugin.projectPermissions) copy.projectPermissions = plugin.projectPermissions.bind(plugin);
     if (plugin.listModels) copy.listModels = plugin.listModels.bind(plugin);
     if (plugin.diagnose) copy.diagnose = plugin.diagnose.bind(plugin);
     if (plugin.evaluateTask) copy.evaluateTask = plugin.evaluateTask.bind(plugin);
@@ -91,7 +95,14 @@ export class AgentRegistry {
   /** Public compatibility check for accepted work: never reads current settings. */
   validateFrozen(frozen: FrozenAgentSelection, platform: AgentPlatform = process.platform as AgentPlatform): void {
     const plugin = this.get(frozen.backendId);
-    if (!isPlainRecord(frozen as unknown) || !exactKeys(frozen as unknown as Record<string, unknown>, ['backendId', 'apiVersion', 'schemaVersion', 'implementationVersion', 'runtimeVersion', 'configRevision', 'options', 'model']) || frozen.apiVersion !== plugin.descriptor.apiVersion || frozen.schemaVersion !== plugin.descriptor.configuration.version || typeof frozen.implementationVersion !== 'string' || !validSemver(frozen.implementationVersion) || !Number.isSafeInteger(frozen.configRevision) || frozen.configRevision < 0 || !(frozen.runtimeVersion === null || typeof frozen.runtimeVersion === 'string' && /^[0-9A-Za-z.+_-]{1,128}$/.test(frozen.runtimeVersion))) throw new AgentError('protocol_error');
+    if (!isPlainRecord(frozen as unknown) || !exactKeys(frozen as unknown as Record<string, unknown>, ['backendId', 'apiVersion', 'schemaVersion', 'implementationVersion', 'runtimeVersion', 'configRevision', 'options', 'model', 'settingsGeneration', 'permissions']) || frozen.apiVersion !== plugin.descriptor.apiVersion || frozen.schemaVersion !== plugin.descriptor.configuration.version || typeof frozen.implementationVersion !== 'string' || !validSemver(frozen.implementationVersion) || !Number.isSafeInteger(frozen.configRevision) || frozen.configRevision < 0 || !(frozen.runtimeVersion === null || typeof frozen.runtimeVersion === 'string' && /^[0-9A-Za-z.+_-]{1,128}$/.test(frozen.runtimeVersion))) throw new AgentError('protocol_error');
+    validateSelectionGeneration(frozen);
+    if (frozen.settingsGeneration) {
+      if (!plugin.projectPermissions) throw new AgentError('capability_unsupported');
+      let native: Record<string, import('@openworkgraph/protocol').AgentOptionValue>;
+      try { native = plugin.projectPermissions(frozen.permissions!.project, {}); } catch (error) { throw agentError(error, 'capability_unsupported'); }
+      if (!isPlainRecord(native) || Object.entries(native).some(([key, value]) => frozen.options[key] !== value)) throw new AgentError('invalid_configuration');
+    }
     const options = normalizeConfiguration(plugin.descriptor.configuration, frozen.options, frozen.schemaVersion, platform);
     // Historical options may not be silently supplemented with new defaults.
     if (Object.keys(options).length !== Object.keys(frozen.options).length || Object.entries(options).some(([key, value]) => frozen.options[key] !== value)) throw new AgentError('invalid_configuration');

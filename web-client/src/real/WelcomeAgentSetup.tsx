@@ -1,3 +1,5 @@
+import { AgentSettingsPanel } from './AgentSettingsPanel';
+import { useWorkspaceAgents, workspaceAgentStore } from './agent-state';
 import { useEffect, useMemo, useState } from 'react';
 import { Bot, CheckCircle2, CircleAlert, RefreshCw, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import type { ExecutionSettings, ModelDefaults, SandboxMode } from '../../../packages/protocol/src/index';
@@ -15,6 +17,9 @@ export function WelcomeAgentSetup({ registry, serviceId, onBusy, onModelsChanged
   onComplete: () => void;
 }) {
   const { t } = useI18n();
+  const agentStore = useMemo(() => workspaceAgentStore(registry, serviceId), [registry, serviceId, registry.get(serviceId)?.generation]);
+  const agents = useWorkspaceAgents(agentStore);
+  const legacyAgents = agents.mode === 'legacy';
   const [reload, setReload] = useState(0);
   const [models, setModels] = useState<ModelDefaults>();
   const [execution, setExecution] = useState<ExecutionSettings>();
@@ -29,6 +34,7 @@ export function WelcomeAgentSetup({ registry, serviceId, onBusy, onModelsChanged
   const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
+    if (!legacyAgents) return;
     let live = true;
     setLoadingModels(true); setLoadingExecution(true); setModels(undefined); setModelError(''); setExecutionError('');
     let transport: Transport;
@@ -56,7 +62,7 @@ export function WelcomeAgentSetup({ registry, serviceId, onBusy, onModelsChanged
       setLoadingModels(false); setLoadingExecution(false);
     });
     return () => { live = false; };
-  }, [registry, serviceId, reload]);
+  }, [registry, serviceId, reload, legacyAgents]);
 
   const selectedModel = useMemo(() => models?.available.find(item => item.id === model), [models, model]);
   const validEffort = !effort || Boolean(selectedModel?.reasoningEfforts.includes(effort));
@@ -81,6 +87,8 @@ export function WelcomeAgentSetup({ registry, serviceId, onBusy, onModelsChanged
       onBusy(false);
     }
   }
+
+  if (!legacyAgents) return <WelcomeStepLayout actions={<WelcomeStepActions busy={saving} disabled onSkip={onComplete} onConfirm={() => {}} />}><AgentSettingsPanel key={serviceId + ':' + registry.get(serviceId)?.generation} store={agentStore} onBusyChange={onBusy} onChanged={onModelsChanged} onReady={onComplete}/></WelcomeStepLayout>;
 
   return <WelcomeStepLayout actions={<WelcomeStepActions busy={saving} disabled={!ready} onSkip={onComplete} onConfirm={() => void save()} />}>
     <header>

@@ -1,5 +1,5 @@
 import { AGENT_PLUGIN_API_VERSION, SERVICE_VERSION } from '@openworkgraph/protocol';
-import type { AgentDescriptor, AgentAvailability, Json } from '@openworkgraph/protocol';
+import type { AgentDescriptor, AgentAvailability, FrozenAgentSelection, Json, SandboxMode } from '@openworkgraph/protocol';
 import type { AgentAdapter, AgentAdapterDependencies, AgentExtensionContext, AgentPlugin, AgentQueryContext } from './contracts.js';
 import { CodexBackendAdapter, type AdapterOptions } from '../backend/adapter.js';
 import type { BackendCallbacks, BackendRunContext, BackendReply, RuntimeSnapshot } from '../backend/types.js';
@@ -12,10 +12,21 @@ import { AgentHostTools } from './host-tools.js';
 import { normalizeConfiguration } from './configuration.js';
 import { hasVisualizeFeature } from '../visualize-features.js';
 import { codexNativeSkills, resolveCodexSkills } from './codex/skills.js';
+import { validateSelectionGeneration } from './workspace-configuration-validation.js';
 
 export type CodexPluginOptions = AdapterOptions & { cwd?: string };
+function projectPermissions(mode: SandboxMode): { sandboxMode: SandboxMode } {
+  if (!['read-only', 'workspace-write', 'danger-full-access'].includes(mode)) throw new AgentError('invalid_configuration');
+  // Native workspaceWrite adds cwd in 0.160.1, even with direct writableRoots=[runs].
+  // Codex 0.160.1 command/exec negative probe confirmed project cwd is writable.
+  // readOnly denies runs writes; neither policy implements this public contract.
+  if (mode === 'read-only') throw new AgentError('capability_unsupported', 'Codex 尚不支持项目只读且全部 Run 目录可读写的原生权限组合。');
+  return { sandboxMode: mode };
+}
 const descriptor: AgentDescriptor = {
   id: 'codex', name: 'Codex', description: 'Codex app-server 原生任务执行器。', implementationVersion: SERVICE_VERSION, apiVersion: AGENT_PLUGIN_API_VERSION,
+  logo: { symbol: '◎', color: '#16816A' },
+  projectPermissionModes: ['workspace-write', 'danger-full-access'],
   configuration: { version: 1, fields: [{ name: 'sandboxMode', type: 'enum', label: '原生权限模式', required: true, default: 'read-only', values: ['read-only', 'workspace-write', 'danger-full-access'] }] },
   models: { type: 'dynamic', allowCustom: false, effort: true },
   capabilities: { kinds: ['execution', 'text_generation', 'image_generation', 'visualize_generation'], inputKinds: ['text', 'document', 'image', 'video', 'file'], platforms: ['darwin', 'linux', 'win32'], cancellation: true, restoredRunStart: true, conversationContinuation: false, reattach: false, approvals: true, userInput: true, historyTools: true, nativeSkills: true, configuredSkills: true, dynamicSkillCommands: true, visualize: true },
@@ -153,12 +164,18 @@ export function createCodexPlugin(options: CodexPluginOptions = {}): AgentPlugin
   const owned = (context: AgentExtensionContext) => { const adapter = attached.get(key(context.runId, context.attemptId)); if (!adapter) throw new AgentError('outcome_unknown'); return adapter; };
   return {
     descriptor: structuredClone(descriptor),
+    projectPermissions,
     createAdapter(dependencies) {
       dependencies.signal?.throwIfAborted();
       const selection = dependencies.selection;
       if (!dependencies.runId || !dependencies.attemptId || selection.backendId !== 'codex' || selection.apiVersion !== AGENT_PLUGIN_API_VERSION) throw new AgentError('invalid_configuration');
       const normalized = normalizeConfiguration(descriptor.configuration, selection.options, selection.schemaVersion, dependencies.platform);
       if (normalized.sandboxMode !== selection.options.sandboxMode) throw new AgentError('invalid_configuration');
+      if (Object.hasOwn(selection, 'settingsGeneration') || Object.hasOwn(selection, 'permissions')) {
+        const frozen = selection as FrozenAgentSelection;
+        validateSelectionGeneration(frozen);
+        if (projectPermissions(frozen.permissions!.project).sandboxMode !== normalized.sandboxMode) throw new AgentError('invalid_configuration');
+      }
       const id = key(dependencies.runId, dependencies.attemptId); if (attached.has(id)) throw new AgentError('outcome_unknown');
       const adapter = new CodexAgentAdapter({ ...dependencies, selection: structuredClone(selection) }, privateOptions, () => attached.delete(id));
       attached.set(id, adapter); return adapter;

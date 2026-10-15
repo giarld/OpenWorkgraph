@@ -152,7 +152,7 @@ export function parseVisualizeAssetPackage(value: unknown, compatibility: Visual
   validateVisualizeSize({ width: clean.node.width, height: clean.node.height }, 'manual', { width: 1e9, height: 1e9 });
   if (!Array.isArray(clean.inputNames) || clean.inputNames.length > 64 || clean.inputNames.some(name => !text(name, 128)) || new Set(clean.inputNames).size !== clean.inputNames.length) invalid('Invalid visualize input names');
   const content = validateVisualizeNodeContent(clean.node.content);
-  if (['modelOverride', 'skillReferences', 'features'].some(key => Object.hasOwn(content, key)) || content.inputBindings.length) invalid('Asset cannot carry model, skill, feature or input bindings');
+  if (['modelOverride', 'agentModelOverride', 'skillReferences', 'features'].some(key => Object.hasOwn(content, key)) || content.inputBindings.length) invalid('Asset cannot carry model, skill, feature or input bindings');
   if (!content.page || !content.form || !content.state) invalid('Asset requires page, form and state');
   if ([content.page.revision, content.form.pageRevision, content.form.version, content.state.pageRevision, content.state.version].some(version => version !== 1)) invalid('Asset snapshot revisions must be 1');
   if (!Array.isArray(clean.resources)) invalid('Invalid asset resources');

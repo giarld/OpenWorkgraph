@@ -5,6 +5,9 @@ import type {
 } from './visualize.js';
 import { checkedVisualizeJson, VisualizeValidationError } from './visualize-validation.js';
 import { validateVisualizeBridgeRequest, validateVisualizeBridgeResponse, validateVisualizeCapabilityUpdate } from './visualize-bridge.js';
+import type { Json } from './index.js';
+import { validateNodeSignalMessage } from './node-signals.js';
+import type { NodeSignalCause, NodeSignalEvent, NodeSignalSource, NodeSignalSdk, NodeSignalDescription } from './node-signals.js';
 
 export interface VisualizeSdkClient extends VisualizePageSdk { dispose(): void }
 
@@ -42,6 +45,10 @@ export function createVisualizePageSdk(options: {
   const prefix = Array.from(random, value => value.toString(16).padStart(8, '0')).join('');
   let sequence = 0;
   let disposed = false;
+  let cause: NodeSignalCause | undefined;
+  let signalTail: Promise<unknown> = Promise.resolve();
+  const signalListeners = new Set<{ source: NodeSignalSource; handler: (event: NodeSignalEvent) => void | Promise<void> }>();
+  const signalSlots = new Map<string, (params: Json) => Json | void | Promise<Json | void>>();
   let capabilities: VisualizeHostCapabilities | undefined;
   let revisions: VisualizeExpectedRevisions = {
     pageRevision: 0, formVersion: 0, stateVersion: 0, inputVersion: 0, executionRevision: 0, layoutRevision: 0,
@@ -49,10 +56,17 @@ export function createVisualizePageSdk(options: {
   type Job = {
     method: VisualizeBridgeMethod; params: VisualizeBridgeMethods[VisualizeBridgeMethod]['params'];
     resolve(value: unknown): void; reject(reason: unknown): void; bytes?: ArrayBuffer | undefined;
+    cause?: NodeSignalCause;
+    inputRecovery?: boolean;
   };
   type Pending = { job: Job; request: VisualizeBridgeRequest; attempts: number; timer?: number };
   const queue: Job[] = [];
   let pending: Pending | undefined;
+
+  function recoverInputs(): void {
+    capabilities = undefined;
+    if (queue[0]?.method !== 'initialize') queue.unshift({ method: 'initialize', params: {}, inputRecovery: true, resolve: () => undefined, reject: () => undefined });
+  }
 
   function finish(error?: unknown, value?: unknown): void {
     const current = pending;
@@ -74,10 +88,7 @@ export function createVisualizePageSdk(options: {
       else {
         // A refresh may already have advanced the host snapshot while media is
         // still loading. Resync before releasing queued calls with old revisions.
-        if (refresh) {
-          capabilities = undefined;
-          if (queue[0]?.method !== 'initialize') queue.unshift({ method: 'initialize', params: {}, resolve: () => undefined, reject: () => undefined });
-        }
+        if (refresh) recoverInputs();
         finish(protocolError('INTERNAL_ERROR', 'Visualize host response timed out', true));
       }
     }, current.request.method === 'exportAsset' || refresh ? Math.max(timeoutMs, 60_000) : timeoutMs);
@@ -98,7 +109,7 @@ export function createVisualizePageSdk(options: {
       let blocked: Error | undefined;
       if (job.method !== 'initialize' && !capabilities) {
         blocked = protocolError('INVALID_REQUEST', 'Initialize the visualize SDK first');
-      } else if (job.method !== 'initialize' && job.method !== 'readInputs') {
+      } else if (job.method !== 'initialize' && job.method !== 'readInputs' && job.method !== 'signals') {
         if (capabilities?.readOnly) blocked = protocolError('READ_ONLY', 'Visualize host is read only');
         else if (!capabilities?.online) blocked = protocolError('OFFLINE', 'Visualize host is offline', true);
         else if (job.method === 'createSuccessors' && !capabilities.canCreateSuccessors) {
@@ -118,7 +129,7 @@ export function createVisualizePageSdk(options: {
     const request = {
       channel: 'openworkgraph.visualize', version: VISUALIZE_BRIDGE_VERSION, type: 'request',
       sessionId, nodeId, requestId: `${prefix}-${++sequence}`, method: job.method,
-      expected: { ...revisions }, params: job.params,
+      expected: { ...revisions }, params: job.params, ...(job.cause ? { cause: job.cause } : {}),
     } as VisualizeBridgeRequest;
     pending = { job, request, attempts: 0 };
     send(pending);
@@ -126,6 +137,51 @@ export function createVisualizePageSdk(options: {
 
   function onMessage(event: MessageEvent): void {
     if (disposed || event.source !== hostWindow || event.origin !== hostOrigin) return;
+    if (event.data?.channel === 'openworkgraph.node-signals') {
+      let message;
+      try { message = validateNodeSignalMessage(event.data); } catch { return; }
+      if (message.sessionId !== sessionId || message.nodeId !== nodeId) return;
+      signalTail = signalTail.catch(() => undefined).then(async () => {
+        if (disposed) return;
+        cause = message.type === 'event' ? message.event.cause : message.cause;
+        try {
+          if (message.type === 'event') {
+            for (const listener of [...signalListeners]) {
+              const source = listener.source, emitted = message.event;
+              if (source.signal === emitted.signal && (source.nodeId === emitted.nodeId || (emitted.relations ?? [emitted.relation]).includes(source.nodeId as typeof emitted.relation))) {
+                try { await listener.handler(emitted); } catch { /* One listener must not suppress other listeners. */ }
+              }
+            }
+          } else {
+            const claimed = await call('signals', { action: 'claim', invocationId: message.invocationId });
+            if (claimed.value !== true || disposed) return;
+            let value: Json = null, ok = true;
+            try {
+              if (message.slot === 'inputs.refresh' && message.targetNodeId === nodeId) {
+                const refreshed = await call('readInputs', { refresh: true });
+                value = { inputVersion: refreshed.inputs.version, digest: refreshed.inputs.digest };
+              }
+              else if (message.slot === 'prompt.update') {
+                // Keep malformed payloads intact for validation; never turn a missing prompt into an empty update.
+                const params = message.params && typeof message.params === 'object' && !Array.isArray(message.params) ? message.params : {};
+                value = await call('promptSlot', { ...params, targetNodeId: message.targetNodeId, invocationId: message.invocationId } as unknown as VisualizeBridgeMethods['promptSlot']['params']) as unknown as Json;
+              }
+              else if (message.slot === 'run.submit' || message.slot === 'run.cancel') {
+                const params = message.params && typeof message.params === 'object' && !Array.isArray(message.params) ? message.params : {};
+                value = await call('runSlot', { targetNodeId: message.targetNodeId, action: message.slot === 'run.submit' ? 'submit' : 'cancel', invocationId: message.invocationId, ...(message.slot === 'run.cancel' ? { runId: typeof params.runId === 'string' ? params.runId : '' } : {}) }) as unknown as Json;
+              } else {
+                const handler = signalSlots.get(message.slot);
+                if (!handler || message.targetNodeId !== nodeId) throw protocolError('INPUT_BLOCKED', 'The node slot is unavailable');
+                value = checkedVisualizeJson(await handler(message.params) ?? null);
+              }
+            } catch (error) { ok = false; const e = error as Error & { code?: string }; value = { code: e.code ?? 'INTERNAL_ERROR', message: String(e.message ?? 'Node slot failed').slice(0, 2000) }; }
+            if (!disposed) await call('signals', { action: 'result', invocationId: message.invocationId, ok, value });
+          }
+        } finally { cause = undefined; }
+      });
+      void signalTail.catch(() => undefined);
+      return;
+    }
     try {
       const update = validateVisualizeCapabilityUpdate(event.data);
       if (capabilities && update.sessionId === sessionId && update.nodeId === nodeId) capabilities = { ...update.capabilities };
@@ -142,12 +198,17 @@ export function createVisualizePageSdk(options: {
       const error = protocolError(response.error.code, response.error.message, response.error.retryable);
       // Only protocol fields escape the bridge; transport/credentials are never attached.
       if (response.error.fields) error.fields = response.error.fields.map(field => ({ ...field }));
+      // Media preparation follows the committed input refresh. Its failure does
+      // not roll back that version, so recover before sending queued requests.
+      if (request.method === 'readInputs' && request.params.refresh && response.error.code === 'RESOURCE_UNAVAILABLE') recoverInputs();
       finish(error);
       return;
     }
     switch (response.method) {
       case 'initialize':
-        revisions = { ...response.result.revisions };
+        // Automatic input recovery does not deliver the form/state to page code.
+        // Keep their known versions so unseen edits still cause CAS conflicts.
+        revisions = { ...response.result.revisions, ...(pending.job.inputRecovery ? { formVersion: revisions.formVersion, stateVersion: revisions.stateVersion } : {}) };
         capabilities = { ...response.result.capabilities };
         break;
       case 'saveState':
@@ -160,6 +221,9 @@ export function createVisualizePageSdk(options: {
         break;
       case 'exportAsset':
         revisions = { ...response.result.revisions, formVersion: revisions.formVersion, stateVersion: revisions.stateVersion, inputVersion: revisions.inputVersion };
+        break;
+      case 'promptSlot':
+        revisions = { ...revisions, executionRevision: Math.max(revisions.executionRevision, response.result.executionRevision) };
         break;
       case 'readInputs': revisions.inputVersion = response.result.inputs.version; break;
       case 'requestLayout': revisions.layoutRevision = response.result.layoutRevision; break;
@@ -179,13 +243,30 @@ export function createVisualizePageSdk(options: {
       return Promise.reject(failure);
     }
     return new Promise((resolve, reject) => {
-      queue.push({ method, params: snapshot, bytes, resolve: value => resolve(value as VisualizeBridgeMethods[M]['result']), reject });
+      queue.push({ method, params: snapshot, bytes, ...(cause ? { cause: structuredClone(cause) } : {}), resolve: value => resolve(value as VisualizeBridgeMethods[M]['result']), reject });
       pump();
     });
   }
 
   pageWindow.addEventListener('message', onMessage);
+  const signals: NodeSignalSdk = {
+    connect: connection => call('signals', { action: 'connect', connection }).then(result => result.value),
+    disconnect: id => call('signals', { action: 'disconnect', id }).then(result => result.value),
+    emit: (signal, payload = null) => call('signals', { action: 'emit', signal, payload }).then(result => result.value),
+    on(source, handler) {
+      if (disposed) throw protocolError('SESSION_EXPIRED', 'Visualize SDK is disposed');
+      const listener = { source: typeof source === 'string' ? { nodeId: 'self', signal: source } : source, handler };
+      signalListeners.add(listener); return () => { signalListeners.delete(listener); };
+    },
+    async defineSlot(slot, handler) {
+      signalSlots.set(slot, handler);
+      try { await call('signals', { action: 'registerSlot', slot }); } catch (error) { signalSlots.delete(slot); throw error; }
+      return async () => { if (signalSlots.get(slot) !== handler) return; signalSlots.delete(slot); await call('signals', { action: 'unregisterSlot', slot }); };
+    },
+    describe: () => call('signals', { action: 'describe' }).then(result => result.value as unknown as NodeSignalDescription),
+  };
   return {
+    signals,
     initialize: () => call('initialize', {}),
     async exportAsset(asset) {
       if (!asset || typeof asset !== 'object' || Object.keys(asset).some(key => !['name', 'mime', 'blob'].includes(key)) || !(asset.blob instanceof Blob)) throw protocolError('INVALID_REQUEST', 'Expected an asset Blob');
@@ -201,6 +282,7 @@ export function createVisualizePageSdk(options: {
     dispose() {
       if (disposed) return;
       disposed = true;
+      signalListeners.clear(); signalSlots.clear();
       pageWindow.removeEventListener('message', onMessage);
       const error = protocolError('SESSION_EXPIRED', 'Visualize SDK is disposed');
       finish(error);

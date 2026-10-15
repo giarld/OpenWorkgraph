@@ -39,6 +39,8 @@ import { SkillSessions } from './skill-sessions.js';
 import { VisualizePages } from './visualize-pages.js';
 import { VisualizeInputs } from './visualize-inputs.js';
 import { VisualizeBridge } from './visualize-bridge.js';
+import { prepareVisualizeRunSlot } from './visualize-run-slots.js';
+import { prepareVisualizePromptSlot } from './visualize-prompt-slots.js';
 import { VisualizeAssetExport } from './visualize-asset-export.js';
 import { VisualizeSuccessors } from './visualize-successors.js';
 import { discoverCodexSkills } from './skills-api.js';
@@ -52,16 +54,19 @@ import { AgentError } from './agents/errors.js';
 import { normalizeConfiguration } from './agents/configuration.js';
 import { nativeSkillCatalog } from './agents/skills.js';
 import { createCodexPlugin, codexQueryFailure } from './agents/codex.js';
+import { createClaudePlugin, type ClaudePluginOptions } from './agents/claude-code.js';
+import { AgentWorkspaceConfigurationStore } from './agents/workspace-configuration.js';
+import { sameProjectPermissions } from './agents/workspace-configuration-validation.js';
 import { resolveProductionSelection } from './agents/production-selection.js';
 import type { AgentExecutionSelection } from './agents/contracts.js';
-interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean }
+interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean; availabilityRevision?: number }
 
 export interface WorkflowRuntimeOptions {
   backend?: SchedulerBackend; models?: BackendModel[];
   /** Default: discover on model reads/submission. True also probes at startup; false disables execution and discovery. */
-  enableBackend?: boolean; backendOptions?: AdapterOptions;
+  enableBackend?: boolean; backendOptions?: AdapterOptions; claudeOptions?: ClaudePluginOptions;
   skillsOptions?: BuiltinSkillsOptions;
-  /** Explicit test/custom composition. Production defaults to the Codex plugin. */
+  /** Explicit test/custom composition. Production statically registers the bundled agents. */
   agentRegistry?: AgentRegistry;
 }
 class RuntimeRuns extends Runs {
@@ -91,6 +96,7 @@ export class WorkflowRuntime {
   readonly visualizeBridge: VisualizeBridge;
   readonly agentSettings: AgentSettingsStore | undefined;
   readonly agentDiscovery: AgentDiscovery | undefined;
+  readonly agentConfiguration: AgentWorkspaceConfigurationStore | undefined;
   private readonly agentRouter: AgentRouter | undefined;
   private readonly probe = new ProjectProbe();
   private readonly adapter: CodexBackendAdapter | undefined;
@@ -106,6 +112,7 @@ export class WorkflowRuntime {
     if (!options.agentRegistry && !options.backend && options.enableBackend !== false) {
       const registry = new AgentRegistry();
       registry.register(createCodexPlugin({ ...options.backendOptions, cwd: directories.root }));
+      registry.register(createClaudePlugin(options.claudeOptions));
       this.options = options = { ...options, agentRegistry: registry };
     }
     // A custom static composition must not secretly recover an unregistered
@@ -134,7 +141,7 @@ export class WorkflowRuntime {
       }
     });
     const assetExport = new VisualizeAssetExport(this.visualize);
-    this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args) });
+    this.visualizeBridge = new VisualizeBridge(this.visualize, this.visualizeInputs, { prepareSuccessors: (...args) => successors.prepare(...args), prepareAssetExport: (...args) => assetExport.prepare(...args), prepareRunSlot: (...args) => prepareVisualizeRunSlot(this, ...args), preparePromptSlot: (...args) => prepareVisualizePromptSlot(this.graphs, ...args) });
     this.graphs.history.backfillActiveGates();
     this.graphFiles = new GraphFiles(db,directories.runs);
     this.executionSettings = new ExecutionSettingsStore(db);
@@ -145,6 +152,7 @@ export class WorkflowRuntime {
     this.skillSessions = new SkillSessions(this.skills, this.skillConfigs, options.backendOptions);
     this.inputs = new InputPreparation(db, { plugins: this.plugins, readRepresentation: resource => this.resources.readPreparedRepresentation(resource) }); this.models = new ModelDefaultsStore(db);
     this.agentSettings = options.agentRegistry ? new AgentSettingsStore(db, options.agentRegistry) : undefined;
+    this.agentConfiguration = options.agentRegistry ? new AgentWorkspaceConfigurationStore(directories.config, serviceId, options.agentRegistry) : undefined;
     this.agentDiscovery = options.agentRegistry ? new AgentDiscovery(options.agentRegistry, this.productionAgents ? { ttlMs: 0 } : {}) : undefined;
     this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend || options.agentRegistry ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
       ? this.imageProviders.credentialAvailable(snapshot.imageRoute.providerId,snapshot.imageRoute.credentialRevision)
@@ -179,6 +187,23 @@ export class WorkflowRuntime {
   private async prepareAgent(selection: AgentSelection): Promise<AgentPlan> {
     selection = structuredClone(selection);
     if (!this.options.agentRegistry || !this.agentSettings || !this.agentDiscovery) throw new AgentError('runtime_unavailable');
+    const availability = this.agentConfiguration?.getBackend(selection.backendId);
+    if (availability && !availability.enabled) throw new AgentError('runtime_unavailable');
+    if (selection.settingsGeneration !== undefined) {
+      if (!this.agentConfiguration) throw new AgentError('runtime_unavailable');
+      const current = this.agentConfiguration.getBackend(selection.backendId);
+      const plugin = this.options.agentRegistry.get(selection.backendId);
+      if (!current.enabled) throw new AgentError('runtime_unavailable');
+      const permissions = this.agentConfiguration.get().permissions;
+      if (selection.configRevision !== current.revision || !sameProjectPermissions(selection.permissions, permissions)) throw new ServiceError('REVISION_CONFLICT', '工作空间 Agent 配置已变化，请刷新后重试。');
+      if (!plugin.projectPermissions) throw new AgentError('capability_unsupported');
+      const native = plugin.projectPermissions(permissions.project, { runsPath: this.directories.runs });
+      const query = { options: normalizeConfiguration(plugin.descriptor.configuration, { ...current.options, ...selection.options, ...native }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
+      const catalog = await this.agentDiscovery.listModels(selection.backendId, query);
+      const diagnosis = await this.agentDiscovery.diagnose(selection.backendId, query);
+      if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
+      return { frozen: this.agentConfiguration.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null, runsPath: this.directories.runs }), independent: true };
+    }
     const current = this.agentSettings.get(selection.backendId);
     if (!current.enabled) throw new AgentError('runtime_unavailable');
     if (selection.configRevision !== current.revision) throw new ServiceError('REVISION_CONFLICT', '执行器设置已变化，请刷新后重试。');
@@ -187,12 +212,13 @@ export class WorkflowRuntime {
     const catalog = await this.agentDiscovery.listModels(selection.backendId, query);
     const diagnosis = await this.agentDiscovery.diagnose(selection.backendId, query);
     if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
-    return { frozen: this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null }), independent: true };
+    return { frozen: this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null }), independent: true, ...(availability ? { availabilityRevision: availability.revision } : {}) };
   }
   private nativeSkillCatalog(frozen: Pick<AgentExecutionSelection, 'backendId' | 'options'>, projectPath?: string) { return nativeSkillCatalog(this.options.agentRegistry!.get(frozen.backendId), frozen, { ...(projectPath ? { projectPath } : {}) }); }
   private async prepareImplicitCodex(input: SubmitRun): Promise<AgentPlan> {
-    this.requireAvailable(input);
     const settings = this.agentSettings!.get('codex');
+    if (!settings.enabled || this.agentConfiguration && !this.agentConfiguration.getBackend('codex').enabled) throw new AgentError('runtime_unavailable');
+    this.requireAvailable(input);
     const plan = await this.prepareAgent({ backendId: 'codex', configRevision: settings.revision, schemaVersion: settings.schemaVersion, ...(input.modelOverride ? { model: input.modelOverride } : {}) });
     return { ...plan, implicit: true, image: input.kind === 'image_generation' };
   }
@@ -235,8 +261,14 @@ export class WorkflowRuntime {
     if (this.productionAgents && !this.options.agentRegistry!.list().some(plugin => plugin.id === 'codex')) return capability('unavailable', 'Codex is not registered in this Workspace; saved tasks retain their identity');
     return capability('available', '执行由 Codex app-server 提供，沙盒权限使用工作空间设置；提交时检查模型，认证由 Codex 自身处理');
   }
-  get imageGenerationCapability(): Capability {
+  get codexImageCapability(): Capability {
     const execution = this.executionCapability;
+    if (execution.status !== 'available') return execution;
+    if (this.options.agentRegistry?.list().some(plugin => plugin.id === 'codex') && (this.agentConfiguration && !this.agentConfiguration.getBackend('codex').enabled || this.agentSettings && !this.agentSettings.get('codex').enabled)) return capability('unavailable', 'Codex 已停用，请在 Agent 设置中启用。');
+    return execution;
+  }
+  get imageGenerationCapability(): Capability {
+    const execution = this.codexImageCapability;
     if (this.options.backend || execution.status !== 'available') return this.imageProviders.list().some(item=>item.enabled&&item.credentialConfigured&&item.models.length) ? capability('available','已配置的 API 生图服务商可执行，Codex 图片路径不可用。') : execution;
     return capability('available', '图片生成由 Codex 内置 imagegen 执行；成功后校验实际图片文件并发布到工作图。');
   }
@@ -246,7 +278,7 @@ export class WorkflowRuntime {
   }
   get serviceInfo(): ServiceInfo {
     const modes=['text','image','text_image'] as const;
-    const codex=this.executionCapability;
+    const codex=this.codexImageCapability;
     const imageRoutes:NonNullable<ServiceInfo['imageRoutes']>=[{route:{type:'codex'},modes:{text:codex,image:codex,text_image:codex}}];
     for(const provider of this.imageProviders.list())for(const model of provider.models){
       const state=Object.fromEntries(modes.map(mode=>[mode,!provider.enabled?capability('unavailable','服务商已停用。')
@@ -415,7 +447,7 @@ export class WorkflowRuntime {
     if (apiRoute && Array.isArray(skillReferences) && skillReferences.length) throw new ServiceError('INPUT_BLOCKED', '独立图片 API 不支持技能引用，请切换到 Codex 或移除技能引用。');
     const nativeSkills = agentPlan ? scopedPreview.prompt.includes('$') || Array.isArray(skillReferences) && skillReferences.some(ref => typeof ref === 'object' && ref !== null && (ref as { source?: string }).source !== 'openworkgraph')
       ? await this.nativeSkillCatalog(agentPlan.frozen, path)
-      : { backendId: agentPlan.frozen.backendId, configuredSkills: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.configuredSkills, skills: [] } : undefined;
+      : { backendId: agentPlan.frozen.backendId, configuredSkills: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.configuredSkills, dynamicSkillCommands: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.dynamicSkillCommands, skills: [] } : undefined;
     const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path, nativeSkills);
     if(apiRoute){
       const references: {bytes:Buffer;mime:'image/png'|'image/jpeg'|'image/webp'}[]=[];
@@ -436,7 +468,10 @@ export class WorkflowRuntime {
           const current=this.imageProviders.list().find(item=>item.id===apiRoute.providerId);
           if(!current?.enabled || current.revision!==apiRoute.configRevision || current.credentialRevision!==apiRoute.credentialRevision || !this.imageProviders.credentialAvailable(apiRoute.providerId,apiRoute.credentialRevision))throw new ServiceError('REVISION_CONFLICT','生图服务商或凭据配置已变化，请重新提交。');
         } else if (agentPlan) {
-          if (agentPlan.independent && !('legacy' in agentPlan.frozen)) this.agentSettings!.assertCurrent(agentPlan.frozen);
+          if (agentPlan.independent && !('legacy' in agentPlan.frozen)) {
+            if (agentPlan.frozen.settingsGeneration) this.agentConfiguration!.assertCurrent(agentPlan.frozen);
+            else this.agentSettings!.assertCurrent(agentPlan.frozen);
+          }
           if (agentPlan.frozen.backendId === 'codex') context.sandboxMode = agentPlan.frozen.options.sandboxMode as import('@openworkgraph/protocol').SandboxMode;
         } else {
           this.requireAvailable(request);
@@ -450,7 +485,11 @@ export class WorkflowRuntime {
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
         : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
     });
-    return principal => scoped.submit(request, principal, request.kind==='execution' && holdExecution);
+    return principal => agentPlan?.independent && !('legacy' in agentPlan.frozen) && agentPlan.frozen.settingsGeneration
+      ? this.agentConfiguration!.withCurrent(agentPlan.frozen, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
+      : agentPlan?.independent && agentPlan.availabilityRevision !== undefined
+        ? this.agentConfiguration!.withEnabledBackend(agentPlan.frozen.backendId, agentPlan.availabilityRevision, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
+      : scoped.submit(request, principal, request.kind==='execution' && holdExecution);
   }
   async prepareContinuation(id: string): Promise<(principal: string, idempotencyKey: string) => Run> {
     if (this.db.isTransaction) throw new ServiceError('CONFLICT', 'Continuation preflight must precede auth transaction');
@@ -563,6 +602,7 @@ export class WorkflowRuntime {
     if (this.starting || this.recovering || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
     if (this.closed) return;
     this.closed = true; this.executionChains.stop(); this.probe.close();
+    this.agentConfiguration?.close();
     void this.agentDiscovery?.dispose().catch(() => {});
   }
   stopAccepting(): void { this.stopping = true; this.executionChains.stop(); atomic(this.db, () => this.db.prepare("UPDATE settings SET value='false' WHERE key='acceptingRuns'").run()); }
@@ -586,6 +626,7 @@ export class WorkflowRuntime {
     this.visualizeBridge.dispose();
     if (this.closed) return; this.closed = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; this.probe.close();
     this.catalogRpc?.close();
+    this.agentConfiguration?.close();
     void this.agentDiscovery?.dispose().catch(() => {});
     void this.agentRouter?.disposeDrained().catch(() => {});
     // No adapter.close(): disconnecting unresolved child processes is not cancellation.

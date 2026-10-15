@@ -5,8 +5,8 @@ export type BackendState = 'starting' | 'running' | 'waiting_answer' | 'waiting_
 /** Only completed public agent messages, never tool output, reasoning or deltas. */
 export interface BackendProgress { itemId?: string; messageId?: string; phase: 'commentary' | 'final_answer'; text: string }
 /** Legacy required fields remain source-compatible; generic adapters use null native IDs. */
-export interface RuntimeSnapshot { runId: string; threadId: string | null; turnId: string | null; state: BackendState; observedAt: string; model: ModelSelection; reason: string | null; answer: string; identity?: AgentMessageIdentity; attemptId?: string; backendId?: string; progress?: BackendProgress; transportFailure?: TransportFailure }
-export interface BackendQuestion { id: string; text: string; options: string[]; mode?: AgentQuestionMode }
+export interface RuntimeSnapshot { runId: string; threadId: string | null; turnId: string | null; state: BackendState; observedAt: string; model: ModelSelection; reason: string | null; answer: string; failureReason?: import('@openworkgraph/protocol').AgentFailureReason; identity?: AgentMessageIdentity; attemptId?: string; backendId?: string; progress?: BackendProgress; transportFailure?: TransportFailure }
+export interface BackendQuestion { id: string; text: string; options: string[]; mode?: AgentQuestionMode; allowOther?: boolean }
 export interface BackendInteraction { id: string; kind: 'question' | 'approval'; questions: BackendQuestion[]; reason: string; command: string | null; canApprove: boolean; details?: AgentApprovalDetails }
 export type BackendReply = { kind: 'question'; answers: Record<string, string[]> } | { kind: 'approval'; decision: 'accept' | 'decline' };
 /** Trusted service-resolved paths, never directly populated from a browser payload. */
@@ -14,6 +14,8 @@ export interface BackendRunContext { agent?: import('../agents/contracts.js').Ag
 export interface BackendCallbacks {
   onSnapshot(snapshot: RuntimeSnapshot): void | Promise<void>;
   onInteraction(interaction: BackendInteraction): void | Promise<void>;
+  /** Native cancellation of a pending request, scoped to this Run/attempt. */
+  onInteractionCancelled?(interactionId: string): void | Promise<void>;
   /** Independent title generation updates this Run's source while work proceeds. */
   setNodeTitle?(title: string): boolean | Promise<boolean>;
   /** Must authorize against this Run's project; no global graph/database endpoint. */

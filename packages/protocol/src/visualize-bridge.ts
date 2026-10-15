@@ -3,10 +3,11 @@ import type { VisualizeBridgeRequest, VisualizeBridgeResponse, VisualizeCapabili
 import { VISUALIZE_BRIDGE_VERSION, VISUALIZE_ERROR_CODES, isVisualizeFeatureSelection } from './visualize.js';
 import { checkedVisualizeJson, validateVisualizeSize, VisualizeValidationError } from './visualize-validation.js';
 import { isSkillIdentity, isSkillName } from './skills.js';
+import { validateNodeSignalCommand, validateNodeSignalCause } from './node-signals.js';
 
 export const VISUALIZE_BRIDGE_REQUEST_BYTES = 2_097_152;
 export const VISUALIZE_BRIDGE_RESPONSE_BYTES = 50_331_648;
-const methods = ['initialize', 'readInputs', 'saveState', 'updateForm', 'createSuccessors', 'requestLayout', 'exportAsset'];
+const methods = ['initialize', 'readInputs', 'saveState', 'updateForm', 'createSuccessors', 'requestLayout', 'exportAsset', 'signals', 'runSlot', 'promptSlot'];
 const revisionKeys = ['pageRevision', 'formVersion', 'stateVersion', 'inputVersion', 'executionRevision', 'layoutRevision'];
 const fail = (message: string): never => { throw new VisualizeValidationError('INVALID_REQUEST', message); };
 function record(value: unknown): Record<string, unknown> {
@@ -39,10 +40,20 @@ function identity(value: Record<string, unknown>, type: string): void {
 /** Copies only bounded plain JSON before reading fields, including nested params. */
 export function validateVisualizeBridgeRequest(value: unknown): VisualizeBridgeRequest {
   const request = record(checkedVisualizeJson(value, VISUALIZE_BRIDGE_REQUEST_BYTES));
-  keys(request, ['channel', 'version', 'sessionId', 'nodeId', 'requestId', 'type', 'method', 'expected', 'params']);
+  keys(request, ['channel', 'version', 'sessionId', 'nodeId', 'requestId', 'type', 'method', 'expected', 'params'], ['cause']);
+  if (request.cause !== undefined) validateNodeSignalCause(request.cause);
   identity(request, 'request'); validateVisualizeRevisions(request.expected);
   const params = record(request.params);
   switch (request.method) {
+    case 'signals': validateNodeSignalCommand(params); break;
+    case 'promptSlot':
+      keys(params, ['targetNodeId', 'invocationId', 'prompt'], ['expectedContentVersion']);
+      if (!text(params.targetNodeId) || !text(params.invocationId) || typeof params.prompt !== 'string' || params.prompt.length > 1_048_576 || (params.expectedContentVersion !== undefined && !integer(params.expectedContentVersion, 1))) fail('Invalid prompt slot');
+      break;
+    case 'runSlot':
+      keys(params, ['targetNodeId', 'action', 'invocationId'], ['runId']);
+      if (!text(params.targetNodeId) || !text(params.invocationId) || !['submit', 'cancel'].includes(params.action as string) || (params.action === 'cancel' ? !text(params.runId) : params.runId !== undefined)) fail('Invalid run slot');
+      break;
     case 'exportAsset':
       keys(params, ['name', 'mime', 'bytes']);
       if (!text(params.name, 512) || !(params.name as string).trim() || /[\u0000-\u001f\u007f/\\]/.test(params.name as string) || !text(params.mime, 128) || !/^[a-zA-Z0-9.+-]+[/][a-zA-Z0-9.+-]+$/.test(params.mime as string) || !integer(params.bytes, 1)) fail('Invalid asset metadata');
@@ -111,6 +122,12 @@ export function validateVisualizeBridgeResponse(value: unknown): VisualizeBridge
   else if (response.ok === true) {
     const result = record(response.result);
     switch (response.method) {
+      case 'signals': keys(result, ['value']); break;
+      case 'promptSlot':
+        keys(result, ['nodeId', 'contentVersion', 'executionRevision']);
+        if (!text(result.nodeId) || !integer(result.contentVersion, 1) || !integer(result.executionRevision)) fail('Invalid prompt slot result');
+        break;
+      case 'runSlot': keys(result, ['runId', 'status']); if (!text(result.runId) || !text(result.status)) fail('Invalid run slot result'); break;
       case 'initialize': {
         keys(result, ['pageRevision', 'form', 'state', 'inputs', 'inputsChanged', 'revisions', 'theme', 'locale', 'viewport', 'capabilities']);
         snapshot(result.form, true); snapshot(result.state, false); inputs(result.inputs); validateVisualizeRevisions(result.revisions);
@@ -140,6 +157,7 @@ export function visualizeProtocolError(error: unknown): VisualizeProtocolError {
   if (error instanceof VisualizeValidationError) return { code: error.code, message: error.message.slice(0, 2000), retryable: false, ...(error.fields.length ? { fields: error.fields } : {}) };
   const value = error as { code?: string; message?: string; retryable?: boolean; details?: { visualizeCode?: string; fields?: unknown } } | null;
   const code = value?.details?.visualizeCode ?? value?.code;
+  if (code === 'ACTIVE_RUN') return { code: 'INPUT_BLOCKED', message: '目标节点已有待处理或执行中的任务。', retryable: false };
   if (VISUALIZE_ERROR_CODES.includes(code as VisualizeProtocolError['code'])) {
     const result = { code, message: value?.message?.slice(0, 2000) || '页面操作失败。', retryable: value?.retryable === true, ...(value?.details?.fields ? { fields: value.details.fields } : {}) };
     try { protocolError(result); return result as VisualizeProtocolError; } catch { /* Unexpected error details are not public data. */ }

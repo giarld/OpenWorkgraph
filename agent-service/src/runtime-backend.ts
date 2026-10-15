@@ -49,7 +49,7 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
     if (!['text', 'single', 'multiple'].includes(mode) || !Array.isArray(values) || !values.length || values.length > 64 || values.some(value => typeof value !== 'string' || !value.trim() || value.length > 16000)) throw new ServiceError('INVALID_REQUEST', 'Invalid question answer');
     // Legacy questions allowed arrays and free text even when suggestions exist.
     if (question.mode === 'text' && values.length !== 1 || mode === 'single' && values.length !== 1 || mode === 'multiple' && new Set(values).size !== values.length) throw new ServiceError('INVALID_REQUEST', 'Invalid question selection count');
-    if (mode !== 'text' && (!Array.isArray(question.options) || (values as string[]).some(value => !question.options.includes(value)))) throw new ServiceError('INVALID_REQUEST', 'Select only requested options');
+    if (mode !== 'text' && question.allowOther !== true && (!Array.isArray(question.options) || (values as string[]).some(value => !question.options.includes(value)))) throw new ServiceError('INVALID_REQUEST', 'Select only requested options');
   }
   return { kind: 'question', answers: answers as Record<string, string[]> };
 }
@@ -140,13 +140,13 @@ export class RuntimeBackend implements SchedulerBackend {
     const token = this.runs.runtime(runId); const run = this.runs.get(runId);
     if (token.epoch !== context.epoch || token.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(run.status)) return;
     if (!identifier(value.id) || !['question', 'approval'].includes(value.kind) || JSON.stringify(value).length > 65536 || !Array.isArray(value.questions) || value.questions.length > 32) throw new ServiceError('INVALID_REQUEST', 'Invalid or unbounded backend interaction');
-    if (value.kind === 'question' && (!value.questions.length || new Set(value.questions.map(question => question.id)).size !== value.questions.length || value.questions.some(question => !identifier(question.id) || typeof question.text !== 'string' || !question.text.trim() || question.text.length > 16000 || !Array.isArray(question.options) || question.options.length > 64 || question.options.some(option => typeof option !== 'string' || !option.trim() || option.length > 16000) || question.mode !== undefined && !['text', 'single', 'multiple'].includes(question.mode)))) throw new ServiceError('INVALID_REQUEST', 'Invalid backend question group');
+    if (value.kind === 'question' && (!value.questions.length || new Set(value.questions.map(question => question.id)).size !== value.questions.length || value.questions.some(question => !identifier(question.id) || typeof question.text !== 'string' || !question.text.trim() || question.text.length > 16000 || !Array.isArray(question.options) || question.options.length > 64 || question.options.some(option => typeof option !== 'string' || !option.trim() || option.length > 16000) || question.mode !== undefined && !['text', 'single', 'multiple'].includes(question.mode) || question.allowOther !== undefined && typeof question.allowOther !== 'boolean'))) throw new ServiceError('INVALID_REQUEST', 'Invalid backend question group');
     const hostId = 'backend-' + createHash('sha256').update(JSON.stringify([runId, context.epoch, value.id])).digest('hex');
     const canApprove = value.canApprove === true && (value.details === undefined || approvableDetails(value.details));
     const details = value.details;
     // Project only the public contract; adapter-private fields never become history.
     const payload = JSON.parse(JSON.stringify({ id: hostId, kind: value.kind, reason: value.reason, command: value.command, canApprove,
-      questions: value.questions.map(question => ({ id: question.id, text: question.text, options: question.options, ...(question.mode !== undefined ? { mode: question.mode } : {}) })),
+      questions: value.questions.map(question => ({ id: question.id, text: question.text, options: question.options, ...(question.mode !== undefined ? { mode: question.mode } : {}), ...(question.allowOther !== undefined ? { allowOther: question.allowOther } : {}) })),
       ...(details !== undefined ? { details: object(details) ? { version: details.version, kind: details.kind, summary: details.summary, ...(details.command !== undefined ? { command: details.command } : {}), ...(details.paths !== undefined ? { paths: details.paths } : {}), ...(details.permissions !== undefined ? { permissions: details.permissions } : {}), ...(details.scope !== undefined ? { scope: details.scope } : {}) } : details } : {}),
       backendInteractionId: value.id, attemptId: context.epoch })) as Json;
     const prior = this.runs.db.prepare('SELECT id FROM interactions WHERE id=? AND run_id=?').get(hostId, runId);
@@ -218,6 +218,11 @@ export class RuntimeBackend implements SchedulerBackend {
         return this.runs.updateNodeTitle(run.id, token, title);
       } } : {}),
       onInteraction: value => this.callback(run.id, context, 'onInteraction', () => this.interaction(value, context, run.id)),
+      onInteractionCancelled: id => this.callback(run.id, context, 'onInteractionCancelled', () => {
+        if (!identifier(id)) throw new ServiceError('INVALID_REQUEST', 'Invalid cancelled interaction identity');
+        const hostId = 'backend-' + createHash('sha256').update(JSON.stringify([run.id, context.epoch, id])).digest('hex');
+        this.runs.expireInteraction(run.id, this.runs.runtime(run.id), hostId);
+      }),
       queryHistory: query => this.asyncCallback(run.id, context, 'queryHistory', () => this.queryHistory(run.id, query)),
       readRunContext: request => this.asyncCallback(run.id, context, 'readRunContext', () => this.runContexts.read(run.id, request)),
       ...(runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features) ? { validateVisualizeOutput: (pagePath: string) => this.asyncCallback(run.id, context, 'validateVisualizeOutput', async () => {

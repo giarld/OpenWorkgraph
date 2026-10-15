@@ -1,3 +1,5 @@
+import { AgentSettingsPanel } from './AgentSettingsPanel';
+import { useWorkspaceAgents, type WorkspaceAgentStore } from './agent-state';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { randomId } from "../adapter/random";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
@@ -8,8 +10,9 @@ import { useI18n } from '../i18n/I18nProvider';
 import './ManagementPanel.css';
 
 export interface ManagementPanelProps {
+  agentStore?: WorkspaceAgentStore;
   onBack?: () => void;
-  initialPage?: 'projects' | 'add';
+  initialPage?: 'projects' | 'add' | 'settings';
   runtimeAddress?: string;
   onRenameRuntime?: () => void;
   /** Authenticated transport. BLOB means HTTP GET decoded as Blob. */
@@ -96,8 +99,10 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const backups = useResource<LocatedBackup[]>('/v1/backups', props, page === 'settings');
   const storage = useResource<StorageUsage>('/v1/storage', props, page === 'settings');
   const guidance = useResource<Guidance>('/v1/restore-guidance', props, page === 'settings');
-  const models = useResource<ModelDefaults>('/v1/models', props, page === 'settings');
-  const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, page === 'settings');
+  const agents = useWorkspaceAgents(props.agentStore, page === 'settings');
+  const legacyAgents = agents.mode === 'legacy';
+  const models = useResource<ModelDefaults>('/v1/models', props, page === 'settings' && legacyAgents);
+  const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, page === 'settings' && legacyAgents);
   const imageProviders = useResource<ImageProvider[]>('/v1/image-providers', props, page === 'settings');
   const [providerId, setProviderId] = useState('');
   const [providerName, setProviderName] = useState('');
@@ -195,6 +200,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const writeDisabled = disabled || Boolean(props.readOnly);
   const resourceSummary = (value: Resource<unknown>, summary: string) => value.loading ? t('Loading…') : value.error ? t('Loading failed · Expand to retry') : summary;
   const settingsSections = {
+    'Agent settings': { icon: SlidersHorizontal, group: t('Agents and models'), summary: agents.mode === 'loading' ? t('Loading…') : agents.error ? t('Loading failed · Expand to retry') : t('Permissions, Agent configuration, and default model') },
     'Agent permissions': { icon: ShieldCheck, group: t('Agents and models'), summary: resourceSummary(execution, t('{mode} · Applies to new tasks', { mode: { 'read-only': t('Read-only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') }[execution.data?.sandboxMode ?? 'workspace-write'] })) },
     'Workspace default model': { icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
     'Image generation agent · API providers': { icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
@@ -209,14 +215,14 @@ export function ManagementPanel(props: ManagementPanelProps) {
     const Icon = item.icon;
     return <section className="management-setting-section">
       {'group' in item && <h3 className="management-setting-group">{item.group}</h3>}
-      <details className="management-setting">
+      <details className="management-setting" open={title === 'Agent settings' && props.initialPage === 'settings' ? true : undefined}>
         <summary><span className="management-setting-icon"><Icon size={18} aria-hidden="true" /></span><span className="management-setting-copy"><strong>{t(title)}</strong><span>{item.summary}</span></span><ChevronDown className="management-setting-chevron" size={16} aria-hidden="true" /></summary>
         <div className="management-setting-body">{children}</div>
       </details>
     </section>;
   }
 
-  return <div className="management-panel" aria-label={t('Workspace management')}>
+  return <div className="management-panel" data-canvas-interactive aria-label={t('Workspace management')}>
     <header>
       <nav className="management-navigation" aria-label={t('Workspace management navigation')}>
         <button className="management-back" type="button" aria-label={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} title={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} disabled={Boolean(busy)} hidden={page === 'projects' && !props.onBack} onClick={() => { if (page === 'projects') props.onBack?.(); else { setPage('projects'); setConfirmation(undefined); setFailure(''); } }}><ArrowLeft size={20} aria-hidden="true" /></button>
@@ -289,7 +295,8 @@ export function ManagementPanel(props: ManagementPanelProps) {
     {page === 'settings' && props.onRenameRuntime && <div className="management-actions">
       <button type="button" onClick={props.onRenameRuntime}><Pencil size={16} aria-hidden="true" />{t('Rename Workspace')}</button>
     </div>}
-    {section('Agent permissions', <>
+    {props.agentStore && !legacyAgents && section('Agent settings', <AgentSettingsPanel store={props.agentStore} readOnly={writeDisabled} onChanged={props.onModelsChanged}/>)}
+    {legacyAgents && section('Agent permissions', <>
       <Status value={execution} retry={execution.reload} />
       <p>{t('Sandbox permissions are enforced by Codex app-server. Changes apply to newly submitted tasks; queued and running tasks keep their original setting.')}</p>
       {execution.data && <form onSubmit={event => { event.preventDefault(); void mutate(t('Save permission scope'), '/v1/execution-settings', { sandboxMode: sandbox, expectedRevision: execution.data!.revision }, execution.reload); }}>
@@ -302,7 +309,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
         <button type="submit" disabled={writeDisabled}>{t('Save permission scope')}</button>
       </form>}
     </>)}
-    {section('Workspace default model', <>
+    {legacyAgents && section('Workspace default model', <>
       <Status value={models} retry={models.reload} /><button type="button" onClick={models.reload}>{t('Refresh model capabilities')}</button>
       <p>{t('Models and reasoning effort come from this Workspace’s actual catalog. No hard-coded model or automatic substitute is used.')}</p>
       {models.data && <><p>{t('Saved:')} {models.data.selection ? `${models.data.selection.model} / ${models.data.selection.reasoningEffort ?? t('Workspace default')}` : t('Not set')} · {t('Revision')} {models.data.revision}</p>

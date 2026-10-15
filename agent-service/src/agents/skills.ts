@@ -4,7 +4,7 @@ import type { AgentPlugin, AgentQueryContext } from './contracts.js';
 import { AgentError, agentError } from './errors.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText, validPlatform } from './configuration.js';
 
-export interface NativeSkillCatalog { backendId: string; configuredSkills: boolean; skills: { skillId: string; name: string; description: string }[] }
+export interface NativeSkillCatalog { backendId: string; configuredSkills: boolean; dynamicSkillCommands: boolean; skills: { skillId: string; name: string; description: string }[] }
 export interface NativeSkillCatalogOptions { timeoutMs?: number; cleanupTimeoutMs?: number; signal?: AbortSignal; platform?: AgentPlatform; projectPath?: string }
 function boundedMs(value: number | undefined, fallback: number, maximum: number): number {
   const selected = value ?? fallback;
@@ -26,7 +26,7 @@ export async function nativeSkillCatalog(plugin: AgentPlugin, frozen: Pick<Froze
   const normalized = normalizeConfiguration(plugin.descriptor.configuration, frozen.options, plugin.descriptor.configuration.version, platform);
   if (Object.keys(normalized).length !== Object.keys(frozen.options).length || Object.entries(normalized).some(([key, value]) => frozen.options[key] !== value)) throw new AgentError('invalid_configuration');
   const options = Object.freeze(structuredClone(normalized));
-  const result: NativeSkillCatalog = { backendId, configuredSkills: plugin.descriptor.capabilities.configuredSkills, skills: [] };
+  const result: NativeSkillCatalog = { backendId, configuredSkills: plugin.descriptor.capabilities.configuredSkills, dynamicSkillCommands: plugin.descriptor.capabilities.dynamicSkillCommands, skills: [] };
   const extension = plugin.extensions?.nativeSkills;
   if (plugin.descriptor.capabilities.nativeSkills !== !!extension) throw new AgentError('protocol_error');
   if (request.signal?.aborted) throw abortError();

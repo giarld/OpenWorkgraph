@@ -15,4 +15,6 @@ export { AgentError } from './errors.js';
 export { AgentControl } from './control.js';
 export { createCodexPlugin } from './codex.js';
 export type { CodexPluginOptions } from './codex.js';
+export { createClaudePlugin } from './claude-code.js';
+export type { ClaudePluginOptions } from './claude-code.js';
 export type { RunContextRequest } from '../run-context.js';

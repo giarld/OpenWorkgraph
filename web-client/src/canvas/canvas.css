@@ -743,7 +743,7 @@
 .owg-panel-target-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .owg-panel-target:active { cursor: grabbing; }
 .owg-panel-target:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; border-radius: 4px; }
-.owg-panel-resize {
+.owg-panel-resize, .owg-panel-resize-start {
   position: absolute;
   right: -10px;
   bottom: -10px;
@@ -757,20 +757,23 @@
   opacity: 0;
   color: var(--canvas-muted);
 }
-.owg-panel-resize svg {
+.owg-panel-resize-start { left: -10px; right: auto; bottom: auto; }
+.owg-fixed-node-panel .prompt-reference-heading { cursor: grab; touch-action: none; user-select: none; }
+.owg-fixed-node-panel .prompt-reference-heading:active { cursor: grabbing; }
+.owg-panel-resize svg, .owg-panel-resize-start svg {
   position: absolute;
   inset: 0;
   width: 32px;
   height: 32px;
   pointer-events: none;
 }
-.owg-fixed-node-panel:hover .owg-panel-resize,
-.owg-fixed-node-panel:focus-within .owg-panel-resize,
-.owg-fixed-node-panel[data-panel-dragging] .owg-panel-resize { opacity: 1; }
-.owg-panel-resize:hover,
-.owg-panel-resize:active { background: transparent; color: var(--canvas-text); }
-.owg-canvas .owg-panel-resize:focus-visible { outline: none; }
-.owg-panel-resize:focus-visible { color: var(--canvas-active); }
+.owg-fixed-node-panel:hover :is(.owg-panel-resize, .owg-panel-resize-start),
+.owg-fixed-node-panel:focus-within :is(.owg-panel-resize, .owg-panel-resize-start),
+.owg-fixed-node-panel[data-panel-dragging] :is(.owg-panel-resize, .owg-panel-resize-start) { opacity: 1; }
+:is(.owg-panel-resize, .owg-panel-resize-start):hover,
+:is(.owg-panel-resize, .owg-panel-resize-start):active { background: transparent; color: var(--canvas-text); }
+.owg-canvas :is(.owg-panel-resize, .owg-panel-resize-start):focus-visible { outline: none; }
+:is(.owg-panel-resize, .owg-panel-resize-start):focus-visible { color: var(--canvas-active); }
 .owg-zoom-controls {
   left: 20px;
   bottom: 20px;

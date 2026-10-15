@@ -1,3 +1,6 @@
+import { agentModelKey, agentModelChoices, captureAgentSelection, initialEffort, nativeSkillConflict, nodeAgentModelPreference, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
+import type { AgentSelection } from '../../../packages/protocol/src/agents';
+import type { ModelSelection } from '../../../packages/protocol/src/index';
 import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
 import { VisualizeNodePreview } from './VisualizeNodePreview';
 import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandaloneUrl } from './visualize-download';
@@ -7,7 +10,7 @@ import { NodeTitleInput } from '../components/NodeTitleInput';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
 import { MarkdownPreview, MarkdownPreviewProvider } from './MarkdownPreview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
-import { useRunProgress, useRunPrompts, useInputChanges } from "./use-run-progress";
+import { useRunProgress, useRunInputs, useInputChanges } from "./use-run-progress";
 import { NodeRunInteractions } from './NodeRunInteractions';
 import { PromptEditor } from "../components/RunPanels";
 import { syncSkillReferences } from "./project-file-mentions";
@@ -192,6 +195,7 @@ interface CanvasUploadJob {
   place?: () => Promise<GraphSnapshot>;
 }
 export interface GraphWorkspaceProps {
+  agentStore?: WorkspaceAgentStore;
   projectName?: string;
   graphActions?: (closeMenu: () => void) => ReactNode;
   recentGraphs?: RecentGraph[];
@@ -239,6 +243,7 @@ export interface GraphWorkspaceProps {
 }
 export function GraphWorkspace(props: GraphWorkspaceProps) {
   const {t, locale} = useI18n();
+  const agentText = (zh: string, en: string) => locale.startsWith('zh') ? zh : en;
   const visualizeSessions = useMemo(() => new VisualizeSessions(props.request, {serviceId:props.graph.serviceId, projectId:props.graph.projectId, graphId:props.graph.graphId}), [props.request, props.graph.serviceId, props.graph.projectId, props.graph.graphId]);
   useEffect(() => () => visualizeSessions.dispose(), [visualizeSessions]);
   useEffect(() => visualizeSessions.retain(props.graph.nodes.map(n => n.id)), [visualizeSessions, props.graph.nodes]);
@@ -282,8 +287,15 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     editor.getSnapshot,
     editor.getSnapshot,
   );
+  useEffect(() => {
+    const observe = () => visualizeSessions.signals.observe(editor.getConfirmedSnapshot(), latest.current.runs);
+    observe(); return editor.subscribe(observe);
+  }, [editor, visualizeSessions]);
+  useEffect(() => { visualizeSessions.signals.observe(editor.getConfirmedSnapshot(), props.runs); }, [editor, visualizeSessions, props.runs]);
   const [selected, setSelected] = useState<string[]>([]);
   const [selectionRevision, setSelectionRevision] = useState(0);
+  const agents = useWorkspaceAgents(props.agentStore);
+  const [skillConflictState, setSkillConflictState] = useState<{ key: string; owner?: WorkspaceAgentStore; reasons: string[] }>();
   const [models, setModels] = useState<ModelDefaults>();
   const [imageProviders,setImageProviders] = useState<ImageProvider[]>([]);
   const showModelControls = !props.temporary;
@@ -442,6 +454,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }, [props.onCanvas]);
   const workspaceElement = useRef<HTMLElement>(null);
   const dockElement = useRef<HTMLDivElement>(null);
+  const [editorBottomInset, setEditorBottomInset] = useState(104);
   useLayoutEffect(() => {
     const workspace = workspaceElement.current, dock = dockElement.current;
     const surface = workspace?.querySelector<HTMLElement>('.owg-canvas');
@@ -455,6 +468,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       dock.style.setProperty('--dock-center', (center - parent.left) + 'px');
       dock.style.setProperty('--dock-bottom', (overlaps ? parent.bottom - controls.top + 12 : parent.bottom - area.bottom + 20) + 'px');
       workspace.style.setProperty('--workspace-hints-bottom', (parent.bottom - dock.getBoundingClientRect().top + 12) + 'px');
+      setEditorBottomInset(Math.max(104, area.bottom - dock.getBoundingClientRect().top + 28));
     };
     position();
     const observer = new ResizeObserver(position);
@@ -554,12 +568,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   useEffect(() => {
     if (props.online) void editor.refresh().catch(props.onError);
   }, [editor, props.refreshToken, props.online]);
+  const imageModelControls = props.graph.nodes.some(item => selected.includes(item.id) && item.type === 'image');
   useEffect(() => {
     let live = true; setModels(undefined);
-    if (!showModelControls || props.modelsAvailable === false) return;
+    if (!showModelControls || props.modelsAvailable === false || agents.mode !== 'legacy' && !imageModelControls) return;
     void (props.serviceRequest ?? props.request)<ModelDefaults>("/v1/models").then(value => { if (live) setModels(value); }).catch(error => { if (live) props.onError(error); });
     return () => { live = false; };
-  }, [props.serviceRequest, props.request, props.modelsAvailable, props.modelRefreshToken, showModelControls]);
+  }, [props.serviceRequest, props.request, props.modelsAvailable, props.modelRefreshToken, showModelControls, agents.mode, imageModelControls]);
   useEffect(() => {
     let live=true;
     if (!showModelControls) { setImageProviders([]); return; }
@@ -817,7 +832,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     setSelected([target.nodeId]);setNodeEditorOpen(target.nodeId, true);canvas.current?.locate(target.nodeId);
   },[props.editExecutionNode,g.graphId,g.projectId]);
   const progress = useRunProgress(props.request, graphRuns, props.online, props.refreshToken);
-  const submittedPrompts = useRunPrompts(props.request, graphRuns, props.online, props.refreshToken);
+  const submittedInputs = useRunInputs(props.request, graphRuns, props.online, props.refreshToken);
+  const submittedPrompts = useMemo(() => Object.fromEntries(Object.entries(submittedInputs).map(([id, input]) => [id, input.prompt])), [submittedInputs]);
   const nodeRenderKeys = useMemo(() => new Map(g.nodes.map(wire => {
     const run = latestNodeRuns.get(wire.id);
     const runProgress = run ? progress[run.id] : undefined;
@@ -1552,27 +1568,78 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     : undefined : undefined;
   const missingInput = node?.type==='image' && !String(content.prompt??'').trim() && !(imagePreview?.nodeId===node.id && imagePreview.hasImage);
   const missingImageInputHint = t('Enter a prompt or connect an existing image resource.');
+  const codexImageBlock = agents.mode === 'legacy' ? undefined
+    : agents.mode !== 'agents' || !agents.resources.codex?.settings ? agentText('Codex 设置尚未加载，暂不能生图。', 'Codex settings have not loaded. Image generation is unavailable.')
+    : !agents.resources.codex.settings.enabled ? agentText('Codex 已停用，请在 Agent 设置中启用。', 'Codex is disabled. Enable it in Agent settings.') : undefined;
   const imageIssue = imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a reference image'
     || imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a frozen reference image'
     ? missingImageInputHint : imagePreview?.issues[0];
-  const imageBlock = node?.type==='image' ? (imagePreview?.nodeId!==node.id ? t('Checking frozen image inputs…') : imageIssue ?? (missingInput?missingImageInputHint:selectedRoute.type==='api'?apiBlock??customSizeIssue:customSizeIssue??(!props.imageAvailable?props.imageReason??t('Codex image generation is unavailable.'):undefined))) : undefined;
-  const runDisabled = promptDisabled || running || (node?.type==='image' ? Boolean(imageBlock) || (selectedRoute.type==='codex' && !props.executionAvailable) : !String(content.prompt ?? "").trim() || !props.executionAvailable);
+  const imageBlock = node?.type==='image' ? (imagePreview?.nodeId!==node.id ? t('Checking frozen image inputs…') : imageIssue ?? (missingInput?missingImageInputHint:selectedRoute.type==='api'?apiBlock??customSizeIssue:codexImageBlock??customSizeIssue??(!props.imageAvailable?props.imageReason??t('Codex image generation is unavailable.'):undefined))) : undefined;
+  const agentDraftKey = JSON.stringify([g.serviceId, g.projectId, g.graphId, node?.id]);
+  const historicalInput = typeof object(content.modelOverride ?? null).model === 'string' ? undefined : submittedInputs[snapshotRun?.id ?? ''];
+  const agentDraft = nodeAgentModelPreference(content.agentModelOverride, historicalInput);
+  const inheritedAgent = workspaceAgentDefault(agents);
+  const pendingAgent = agentDraft ?? inheritedAgent;
+  const agentDescriptor = agents.descriptors.find(item => item.id === pendingAgent?.backendId);
+  const runKind = node?.type === 'execution' ? 'execution' : node?.type === 'image' ? 'image_generation' : node?.type === 'visualize' ? 'visualize_generation' : 'text_generation';
+  const oldModel = object(content.modelOverride ?? null);
+  const legacyModel = typeof oldModel.model === 'string' ? { model: oldModel.model, reasoningEffort: typeof oldModel.reasoningEffort === 'string' ? oldModel.reasoningEffort : null } : undefined;
+  let explicitAgent: AgentSelection | undefined, agentBlock: string | undefined;
+  if (node && node.type !== 'image' && agents.mode !== 'legacy') {
+    try {
+      explicitAgent = captureAgentSelection(agents, agentDraft, runKind, legacyModel);
+      const references = (Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[];
+      agentBlock = legacyModel && explicitAgent.backendId !== 'codex'
+        ? agentText('节点保留了旧 Codex 模型覆盖。请明确清除旧覆盖后运行此 Agent，或切回 Codex。', 'This node retains a legacy Codex model override. Explicitly clear it before running this Agent, or switch back to Codex.')
+        : references.map(ref => nativeSkillConflict(ref, explicitAgent!.backendId, agentDescriptor?.capabilities.nativeSkills)).find(Boolean);
+      if (Array.isArray(content.features) && content.features.length && !agentDescriptor?.capabilities.visualize) agentBlock = t('This Agent does not support the required capability.');
+    } catch (error) { agentBlock = error instanceof Error ? error.message : String(error); }
+  }
+  if (!agentBlock && skillConflictState?.key === agentDraftKey + ':' + pendingAgent?.backendId && skillConflictState.owner === props.agentStore) agentBlock = skillConflictState.reasons[0];
+  const agentExecutionAvailable = agents.mode === 'agents' ? !agentBlock && !!explicitAgent : props.executionAvailable;
+  const runDisabled = promptDisabled || running || (node?.type==='image' ? Boolean(imageBlock) || (selectedRoute.type==='codex' && !props.executionAvailable) : !String(content.prompt ?? "").trim() || !agentExecutionAvailable);
+  const setAgentDraft = (backendId: string, selectedModel: ModelSelection) => {
+    if (!props.agentStore || !node) return;
+    act(() => editor.edit(node.id, { ...content, agentModelOverride: { backendId, model: { ...selectedModel } } }));
+  };
+  const selectedAgentModel = explicitAgent?.model ?? pendingAgent?.model;
+  const agentModels = agents.resources[pendingAgent?.backendId ?? '']?.models;
+  const agentModelControl = node?.type !== 'image' && agents.mode !== 'legacy' && <>
+    <select aria-label={t('Run model')} disabled={promptDisabled || agents.mode !== 'agents'} value={agentDraft ? agentModelKey(agentDraft.backendId, agentDraft.model.model) : ''} onChange={event => {
+      if (!event.target.value) { if (node) act(() => editor.edit(node.id, { ...content, agentModelOverride: null })); return; }
+      const [backendId, modelId] = JSON.parse(event.target.value) as [string, string];
+      const selected = agents.resources[backendId]?.models?.find(item => item.id === modelId);
+      if (selected || agents.descriptors.find(item => item.id === backendId)?.models.allowCustom) setAgentDraft(backendId, { model: modelId, reasoningEffort: selected ? initialEffort(selected) : null });
+    }}>
+      <option value="">{t('Workspace default')} · {inheritedAgent ? inheritedAgent.backendId + ' · ' + inheritedAgent.model.model : t('Loading…')}</option>
+      {orderedAgents(agents).map(backend => <optgroup key={backend.id} label={backend.name}>{agentModelChoices(agents, backend.id, agentDraft?.backendId === backend.id ? agentDraft.model.model : undefined).map(item => <option key={item.id} value={agentModelKey(backend.id, item.id)} disabled={agents.resources[backend.id]?.settings?.enabled === false || item.unavailable}>{backend.name} · {item.id}{item.manual ? agentText('（手动 ID）', ' (custom ID)') : item.unavailable ? agentText('（不可用）', ' (unavailable)') : item.hidden ? agentText('（隐藏）', ' (hidden)') : ''}</option>)}</optgroup>)}
+      {agentDraft && !agentModelChoices(agents, agentDraft.backendId, agentDraft.model.model).some(item => item.id === agentDraft.model.model) && <option value={agentModelKey(agentDraft.backendId, agentDraft.model.model)}>{agentDraft.backendId} · {agentDraft.model.model} ({t('Unavailable')})</option>}
+    </select>
+    {legacyModel && pendingAgent?.backendId !== 'codex' && <button type="button" disabled={promptDisabled} onClick={() => act(() => editor.edit(node!.id, { ...content, modelOverride: null }))}>{agentText('清除旧 Codex 模型覆盖', 'Clear legacy Codex model override')}</button>}
+  </>;
   const unavailableReason = !props.online ? t('The Workspace is disconnected or synchronizing. Connect and try again.')
     : node?.type==='image' ? imageBlock ?? (selectedRoute.type==='codex' && !props.executionAvailable ? props.executionReason ?? t('Codex execution is unavailable.') : undefined)
-    : !props.executionAvailable ? props.executionReason ?? t('Workspace execution is unavailable.') : undefined;
+    : agentBlock ?? (!agentExecutionAvailable ? props.executionReason ?? t('Workspace execution is unavailable.') : undefined);
   const submitNodeRun = async (preserveHistoricalOutputs?: boolean) => {
     if (!node || runDisabled) return;
     setRunning(true);
     try {
-      const submitted = await editor.run(node.id, node.type === "execution" ? "execution" : node.type === "image" ? "image_generation" : node.type === "visualize" ? "visualize_generation" : "text_generation", node.type==='image' && selectedRoute.type==='api'?undefined:model ? { model, reasoningEffort: effort || null } : undefined, node.type==='image'?selectedRoute:undefined, preserveHistoricalOutputs);
+      // Capture before flush/preview. The editor copies again at its public boundary.
+      const capturedAgent = explicitAgent ? structuredClone(explicitAgent) : undefined;
+      const submitted = await editor.run(node.id, runKind, {
+        ...(capturedAgent ? { agent: capturedAgent } : node.type === 'image' && selectedRoute.type === 'api' ? {} : model ? { modelOverride: { model, reasoningEffort: effort || null } } : {}),
+        ...(node.type === 'image' ? { imageRoute: selectedRoute } : {}), preserveHistoricalOutputs,
+      });
       submittedNodeKeys.current.add(JSON.stringify([g.serviceId, g.projectId, g.graphId, node.id]));
       setSubmittedRunDetails(previous => [...previous.filter(run => run.nodeId !== submitted.nodeId), submitted]);
       props.onRunSubmitted?.(submitted);
       if (node.type === "execution") setNodeEditorOpen(node.id, false);
       props.onChanged();
       if (node.type === "execution") await editor.refresh();
-    }
-    finally { setRunning(false); }
+    } catch (error) {
+      if (errorCode(error) === 'REVISION_CONFLICT' || errorCode(error) === 'PLUGIN_UNAVAILABLE') void props.agentStore?.refresh();
+      throw error;
+    } finally { setRunning(false); }
   };
   const runNode = () => {
     if (!node || runDisabled) return;
@@ -1588,7 +1655,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     : inheritedReasoningEffort === null
       ? t('Reasoning · None')
       : t('Reasoning · {effort}', { effort: inheritedReasoningEffort });
-  const reasoningControl = node && (<select aria-label={t('Reasoning effort')} value={effort} disabled={promptDisabled} onChange={e => {
+  const reasoningControl = node && node.type !== 'image' && agents.mode !== 'legacy' ? <select aria-label={t('Reasoning effort')} disabled={promptDisabled || !pendingAgent} value={selectedAgentModel?.reasoningEffort ?? ''} onChange={event => { if (pendingAgent && selectedAgentModel) setAgentDraft(pendingAgent.backendId, { ...selectedAgentModel, reasoningEffort: event.target.value || null }); }}><option value="">{locale.startsWith('zh') ? '使用原生默认' : 'Use native default'}</option>{agentModels?.find(item => item.id === selectedAgentModel?.model)?.reasoningEfforts.map(value => <option key={value}>{value}</option>)}</select> : node && (<select aria-label={t('Reasoning effort')} value={effort} disabled={promptDisabled} onChange={e => {
                   const chosenModel = model || models?.selection?.model;
                   if (!chosenModel) return;
                   setModel(chosenModel); setEffort(e.target.value); act(() => editor.edit(node.id, { ...content, modelOverride: { model: chosenModel, reasoningEffort: e.target.value || null } }));
@@ -1905,8 +1972,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <button className="icon-button" aria-label={t("Change Work Graph background")} title={t("Change Work Graph background")} onClick={() => setBackground(background === "lines" ? "dots" : background === "dots" ? "blank" : "lines")}><Grid2X2 size={18}/></button>
       </div>
       {props.sidebarTarget && createPortal(<>
-        <div className="sidebar-search"><Search size={15} aria-hidden="true"/><input aria-label={t('Find nodes')} placeholder={t('Search nodes')} value={search} onChange={e => setSearch(e.target.value)}/></div>
-        <div className="node-count muted"><span>{t('All nodes')}</span><span>{work.nodes.length}</span></div>
+        <div className="node-outline-controls">
+          <div className="sidebar-search"><Search size={15} aria-hidden="true"/><input aria-label={t('Find nodes')} placeholder={t('Search nodes')} value={search} onChange={e => setSearch(e.target.value)}/></div>
+          <div className="node-count muted"><span>{t('All nodes')}</span><span>{work.nodes.length}</span></div>
+        </div>
         <NodeOutline key={JSON.stringify([work.serviceId, work.projectId, work.id])} nodes={work.nodes} selected={selected} search={search} selectionRevision={selectionRevision} onSelect={id => { selectNodes([id]); canvas.current?.locate(id); }} />
       </>, props.sidebarTarget)}
       {outputMenu && <>
@@ -2019,6 +2088,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         }}
       >
         <Canvas
+          editorBottomInset={editorBottomInset}
           key={viewportKey}
           ref={attachCanvas}
           initialViewport={readViewport(localStorage, viewportKey)}
@@ -2200,6 +2270,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               references={g.edges.filter(edge => edge.kind === "reference" && edge.targetId === node.id).map(edge => ({ id: edge.sourceId, title: work.nodes.find(n => n.id === edge.sourceId)?.title || "Reference node" }))}
               onOpenReference={setReferenceId} onClose={dismissNodeEditor} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
               mentionEnabled={props.online && props.projectActive}
+              onSkillConflictsChange={reasons => setSkillConflictState(current => current?.key === agentDraftKey + ':' + pendingAgent?.backendId && current.owner === props.agentStore && JSON.stringify(current.reasons) === JSON.stringify(reasons) ? current : { key: agentDraftKey + ':' + pendingAgent?.backendId, owner: props.agentStore, reasons })}
+              skillBackendId={node.type !== "image" && agents.mode === "agents" ? pendingAgent?.backendId : undefined}
+              skillContextRevision={node.type !== "image" && agents.mode === "agents" ? JSON.stringify([agents.resources[pendingAgent?.backendId ?? ""]?.settings?.revision, agents.configuration?.permissions.revision]) : undefined}
+              skillBackendName={node.type !== "image" ? agentDescriptor?.name : undefined}
+              nativeSkillsSupported={node.type === "image" || agents.mode === "legacy" ? true : !!pendingAgent && agentDescriptor?.capabilities.nativeSkills === true}
+              configuredSkillsSupported={node.type === "image" || agents.mode === "legacy" ? true : !!pendingAgent && agentDescriptor?.capabilities.configuredSkills === true}
               skillEnabled={node.type !== "image" || selectedRoute.type === "codex"}
               skillReferences={(Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[]}
               features={((Array.isArray(content.features) ? content.features : []) as unknown[]).filter(isVisualizeFeatureSelection)}
@@ -2223,10 +2299,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 {selectedRoute.type==='api' && <label className="image-toolbar-model" title={t('Image model')}><select aria-label={t('Image model')} value={selectedRoute.modelId} disabled={promptDisabled||!selectedProvider?.models.length} onChange={event=>{const nextModel=selectedProvider?.models.find(item=>item.id===event.target.value);saveImageRoute({...selectedRoute,modelId:event.target.value,options:nextModel?normalizeImageOptionsForModel(imageOptions,nextModel):imageOptions});}}>{selectedProvider?.models.length?<>{selectedProvider.models.map(item=><option key={item.id} value={item.id}>{item.name || item.id}</option>)}</>:<option value="">{t('No image model has been added. Configure one in Workspace management first.')}</option>}</select></label>}
 
                 </>}
-                {showModelControls && (node.type!=='image'||selectedRoute.type==='codex') && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
+                {showModelControls && node.type !== 'image' && agentModelControl}
+                {showModelControls && (node.type==='image' ? selectedRoute.type==='codex' : agents.mode==='legacy') && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
                   setModel(e.target.value); setEffort(""); act(() => editor.edit(node.id, { ...content, modelOverride: e.target.value ? { model: e.target.value, reasoningEffort: null } : null }));
                 }}><option value="">{models?.selection?.model ?? t('Workspace default')}</option>{models?.available.map(m => <option key={m.id}>{m.id}</option>)}{model && !models?.available.some(m => m.id === model) && <option value={model}>{t('{model} (currently unavailable)', {model})}</option>}</select>
                 {node.type !== 'image' && reasoningControl}</>}
+                {node.type !== 'image' && agents.mode !== 'legacy' && reasoningControl}
                 {node.type === 'image' && <button type="button" className="image-settings-trigger" aria-label={t('Image settings')} aria-haspopup="dialog" aria-expanded={imageSettingsOpen} title={t('Image settings: quality, size, aspect ratio, and reasoning effort')} disabled={promptDisabled} onClick={()=>setImageSettingsOpen(true)}><Settings2 size={14}/><span>{imageOptions.quality==='auto'?t('Auto'):t({high:'High',medium:'Medium',low:'Low'}[imageOptions.quality!])} · {imageOptions.aspectRatio === 'auto' ? t('Auto ratio') : imageOptions.aspectRatio}</span></button>}
               </div>}
             >

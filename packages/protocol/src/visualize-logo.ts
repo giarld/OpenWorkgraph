@@ -3,7 +3,12 @@ import type { VisualizePagePackage } from './visualize.js';
 export const VISUALIZE_LOGO_MAX_BYTES = 8192;
 export const VISUALIZE_LOGO_MAX_ELEMENTS = 64;
 export const VISUALIZE_DEFAULT_LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><g fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="10" y="10" width="44" height="44" rx="8"/><path d="M18 24h28M18 40h28"/></g><g fill="#3b82f6"><circle cx="28" cy="24" r="5"/><circle cx="38" cy="40" r="5"/></g></svg>';
-export const VISUALIZE_LOGO_GENERATION_GUIDANCE = '采用双色几何实心风格。用厚实主轮廓表达页面核心功能，以第二种颜色强调关键部件，让色块本身形成图标，不加外围底板。使用靛蓝 #4f46e5 与青色 #06b6d4，主结构厚度约 6–8 单位，适度圆角。通过简单拼接或局部交叠建立记忆点，不堆叠细节，不统一套用空心方框。最多两个视觉主体，在 24 像素尺寸下仍清晰可辨。页面功能：使用本次具体功能名称。同次交付 version=2 页面包的 logoSvg 直接 SVG 文本，不调用图像模型；viewBox="0 0 64 64"、透明背景、四周至少 8 单位安全区，最多两种颜色。生成时优先 2–6 个图形元素，上限 10 个，SVG 不超过 2 KiB；兼容校验硬上限仍为 64 个图形元素 / 8 KiB，不作为生成目标。不含文字、位图、渐变、阴影、动画、外部资源、CSS 或 currentColor。';
+export const VISUALIZE_LOGO_PALETTES = [
+  { name: '松绿 × 琥珀', primary: '#287568', accent: '#D99A35' },
+  { name: '海蓝 × 珊瑚', primary: '#3478B8', accent: '#E98273' },
+  { name: '钢蓝 × 青绿', primary: '#5276A5', accent: '#38B6A0' },
+] as const;
+export const VISUALIZE_LOGO_GENERATION_GUIDANCE = '采用双色几何实心风格。用厚实主轮廓表达页面核心功能，以第二种颜色强调关键部件，让色块本身形成图标，不加外围底板。仅使用本次指定的主色与强调色，不混用其他配色组；将显式颜色值保存到 logoSvg，不在页面加载或渲染时随机变色。主结构厚度约 6–8 单位，适度圆角。通过简单拼接或局部交叠建立记忆点，不堆叠细节，不统一套用空心方框。最多两个视觉主体，在 24 像素尺寸下仍清晰可辨。页面功能：使用本次具体功能名称。同次交付 version=2 页面包的 logoSvg 直接 SVG 文本，不调用图像模型；viewBox="0 0 64 64"、透明背景、四周至少 8 单位安全区，最多两种颜色。生成时优先 2–6 个图形元素，上限 10 个，SVG 不超过 2 KiB；兼容校验硬上限仍为 64 个图形元素 / 8 KiB，不作为生成目标。不含文字、位图、渐变、阴影、动画、外部资源、CSS 或 currentColor。';
 const elements = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'title', 'desc']);
 const attributes = new Set(['xmlns', 'viewBox', 'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'fill-rule', 'opacity', 'fill-opacity', 'stroke-opacity', 'transform', 'd', 'x', 'y', 'width', 'height', 'rx', 'ry', 'cx', 'cy', 'r', 'x1', 'x2', 'y1', 'y2', 'points']);
 /** Strict XML parser for a closed SVG dialect. No browser repair, entity

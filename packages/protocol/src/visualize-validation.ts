@@ -234,7 +234,15 @@ export function validateVisualizePagePackage(value: unknown): VisualizePagePacka
 export function validateVisualizeNodeContent(value: unknown): VisualizeNodeContent {
   const content = checkedVisualizeJson(value, 2_097_152);
   if (!object(content) || typeof content.prompt !== 'string' || !Array.isArray(content.inputBindings)) fail('INVALID_REQUEST', 'Invalid visualize node content');
-  fields(content, ['title', 'prompt', 'modelOverride', 'skillReferences', 'features', 'inputBindings', 'page', 'form', 'state']);
+  fields(content, ['title', 'prompt', 'modelOverride', 'agentModelOverride', 'skillReferences', 'features', 'inputBindings', 'page', 'form', 'state']);
+  if (own(content, 'agentModelOverride') && content.agentModelOverride !== null) {
+    const preference = content.agentModelOverride;
+    if (!object(preference)) fail('INVALID_REQUEST', 'Invalid Agent model preference');
+    fields(preference, ['backendId', 'model']);
+    if (!boundedString(preference.backendId, 128) || !preference.backendId.trim() || !object(preference.model)) fail('INVALID_REQUEST', 'Invalid Agent model preference');
+    fields(preference.model, ['model', 'reasoningEffort']);
+    if (!boundedString(preference.model.model, 512) || !preference.model.model.trim() || !(preference.model.reasoningEffort === null || boundedString(preference.model.reasoningEffort, 128))) fail('INVALID_REQUEST', 'Invalid Agent model preference');
+  }
   if (own(content, 'title') && (typeof content.title !== 'string' || content.title.length > 1024)) fail('INVALID_REQUEST', 'Invalid node title');
   if (own(content, 'modelOverride')) {
     if (!object(content.modelOverride)) fail('INVALID_REQUEST', 'Invalid model override');

@@ -138,7 +138,8 @@ export class Transport {
     const skillsQuery = parts.length === 2 && skillParams.size > 0 &&
       /^\/v1\/projects\/[A-Za-z0-9_-]+\/skills(?:\/search)?$/.test(pathname) &&
       [...skillParams].every(([key, value]) => skillParams.getAll(key).length === 1 &&
-        (key === 'source' ? ['builtin-feature', 'openworkgraph', 'codex'].includes(value) : key === 'query' && pathname.endsWith('/search') && value.length <= 100));
+        (key === 'source' ? ['builtin-feature', 'openworkgraph', 'codex', 'agent'].includes(value) : key === 'settingsGeneration' ? value === 'agent-configuration-v1' && skillParams.get('source') === 'agent' : key === 'backendId' ? /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(value) && value.length <= 128 : key === 'query' && pathname.endsWith('/search') && value.length <= 100)) &&
+      (skillParams.get('source') === 'agent' ? skillParams.has('backendId') : !skillParams.has('backendId'));
     const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(pathname);
     // Stable skill identities may contain source separators and repository paths.
     // Permit exactly one encoded identity segment, never arbitrary encoded API paths.

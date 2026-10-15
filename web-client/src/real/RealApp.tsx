@@ -1,3 +1,4 @@
+import { workspaceAgentStore } from './agent-state';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ImportWorkGraphDialog } from './ImportWorkGraphDialog';
 import { ProgressDialog } from '../components/ProgressDialog';
@@ -146,7 +147,7 @@ export function RealApp() {
     setRightPanel(current => (typeof value === 'function' ? value(current === 'management') : value) ? 'management' : current === 'management' ? null : current);
   const toggleWorkspaceManagement = () => setServicePanelOpen(open => !open);
   const [servicePage, setServicePage] = useState<"list" | "connect" | "projects">("list");
-  const [managementInitialPage, setManagementInitialPage] = useState<'projects' | 'add'>('projects');
+  const [managementInitialPage, setManagementInitialPage] = useState<'projects' | 'add' | 'settings'>('projects');
   const [managementEntry, setManagementEntry] = useState(0);
   const openAddProject = () => {
     setManagementInitialPage('add');
@@ -498,7 +499,26 @@ export function RealApp() {
       setGraphId(id);
     }
   };
-  const canvasRequest = localMode ? local.store.request : request;
+  const managementAgents = useMemo(() => {
+    if (!serviceId || connection?.status !== 'paired') return undefined;
+    return workspaceAgentStore(registry, serviceId);
+  }, [registry, serviceId, connection?.generation, connection?.session.id, connection?.status]);
+  const graphConnection = graph && !localMode ? registry.get(graph.serviceId) : undefined;
+  const graphAgents = useMemo(() => {
+    if (!graphConnection || graphConnection.status !== 'paired') return undefined;
+    return workspaceAgentStore(registry, graphConnection.serviceId);
+  }, [registry, graphConnection?.serviceId, graphConnection?.generation, graphConnection?.session.id, graphConnection?.status]);
+  // Offline connections keep their lease, so an editor mounted from cache can
+  // use the same transport after the event channel reconnects.
+  const graphTransport = useMemo(() => graphConnection && graphConnection.status !== 'invalid' ? graphConnection.serviceId === transport?.serviceId ? transport : new Transport(registry, graphConnection.serviceId) : undefined,
+    [registry, transport, graphConnection?.serviceId, graphConnection?.generation, graphConnection?.session.id]);
+  const graphRequest = useMemo<Request>(() => graphTransport === transport ? request : async <T,>(path: string, body?: unknown, method?: string, options?: { journal?: 'session' | 'memory'; range?: { start: number; end: number } }) => {
+    if (!graphTransport) throw new LifecycleCancelledError();
+    if ((body !== undefined || method === 'DELETE') && !isSnapshotSafeReadRequest(path, method) &&
+      (registry.get(graphTransport.serviceId)?.status !== 'paired' || dataRef.current[graphTransport.serviceId]?.eventStatus !== 'connected')) throw Error(t('The Workspace is offline or reconciling its snapshot. Editing, uploading, and running are unavailable.'));
+    return graphTransport.request<T>(path, body, method, options);
+  }, [graphTransport, transport, request, registry, t]);
+  const canvasRequest = localMode ? local.store.request : graphRequest;
   const canvasChanged = () => { if (localMode) void local.refresh().catch(onError); else changed(); };
   const captureCanvasSelection = () => {
     const epoch = navigation.current;
@@ -1471,7 +1491,8 @@ export function RealApp() {
                 toastTarget={toastViewport}
                 theme={theme}
                 request={canvasRequest}
-                serviceRequest={localMode ? localBridge?.request : request}
+                serviceRequest={localMode ? localBridge?.request : graphRequest}
+                agentStore={graphAgents}
                 modelsAvailable={localMode ? !!localBridge?.capabilities.models : !!online}
                 modelRefreshToken={modelRevision}
                 assetsAvailable={assetsAvailable}
@@ -1688,6 +1709,7 @@ export function RealApp() {
           </>}
           {servicePage === "projects" && connection && (
             <ManagementPanel
+              agentStore={managementAgents}
               initialPage={managementInitialPage}
               onBack={() => setServicePage("list")}
               runtimeAddress={connection.address}

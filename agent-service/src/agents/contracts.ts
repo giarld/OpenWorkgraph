@@ -73,6 +73,8 @@ export interface AgentExtensions {
   reattach?: { version: 1; attach(context: AgentExtensionContext): Promise<RuntimeSnapshot> };
 }
 export interface AgentPlugin {
+  /** Native mapping; project policy never prevents writing Run inputs/outputs. */
+  projectPermissions?(mode: import('@openworkgraph/protocol').SandboxMode, context: { projectPath?: string; runsPath?: string }): Record<string, AgentOptionValue>;
   descriptor: AgentDescriptor;
   createAdapter(dependencies: AgentAdapterDependencies): AgentAdapter | Promise<AgentAdapter>;
   diagnose?(context: AgentQueryContext): Promise<AgentAvailability>;

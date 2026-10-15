@@ -75,6 +75,8 @@ export interface CanvasHandle {
   getPlacementPosition(size: Size): Point;
 }
 export interface CanvasProps {
+  /** Reserve screen space for the host toolbar below the prompt editor. */
+  editorBottomInset?: number;
   graph: WorkGraph;
   readOnly?: boolean;
   adapter?: WorkgraphAdapter;
@@ -450,6 +452,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     const toolbarNode = props.selectedIds.length === 1 && !gesture
       ? nodeById.get(props.selectedIds[0])
       : undefined;
+    const toolbarBelow = !!toolbarNode &&
+      (toolbarNode.y + toolbarNode.height / 2) * viewport.k + viewport.y < size.height / 2;
     const panelNode = props.selectedIds.length === 1 ? nodeById.get(props.selectedIds[0])
       : props.focusPanelNodeId ? nodeById.get(props.focusPanelNodeId) : undefined;
     const panelContent = panelNode && props.renderPanel?.(panelNode);
@@ -459,11 +463,12 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     const panelCenter = nav ? navigationCenterX(panelWidth, nav, 16) : size.width / 2;
     const editorArea = { x: nav?.left ?? 0, y: 0,
       width: nav ? nav.right - nav.left : size.width, height: size.height };
+    const editorBottomInset = props.editorBottomInset ?? 104;
     const panelArea = { x: editorArea.x + 16, y: 16,
       // Keep the panel and its outer resize arc above the bottom tools.
-      width: Math.max(1, editorArea.width - 32), height: Math.max(1, size.height - 104) };
+      width: Math.max(1, editorArea.width - 32), height: Math.max(1, size.height - editorBottomInset) };
     const defaultPanelBounds = { x: panelCenter - panelWidth / 2,
-      y: size.height - 464, width: panelWidth, height: 360 };
+      y: size.height - editorBottomInset - 360, width: panelWidth, height: 360 };
     const panelVisible = !!panelNode && intersects(panelNode, {
       x: (editorArea.x - viewport.x) / viewport.k, y: -viewport.y / viewport.k,
       width: editorArea.width / viewport.k, height: size.height / viewport.k,
@@ -1451,9 +1456,11 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               data-canvas-interactive
               style={{
                 left: toolbarNode.x + toolbarNode.width / 2,
-                top: toolbarNode.y - 40 / viewport.k,
-                transform: "translate(-50%, -100%) scale(" + 1 / viewport.k + ")",
-                transformOrigin: "bottom center",
+                top: toolbarBelow
+                  ? toolbarNode.y + toolbarNode.height + 12 / viewport.k
+                  : toolbarNode.y - 40 / viewport.k,
+                transform: (toolbarBelow ? "translate(-50%, 0) scale(" : "translate(-50%, -100%) scale(") + 1 / viewport.k + ")",
+                transformOrigin: toolbarBelow ? "top center" : "bottom center",
               }}
             >
               {props.renderToolbar(toolbarNode)}

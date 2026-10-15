@@ -5,6 +5,7 @@ import { nativeSkillCatalog } from './skills.js';
 import { ServiceError } from '../errors.js';
 import { isPlainRecord, exactKeys, normalizeConfiguration, publicText } from './configuration.js';
 import { AgentError } from './errors.js';
+import { validateSelectionGeneration } from './workspace-configuration-validation.js';
 import { validAgentId } from './registry.js';
 
 function revision(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 0; }
@@ -21,7 +22,9 @@ function options(value: unknown): boolean {
       && (typeof item === 'boolean' || typeof item === 'number' && Number.isFinite(item) || typeof item === 'string' && (item === '' || publicText(item))));
 }
 function selection(value: unknown): value is AgentSelection {
-  return record(value, ['backendId', 'configRevision', 'schemaVersion', 'options', 'model']) && validAgentId(value.backendId)
+  if (!record(value, ['backendId', 'configRevision', 'schemaVersion', 'options', 'model', 'settingsGeneration', 'permissions'])) return false;
+  try { validateSelectionGeneration(value); } catch { return false; }
+  return record(value, ['backendId', 'configRevision', 'schemaVersion', 'options', 'model', 'settingsGeneration', 'permissions']) && validAgentId(value.backendId)
     && revision(value.configRevision) && revision(value.schemaVersion) && value.schemaVersion > 0
     && (!Object.hasOwn(value, 'options') || options(value.options)) && (!Object.hasOwn(value, 'model') || model(value.model));
 }
@@ -51,10 +54,15 @@ export class AgentControl {
   diagnose(backendId: string, signal?: AbortSignal) {
     return this.services().discovery.diagnose(backendId, { ...this.query(backendId), ...(signal ? { signal } : {}) });
   }
-  async listNativeSkills(backendId: string, signal?: AbortSignal, projectPath?: string) {
-    const settings = this.getSettings(backendId);
+  async listNativeSkills(backendId: string, signal?: AbortSignal, projectPath?: string, settingsGeneration?: string) {
+    if (settingsGeneration !== undefined && settingsGeneration !== 'agent-configuration-v1') throw new AgentError('invalid_configuration');
+    const configuration = settingsGeneration ? this.runtime.agentConfiguration : undefined;
+    if (settingsGeneration && !configuration) throw new AgentError('runtime_unavailable');
+    const captured = configuration?.query(backendId);
+    const settings = captured ? { backendId, options: captured.options } : this.getSettings(backendId);
     const request = { ...(signal ? { signal } : {}), ...(projectPath ? { projectPath } : {}) };
     const result = await nativeSkillCatalog(this.services().registry.get(backendId), settings, request);
+    if (captured && (configuration!.getBackend(backendId).revision !== captured.configRevision || configuration!.get().permissions.revision !== captured.permissionsRevision)) throw new ServiceError('REVISION_CONFLICT', '技能目录查询期间配置已变化，请刷新后重试。');
     // An opaque public identity must not contain a legacy absolute-path ID.
     if (result.skills.some(skill => /(?:^|:)(?:\/|[A-Za-z]:[\\/]|~\/|\\\\)/.test(skill.skillId))) throw new AgentError('protocol_error');
     return result;
@@ -115,6 +123,12 @@ export class AgentControl {
       return structuredClone(replay) as unknown as Run;
     };
     if (this.runtime.db.isTransaction) throw new ServiceError('CONFLICT', '任务预检必须先于宿主事务。');
+    if (request.agent!.settingsGeneration === 'agent-configuration-v1') {
+      // New generation preflight and acceptance are owned by the runtime; never
+      // inspect legacy settings before handing it the captured public request.
+      const commit = await this.runtime.prepareSubmission(request, [], principal);
+      return () => commit(principal);
+    }
     const { settings, registry } = this.services(), agent = request.agent!;
     const current = settings.get(agent.backendId);
     if (!current.enabled) throw new AgentError('runtime_unavailable');

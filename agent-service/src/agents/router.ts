@@ -1,4 +1,4 @@
-import { isTerminalRunStatus } from '@openworkgraph/protocol';
+import { isTerminalRunStatus, AGENT_FAILURE_REASONS } from '@openworkgraph/protocol';
 import type { InputSnapshot, Interaction, Json, Run, AgentPlatform, AgentFailureReason } from '@openworkgraph/protocol';
 import type { BackendAdapter, BackendCallbacks, RuntimeSnapshot } from '../backend/types.js';
 import type { SchedulerBackend, BackendContext, ReconcileResult } from '../scheduler.js';
@@ -31,7 +31,7 @@ function immutable<T>(value: T): T {
   return Object.freeze(value);
 }
 function agentError(error: unknown, fallback: AgentFailureReason = 'protocol_error'): AgentError {
-  const reasons = ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown'];
+  const reasons: readonly string[] = AGENT_FAILURE_REASONS;
   let reason = fallback;
   try { if (error instanceof AgentError) { const nativeReason = error.reason; if (reasons.includes(nativeReason)) reason = nativeReason; } } catch { /* Native error getters are not public diagnostics. */ }
   return normalizeAgentError(new AgentError(reason), fallback);
@@ -96,10 +96,11 @@ export class AgentRouter implements SchedulerBackend {
     if (!value || value.runId !== id || value.backendId !== undefined && value.backendId !== entry.backendId || value.attemptId !== undefined && value.attemptId !== entry.attemptId || value.identity && (value.identity.backendId !== entry.backendId || value.identity.attemptId !== entry.attemptId || !identifier(value.identity.messageId) || value.identity.sessionId !== undefined && !identifier(value.identity.sessionId) || value.identity.turnId !== undefined && !identifier(value.identity.turnId))) throw new AgentError('protocol_error');
     if (!['starting', 'running', 'waiting_answer', 'waiting_approval', 'cancelling', 'completed', 'failed', 'cancelled', 'interrupted', 'unknown'].includes(value.state) || typeof value.answer !== 'string' || !value.model || value.model.model !== selection.model.model || value.model.reasoningEffort !== selection.model.reasoningEffort || typeof value.observedAt !== 'string' || value.observedAt.length > 64 || !Number.isFinite(Date.parse(value.observedAt)) || value.threadId !== null && !identifier(value.threadId) || value.turnId !== null && !identifier(value.turnId)) throw new AgentError('protocol_error');
     const diagnostic = value.transportFailure;
+    if (value.failureReason !== undefined && !(AGENT_FAILURE_REASONS as readonly string[]).includes(value.failureReason)) throw new AgentError('protocol_error');
     if (diagnostic !== undefined && (!diagnostic || !['process_exit', 'spawn_error', 'stdin_error', 'frame_too_large', 'invalid_frame', 'rpc_timeout', 'host_close'].includes(diagnostic.kind) || diagnostic.exitCode !== undefined && diagnostic.exitCode !== null && !Number.isSafeInteger(diagnostic.exitCode) || diagnostic.exitSignal !== undefined && diagnostic.exitSignal !== null && (typeof diagnostic.exitSignal !== 'string' || !/^SIG[A-Z0-9]{1,16}$/.test(diagnostic.exitSignal)) || diagnostic.observedFrameBytes !== undefined && (!Number.isSafeInteger(diagnostic.observedFrameBytes) || diagnostic.observedFrameBytes < 0))) throw new AgentError('protocol_error');
     // Native diagnostics are not public history; preserve only bounded categories.
     if (value.progress !== undefined && typeof value.progress.text !== 'string') throw new AgentError('protocol_error');
-    return { ...value, answer: redactSkillValues(value.answer, entry.secrets), ...(value.progress ? { progress: { ...value.progress, text: redactSkillValues(value.progress.text, entry.secrets) } } : {}), observedAt: new Date(value.observedAt).toISOString(), reason: value.reason === null ? null : new AgentError(value.state === 'unknown' ? 'outcome_unknown' : 'protocol_error').message };
+    return { ...value, answer: redactSkillValues(value.answer, entry.secrets), ...(value.progress ? { progress: { ...value.progress, text: redactSkillValues(value.progress.text, entry.secrets) } } : {}), observedAt: new Date(value.observedAt).toISOString(), reason: value.reason === null ? null : new AgentError(value.state === 'unknown' ? 'outcome_unknown' : value.failureReason ?? 'protocol_error').message };
   }
   private callbacks(id: string, entry: AttachedAgent, callbacks: BackendCallbacks): BackendCallbacks {
     const observe = <T>(name: string, value: T, work: (copy: T) => void | Promise<void>): Promise<void> => {
@@ -126,6 +127,7 @@ export class AgentRouter implements SchedulerBackend {
         if (this.owned(id, entry) && entry.failureVersion === failures) entry.last = checked;
       }),
       onInteraction: value => observe('onInteraction', value, async copy => { entry.sideEffects = true; await callbacks.onInteraction(copy); }),
+      ...(callbacks.onInteractionCancelled ? { onInteractionCancelled: (value: string) => observe('onInteractionCancelled', value, async copy => { if (!identifier(copy)) throw new AgentError('protocol_error'); entry.sideEffects = true; await callbacks.onInteractionCancelled!(copy); }) } : {}),
       ...(callbacks.setNodeTitle ? { setNodeTitle: async (title: string) => {
         if (typeof title !== 'string' || !this.accepting(id, entry) || terminal(entry.last) || entry.controller.signal.aborted) return false;
         try {

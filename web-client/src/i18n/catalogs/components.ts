@@ -1,6 +1,7 @@
 export const componentsZhCN: Record<string, string> = {
   "Move prompt editor": "移动提示词编辑区",
   "Resize prompt editor": "调整提示词编辑区大小",
+  "Resize prompt editor from top left": "从左上角调整提示词编辑区大小",
   "Output added to the Work Graph.": "输出已添加到工作图。",
   "Work Graph": "工作图",
   "Pasted text": "粘贴文本",

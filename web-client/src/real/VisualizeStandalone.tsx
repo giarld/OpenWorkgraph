@@ -56,11 +56,13 @@ export function VisualizeStandalone() {
       const load = async () => {
         const ticket = ++sequence;
         const cursor = transport ? (await request<{ cursor: string }>('/v1/events/cursor')).cursor : '';
-        const [snapshot, projects] = await Promise.all([
+        const [snapshot, projects, runs] = await Promise.all([
           request<GraphSnapshot>(graphPath(scope.projectId, scope.graphId)),
           transport ? request<Project[]>('/v1/projects/all') : Promise.resolve(undefined),
+          transport ? request<import('../../../packages/protocol/src/index').Run[]>(graphPath(scope.projectId, scope.graphId) + '/runs') : Promise.resolve([]),
         ]);
         if (active && ticket === sequence) {
+          sessions?.signals.observe(snapshot, runs);
           sessions?.retain(snapshot.nodes.filter(node => node.type === 'visualize').map(node => node.id));
           setGraph(snapshot); setError('');
           setProjectActive(!projects || projects.some(project => project.projectId === scope.projectId && project.state === 'active' && project.availability === 'available'));
@@ -68,9 +70,9 @@ export function VisualizeStandalone() {
         return cursor;
       };
       refresh.current = load;
+      sessions = new VisualizeSessions(request, scope);
       const cursor = await load();
       if (!active) return;
-      sessions = new VisualizeSessions(request, scope);
       setOwner(sessions);
       if (transport) {
         stream = new EventSubscription(transport, scope.serviceId, {

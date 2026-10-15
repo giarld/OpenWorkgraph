@@ -93,6 +93,12 @@
 .management-setting-body fieldset { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--stroke); border-radius: 8px; }
 .management-panel .management-checkbox { display: flex; flex-direction: row; align-items: center; gap: 10px; min-height: 44px; margin: 0; cursor: pointer; }
 .management-panel .management-checkbox input { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; margin: 0; accent-color: var(--active); }
+.management-panel input[type=checkbox] { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; padding: 0; accent-color: var(--active); }
+.management-field { display: grid; gap: 8px; min-width: 0; }
+.management-field-boolean { grid-template-columns: 16px minmax(0, 1fr); align-items: center; min-height: 44px; }
+.management-panel .management-field-boolean > label { grid-column: 2; grid-row: 1; margin: 0; }
+.management-field-boolean > input { grid-column: 1; grid-row: 1; }
+.management-field-boolean > p { grid-column: 2; }
 .management-form-heading { margin: 24px 0 12px; padding-top: 20px; border-top: 1px solid var(--stroke); font-size: 13px; }
 .management-danger-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px dashed var(--stroke); }
 .management-panel .management-danger-actions button { margin: 0; }

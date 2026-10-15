@@ -1,6 +1,7 @@
-import type { BuiltinFeatureCandidate, SkillCandidates, SkillCandidate as ProtocolSkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
+import { nativeSkillConflict } from '../real/agent-state';
+import type { BuiltinFeatureCandidate, SkillCatalog, SkillCatalogItem, SkillCandidates, SkillCandidate as ProtocolSkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
 import { isVisualizeFeatureSelection, type VisualizeFeatureSelection } from "../../../packages/protocol/src/visualize";
-import { legacySkillMentions, skillIdentityKey, skillSourceLabel } from "../../../packages/protocol/src/skills";
+import { isLegacyCodexSkillIdentity, legacySkillMentions, skillIdentityKey, skillSourceLabel } from "../../../packages/protocol/src/skills";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -114,6 +115,7 @@ const builtinCandidates = (items: BuiltinFeatureCandidate[] = []) => items.filte
   items.findIndex(other => other.featureId === item.featureId) === index);
 type MentionState = {
   start: number;
+  replacementEnd?: number;
   query: string;
   items: MentionCandidate[];
   active: number;
@@ -125,11 +127,12 @@ const MENTION_DEBOUNCE_MS = 120;
 /** Shared phase-one editing surface. Storage and execution stay in the caller. */
 export function PromptEditor({ value, disabled, runDisabled, references, onOpenReference, onClose, onRun, onChange,
   ariaLabel, placeholder, status, runHint, runLabel, controls, inputChanged, submitting = false, additionalWarnings = [], children,
-  mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, skillReferences = [], features = [], onFeaturesChange, onOpenProjectFile }: {
+  mentionRequest, mentionProjectId, mentionEnabled = false, skillEnabled = false, skillReferences = [], skillBackendId, skillContextRevision, skillBackendName, nativeSkillsSupported = true, configuredSkillsSupported = true, onSkillConflictsChange, features = [], onFeaturesChange, onOpenProjectFile }: {
   value: string; disabled: boolean; runDisabled: boolean; submitting?: boolean;
   references: { id: string; title: string }[];
   onOpenReference(id: string): void; onClose(): void; onRun(): void; onChange(value: string, skillReferences?: SkillReference[]): void;
   skillReferences?: SkillReference[];
+  skillBackendId?: string; skillContextRevision?: string; skillBackendName?: string; nativeSkillsSupported?: boolean; configuredSkillsSupported?: boolean; onSkillConflictsChange?: (reasons: string[]) => void;
   features?: VisualizeFeatureSelection[];
   onFeaturesChange?: (features: VisualizeFeatureSelection[]) => void;
   ariaLabel?: string; placeholder?: string; status?: string; runHint?: string; runLabel?: string; controls?: ReactNode; inputChanged?: boolean; children?: ReactNode;
@@ -137,6 +140,8 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   mentionRequest?: MentionRequest; mentionProjectId?: string; mentionEnabled?: boolean; skillEnabled?: boolean; onOpenProjectFile?: (item: ProjectFileMentionCandidate) => void;
 }) {
   const { t, language } = useI18n();
+  const resolvedSkillBackendId = skillBackendId ?? 'codex';
+  const skillContext = JSON.stringify([mentionProjectId, skillBackendId, skillContextRevision]);
   const featureSelectionEnabled = !!onFeaturesChange;
   const featureHeading = language === "zh-CN" ? "内置功能" : "Built-in features";
   const resolvedAriaLabel = ariaLabel ?? t("Prompt");
@@ -150,9 +155,18 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const pendingCaret = useRef<number | undefined>(undefined);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [mentionPosition, setMentionPosition] = useState<{ top: number; left?: number; right?: number; maxHeight?: number; transform?: string }>({ top: 0 });
+  const [publicSkillMetadata, setPublicSkillMetadata] = useState<SkillCatalogItem[]>([]);
+  const [skillCatalogState, setSkillCatalogState] = useState<{ context: string; groups: Partial<Record<'openworkgraph' | 'agent' | 'codex', ProtocolSkillCandidate[]>> }>();
+  const skillCatalogs = skillCatalogState?.context === skillContext ? skillCatalogState.groups : {};
   const [availableSkills, setAvailableSkills] = useState<ProtocolSkillCandidate[] | null>(null);
-  const skillBackendNames: Record<string, string> = Object.fromEntries((availableSkills ?? []).flatMap(item =>
-    item.source === 'agent' && item.backendName?.trim() ? [[item.backendId, item.backendName]] : []));
+  const namesCache = useRef<{ request: MentionRequest | undefined; project: string | undefined; names: Record<string, string> }>({ request: mentionRequest, project: mentionProjectId, names: Object.create(null) });
+  if (namesCache.current.request !== mentionRequest || namesCache.current.project !== mentionProjectId) namesCache.current = { request: mentionRequest, project: mentionProjectId, names: Object.create(null) };
+  // Friendly descriptor names are display metadata, retained after choosing a
+  // suggestion. They never become part of a saved skill identity or authority.
+  for (const item of [...(availableSkills ?? []), ...(mention?.items.flatMap(item => item.kind === 'skill' ? [item] : []) ?? [])]) {
+    if (item.source === 'agent' && item.backendName?.trim()) namesCache.current.names[item.backendId] = item.backendName.trim();
+  }
+  const skillBackendNames: Record<string, string> = { ...namesCache.current.names, ...(skillBackendName ? { [resolvedSkillBackendId]: skillBackendName } : {}) };
   const [skillRefresh, setSkillRefresh] = useState(0);
   const referenceIdentities = JSON.stringify(skillReferences.map(skillIdentityKey));
   const hasLegacySkills = legacySkillMentions(value).length > 0;
@@ -164,19 +178,55 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   }, [value, features, featureSelectionEnabled, disabled, submitting]);
   useEffect(() => {
     let cancelled = false;
-    setAvailableSkills(null);
+    setAvailableSkills(null); setSkillCatalogState(undefined);
     if (mentionRequest && mentionProjectId && skillEnabled && mentionEnabled && (skillReferences.length || hasLegacySkills)) {
-      void mentionRequest<SkillCandidates>("/v1/projects/" + encodeURIComponent(mentionProjectId) + "/skills").then(result => {
-        if (!cancelled) {
-          setAvailableSkills(result.items);
-        }
-      }).catch(() => { /* An unavailable catalog is not evidence of a missing skill. */ });
+      const groups: ('openworkgraph' | 'agent' | 'codex')[] = ['openworkgraph'];
+      if (nativeSkillsSupported) {
+        groups.push('agent');
+        if (resolvedSkillBackendId === 'codex' && skillReferences.some(isLegacyCodexSkillIdentity)) groups.push('codex');
+      }
+      for (const source of groups) {
+        const path = source === 'codex' ? '/skills?source=codex' : skillCandidatesPath('', source, skillBackendId);
+        void mentionRequest<SkillCandidates>('/v1/projects/' + encodeURIComponent(mentionProjectId) + path).then(result => {
+          if (!cancelled) setSkillCatalogState(current => ({ context: skillContext, groups: { ...(current?.context === skillContext ? current.groups : {}), [source]: result.items.filter(item => source === 'codex' ? isLegacyCodexSkillIdentity(item) : source === 'openworkgraph' ? item.source === 'openworkgraph' : item.source === 'agent' && item.backendId === resolvedSkillBackendId || item.source === 'codex' && resolvedSkillBackendId === 'codex') } }));
+        }).catch(() => { /* Directory failure never proves that a skill is deleted. */ });
+      }
     }
     return () => { cancelled = true; };
-  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, referenceIdentities, hasLegacySkills, skillRefresh]);
-  const missingSkills = skillReferences.filter(ref => (ref.source === "codex" && ref.skillId.startsWith("codex-unresolved:")) || (availableSkills && !availableSkills.some(item => skillIdentityKey(item) === skillIdentityKey(ref))));
+  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, referenceIdentities, hasLegacySkills, skillRefresh, skillBackendId, nativeSkillsSupported, skillContextRevision]);
+  useEffect(() => { setAvailableSkills(orderedSkillCandidates(Object.values(skillCatalogs).flat())); }, [skillCatalogState, skillContext]);
+  useEffect(() => {
+    let live = true; setPublicSkillMetadata([]);
+    if (mentionRequest && skillReferences.some(ref => ref.source === 'openworkgraph')) {
+      void (async () => {
+        const items: SkillCatalogItem[] = []; let offset = 0;
+        for (let page = 0; page < 100; page++) {
+          const catalog = await mentionRequest<SkillCatalog>('/v1/skills?' + new URLSearchParams({ installed: '1', limit: '100', offset: String(offset) }));
+          if (!live || catalog.stale) return;
+          items.push(...catalog.items);
+          if (catalog.nextOffset === undefined) { setPublicSkillMetadata(items); return; }
+          if (catalog.nextOffset <= offset) return;
+          offset = catalog.nextOffset;
+        }
+      })().catch(() => { /* Failed metadata lookup is not a confirmed conflict. */ });
+    }
+    return () => { live = false; };
+  }, [mentionRequest, referenceIdentities, skillRefresh, skillBackendId]);
+  const skillConflictReasons: Record<string, string> = {};
+  for (const ref of skillReferences) {
+    const source = ref.source === 'openworkgraph' ? 'openworkgraph' : isLegacyCodexSkillIdentity(ref) ? 'codex' : 'agent';
+    const metadata = ref.source === 'openworkgraph' ? publicSkillMetadata.find(item => item.skillId === ref.skillId) : undefined;
+    const conflict = nativeSkillConflict(ref, resolvedSkillBackendId, nativeSkillsSupported) ?? (metadata?.configuration === 'required' ? t('Skill {name} is missing required configuration. Configure it in the skill library.', { name: ref.name }) : metadata?.configuration === 'ready' && !configuredSkillsSupported ? t('This Agent does not support configured skill {name}.', { name: ref.name }) : undefined);
+    if (conflict) skillConflictReasons[skillIdentityKey(ref)] = conflict;
+    else if (ref.source === 'codex' && ref.skillId.startsWith('codex-unresolved:') || skillCatalogs[source] && !skillCatalogs[source]!.some(item => skillIdentityKey(item) === skillIdentityKey(ref))) skillConflictReasons[skillIdentityKey(ref)] = t('Referenced skills are missing from this Workspace. Install them or select them again:') + ' ' + ref.name;
+  }
+  const missingSkills = skillReferences.filter(ref => !!skillConflictReasons[skillIdentityKey(ref)]);
+  const skillBlocked = missingSkills.length > 0;
+  const conflictSignature = JSON.stringify(Object.values(skillConflictReasons));
+  useEffect(() => { onSkillConflictsChange?.(Object.values(skillConflictReasons)); }, [conflictSignature, onSkillConflictsChange]);
   const notices = [
     ...additionalWarnings.map(text => ({ text, warning: true })),
+    ...Array.from(new Set(Object.values(skillConflictReasons))).map(text => ({ text, warning: true })),
     ...(missingSkills.length ? [{ text: t("Referenced skills are missing from this Workspace. Install them or select them again:") + " " + Array.from(new Set(missingSkills.map(ref => ref.name + " (" + skillSourceLabel(ref, skillBackendNames) + ")"))).join(", "), warning: true }] : []),
     { text: visibleStatus, warning: false },
     { text: runHint && !runHint.startsWith(t("In progress")) ? runHint : "", warning: false },
@@ -239,6 +289,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     }
   }, [value]);
   useEffect(() => () => clearTimeout(mentionTimer.current), []);
+  useEffect(() => { clearTimeout(mentionTimer.current); mentionEpoch.current++; setMention(null); }, [mentionRequest, mentionProjectId, skillBackendId, nativeSkillsSupported, skillContextRevision]);
   const dismissMention = () => {
     clearTimeout(mentionTimer.current);
     mentionEpoch.current++;
@@ -247,7 +298,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const referenceCandidates = (query: string): ReferenceMentionCandidate[] => references
     .filter(ref => ref.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .map(ref => ({ id: ref.id, name: ref.title, kind: "reference" }));
-  const runMentionSearch = (start: number, query: string) => {
+  const runMentionSearch = (start: number, query: string, onlySkills = false) => {
     const epoch = ++mentionEpoch.current;
     const trimmed = query.trim();
     const base = "/v1/projects/" + encodeURIComponent(mentionProjectId ?? "");
@@ -270,8 +321,8 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
         .then(result => complete('file', (result.items ?? []).filter(item => item.kind === 'file' || item.kind === 'directory')))
         .catch(() => complete('file', [], true));
     }
-    for (const source of pendingMentionGroups(query).filter(group => group === 'agent' || group === 'openworkgraph' || group === 'builtin-feature')) {
-      const path = skillCandidatesPath(trimmed, source);
+    for (const source of pendingMentionGroups(query).filter((group): group is 'agent' | 'openworkgraph' | 'builtin-feature' => group === 'agent' || group === 'openworkgraph' || !onlySkills && group === 'builtin-feature')) {
+      const path = skillCandidatesPath(trimmed, source, skillBackendId);
       void mentionRequest!<SkillCandidates>(base + path)
         .then(result => complete(source, source === 'builtin-feature' ? builtinCandidates(result.features)
           : orderedSkillCandidates(result.items ?? []).filter(item => mentionGroup({ ...item, kind: 'skill' }) === source).map(item => ({ ...item, kind: 'skill' as const }))))
@@ -283,7 +334,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     return [
       ...(mentionEnabled && query.trim() ? ['file' as const] : []),
       ...(featureSelectionEnabled ? ['builtin-feature' as const] : []),
-      ...(mentionEnabled && skillEnabled ? ['openworkgraph' as const, 'agent' as const] : []),
+      ...(mentionEnabled && skillEnabled ? ['openworkgraph' as const, ...(nativeSkillsSupported ? ['agent' as const] : [])] : []),
     ];
   };
   const updateMention = (text: string, cursor: number) => {
@@ -306,7 +357,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     };
     window.addEventListener("openworkgraph:skills-changed", refresh);
     return () => window.removeEventListener("openworkgraph:skills-changed", refresh);
-  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, featureSelectionEnabled, references]);
+  }, [mentionRequest, mentionProjectId, mentionEnabled, skillEnabled, featureSelectionEnabled, references, skillBackendId, skillContextRevision, nativeSkillsSupported]);
   const featureSelected = (item: BuiltinFeatureCandidate) => features.some(feature => feature.featureId === item.featureId);
   const changePrompt = (next: string, refs?: SkillReference[]) => {
     onChange(next, refs);
@@ -319,7 +370,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     const input = inputRef.current;
     if (!input || !mention) return;
     const text = input.value;
-    const cursor = input.selectionStart ?? text.length;
+    const cursor = mention.replacementEnd ?? input.selectionStart ?? text.length;
     if (item.kind === "builtin-feature") {
       if (disabled || submitting || !onFeaturesChange) return;
       const start = mention.start;
@@ -338,6 +389,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
   const recheckMention = () => {
     const input = inputRef.current;
     if (!input || !mention) return;
+    if (mention.replacementEnd !== undefined) { updateMentionPosition(); return; }
     const cursor = input.selectionStart ?? input.value.length;
     const found = findMentionQuery(input.value, cursor);
     if (!found || found.start !== mention.start) dismissMention();
@@ -353,13 +405,30 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
     input.setSelectionRange(start, end);
     input.insertText(prefix + "@");
   };
+  const removeConflictingSkill = (ref: SkillReference) => {
+    if (disabled || submitting || value.slice(ref.start, ref.end) !== '$' + ref.name) return;
+    dismissMention();
+    const next = value.slice(0, ref.start) + value.slice(ref.end);
+    pendingCaret.current = ref.start;
+    changePrompt(next, syncSkillReferences(value, next, skillReferences, { start: ref.start, end: ref.end, text: '' }));
+    inputRef.current?.focus();
+  };
+  const reselectConflictingSkill = (ref: SkillReference) => {
+    const input = inputRef.current;
+    if (!input || disabled || submitting || value.slice(ref.start, ref.end) !== '$' + ref.name) return;
+    dismissMention(); input.focus(); input.setSelectionRange(ref.end, ref.end);
+    // Opening choices preserves the old token and its identity. Only an explicit
+    // candidate selection replaces the original span.
+    setMention({ start: ref.start, replacementEnd: ref.end, query: '', items: [], active: 0, loadingGroups: pendingMentionGroups('').filter(group => group === 'openworkgraph' || group === 'agent'), failedGroups: [] });
+    runMentionSearch(ref.start, '', true);
+  };
   return <section className="prompt-panel panel" aria-label={t("Prompt editor")}>
     <div className="reference-area">
       <div className="prompt-reference-heading"><span className="muted">{t("Reference content")}</span><button className="icon-button" aria-label={t("Close prompt")} onClick={onClose}><X size={14}/></button></div>
       <div className="reference-list">{references.length ? references.map(ref => <button key={ref.id} className="reference-chip" title={t("View directly referenced content")} onClick={() => onOpenReference(ref.id)}><FileText size={14}/><span className="reference-chip-label" title={ref.title}>{ref.title}</span></button>) : <p className="muted">{t("No reference content")}</p>}</div>
     </div>
     <div className="prompt-input">
-      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} skillReferences={skillReferences} skillNames={availableSkills?.map(item => item.name)} skillBackendNames={skillBackendNames} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
+      <PromptTextInput ref={inputRef} label={resolvedAriaLabel} placeholder={placeholder} value={value} disabled={disabled} skillEnabled={skillEnabled} skillReferences={skillReferences} skillNames={availableSkills?.map(item => item.name)} skillBackendNames={skillBackendNames} skillConflictReasons={skillConflictReasons} onOpenFile={onOpenProjectFile} onOpenReference={onOpenReference}
         onScroll={() => { if (mention) updateMentionPosition(); }}
         onDragOver={event => {
           if (disabled || !mentionEnabled || !mentionProjectId || !canDropProjectFile(event.dataTransfer, mentionProjectId)) return;
@@ -415,7 +484,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
             if (!duringComposition && e.key === "Escape") { e.preventDefault(); dismissMention(); return; }
           }
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !duringComposition) {
-            e.preventDefault(); if (!disabled && !runDisabled && !submitting) onRun();
+            e.preventDefault(); if (!disabled && !runDisabled && !skillBlocked && !submitting) onRun();
           }
         }}/>
       {mention && renderMentionMenu(<div ref={mentionMenuRef} className="prompt-mention-menu" style={mentionPosition} role="listbox" aria-label={t(skillEnabled || featureSelectionEnabled || references.length ? "Prompt suggestions" : "Project file suggestions")}>
@@ -424,7 +493,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
           const items = mention.items.filter(item => mentionGroup(item) === group);
           const loading = mention.loadingGroups.includes(group);
           const failed = mention.failedGroups.includes(group);
-          const heading = group === 'reference' ? t('Reference content') : group === 'file' ? t('Project files') : group === 'builtin-feature' ? featureHeading : group === 'openworkgraph' ? t('WORKGRAPH skills') : t(items.length && items.every(item => item.kind === 'skill' && item.source === 'codex') ? 'Codex skills' : 'Agent skills');
+          const heading = group === 'reference' ? t('Reference content') : group === 'file' ? t('Project files') : group === 'builtin-feature' ? featureHeading : group === 'openworkgraph' ? t('WORKGRAPH skills') : skillBackendName ? skillBackendName + ' · ' + (language === 'zh-CN' ? '原生技能' : 'Native skills') : t(items.length && items.every(item => item.kind === 'skill' && item.source === 'codex') ? 'Codex skills' : 'Agent skills');
           if (!items.length && !loading && !failed) return null;
           return <div key={group} role="group" aria-label={heading} aria-busy={loading}>
           <div className="prompt-mention-heading">{heading}</div>
@@ -443,6 +512,13 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
       </div>)}
     </div>
     {children}
+    {!!missingSkills.length && <div className="prompt-skill-actions" aria-label={language === 'zh-CN' ? '解决技能引用冲突' : 'Resolve skill reference conflicts'}>
+      {missingSkills.map(ref => <div key={skillIdentityKey(ref) + ':' + ref.start}>
+        <span>{ref.name} ({skillSourceLabel(ref, skillBackendNames)})</span>
+        <button type="button" disabled={disabled || submitting || !mentionRequest || !mentionEnabled} aria-label={(language === 'zh-CN' ? '重选技能 ' : 'Reselect skill ') + ref.name} onClick={() => reselectConflictingSkill(ref)}>{language === 'zh-CN' ? '重选' : 'Reselect'}</button>
+        <button type="button" disabled={disabled || submitting} aria-label={(language === 'zh-CN' ? '移除技能引用 ' : 'Remove skill reference ') + ref.name} onClick={() => removeConflictingSkill(ref)}>{language === 'zh-CN' ? '移除引用' : 'Remove reference'}</button>
+      </div>)}
+    </div>}
     <div className="prompt-status-row">
       <button type="button" className="icon-button prompt-mention-trigger" aria-label={t("Insert mention")} title={t("Insert mention")} disabled={disabled}
         onMouseDown={event => event.preventDefault()} onClick={triggerMention}><AtSign size={16}/></button>
@@ -453,7 +529,7 @@ export function PromptEditor({ value, disabled, runDisabled, references, onOpenR
         </span>) : t("Placeholder")}
       </p>
     </div>
-    <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} aria-busy={submitting} title={(submitting ? status : runHint || visibleStatus) || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled || submitting} onClick={onRun}>{submitting ? <span className="run-submit-progress" role="progressbar" aria-label={status || resolvedRunLabel} /> : <ArrowUp size={16} aria-hidden="true" />}</button></footer>
+    <footer><div className="prompt-controls">{controls}</div><button className="primary-button run-button" aria-label={resolvedRunLabel} aria-busy={submitting} title={(submitting ? status : runHint || visibleStatus) || "Ctrl / Cmd + Enter"} disabled={disabled || runDisabled || skillBlocked || submitting} onClick={() => { if (!skillBlocked) onRun(); }}>{submitting ? <span className="run-submit-progress" role="progressbar" aria-label={status || resolvedRunLabel} /> : <ArrowUp size={16} aria-hidden="true" />}</button></footer>
   </section>;
 }
 export function QueuePopover({

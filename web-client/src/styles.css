@@ -1576,3 +1576,23 @@ pre {
   overflow-wrap: anywhere;
 }
 .prompt-mention-token svg { flex: 0 0 auto; align-self: center; }
+
+/* Confirmed skill conflicts keep the original source and prompt span. */
+:root { --skill-error-text: #b42318; --skill-error-fill: #fee4e2; --skill-error-border: #d92d20; }
+:root[data-theme="dark"] { --skill-error-text: #ffb4ab; --skill-error-fill: #4d2020; --skill-error-border: #ffb4ab; }
+.prompt-mention-token.prompt-skill-conflict { color: var(--skill-error-text); background: var(--skill-error-fill); border: 1px solid var(--skill-error-border); cursor: pointer; position: relative; }
+.prompt-skill-conflict:focus-visible { outline: 2px solid var(--skill-error-border); outline-offset: 2px; }
+.prompt-skill-conflict-reason { display: none; white-space: normal; font-size: 12px; line-height: 1.5; }
+.prompt-skill-conflict.show-conflict .prompt-skill-conflict-reason, .prompt-skill-conflict:focus .prompt-skill-conflict-reason { display: inline; margin-left: 8px; }
+.prompt-skill-actions { display: grid; gap: 6px; max-height: 128px; overflow: auto; padding: 6px 12px; }
+.prompt-skill-actions > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.prompt-skill-actions > div > span { flex: 1 1 120px; font-size: 12px; overflow-wrap: anywhere; }
+.prompt-skill-actions button { min-height: 32px; }
+.agent-brand-mark { display: inline-flex; align-items: center; justify-content: center; border: 1px solid; border-radius: 6px; min-width: 24px; min-height: 24px; font-weight: 600; color: var(--text); }
+/* Keep model and effort controls beside Run, with room for long model names. */
+.prompt-controls:has(.prompt-model-settings) { flex: 1; min-width: 0; }
+.prompt-model-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.prompt-model-settings > select { flex: 0 1 140px; min-width: 0; max-width: 100%; }
+.prompt-model-settings > select:first-child { flex: 1 1 240px; min-width: min(240px, 100%); }
+.prompt-panel footer:has(.prompt-model-settings) { align-items: center; gap: 8px; flex-shrink: 0; }
+.prompt-panel footer:has(.prompt-model-settings) .run-button { flex-shrink: 0; }

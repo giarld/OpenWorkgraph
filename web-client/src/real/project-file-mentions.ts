@@ -1,52 +1,20 @@
-import { isSkillName, isSkillIdentity, skillIdentityKey, portableSkillReference } from "../../../packages/protocol/src/skills";
+import { isSkillName, skillIdentityKey, portableSkillReference } from "../../../packages/protocol/src/skills";
 import type { SkillCandidate, SkillReference } from "../../../packages/protocol/src/skills";
 export type ProjectFileMentionKind = "file" | "directory";
 
-export interface PromptEdit { start: number; end: number; text: string }
+export type { PromptEdit } from "../../../packages/protocol/src/prompt-mentions";
+import type { PromptEdit } from "../../../packages/protocol/src/prompt-mentions";
 
 /** Native discovery reads the complete catalog, including legacy source=codex.
  * The HTTP allowlist needs no new backend names or an empty query suffix. */
-export function skillCandidatesPath(query: string, source: 'agent' | 'openworkgraph' | 'builtin-feature'): string {
+export function skillCandidatesPath(query: string, source: 'agent' | 'openworkgraph' | 'builtin-feature', backendId?: string): string {
   const trimmed = query.trim();
-  const params = new URLSearchParams({ ...(trimmed ? { query: trimmed } : {}), ...(source === 'agent' ? {} : { source }) });
+  const params = new URLSearchParams({ ...(trimmed ? { query: trimmed } : {}), ...(source === 'agent' ? backendId ? { source, backendId, settingsGeneration: 'agent-configuration-v1' } : {} : { source }) });
   return '/skills' + (trimmed ? '/search' : '') + (params.size ? '?' + params : '');
 }
 
-export function validSkillReferences(value: string, input: unknown): SkillReference[] {
-  if (!Array.isArray(input)) return [];
-  const result: SkillReference[] = [];
-  for (const ref of input) {
-    if (!ref || typeof ref !== "object" || Object.keys(ref).some(key => !["skillId", "source", "backendId", "name", "start", "end"].includes(key)) ||
-      typeof ref.skillId !== "string" || !ref.skillId.trim() || ref.skillId.length > 4096 || /[\x00-\x1f]/.test(ref.skillId) ||
-      !isSkillIdentity({ ...ref }) || !isSkillName(ref.name) ||
-      !Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start < 0 || ref.end > value.length ||
-      value.slice(ref.start, ref.end) !== "$" + ref.name ||
-      (ref.start > 0 && !/\s/.test(value[ref.start - 1])) || (ref.end < value.length && !/[\s.,!?;，。！？；]/.test(value[ref.end]))) continue;
-    result.push({ skillId: ref.skillId, source: ref.source, ...(ref.source === "agent" ? { backendId: ref.backendId } : {}), name: ref.name, start: ref.start, end: ref.end } as SkillReference);
-  }
-  return result.sort((a, b) => a.start - b.start).filter((ref, index, refs) => index === 0 || ref.start >= refs[index - 1].end);
-}
-
-/** Edits retain identity only for untouched ranges; never look up a same-name occurrence. */
-export function syncSkillReferences(before: string, after: string, refs: readonly SkillReference[], edit?: PromptEdit): SkillReference[] {
-  if (before === after && !edit) return validSkillReferences(after, refs);
-  let retained = validSkillReferences(before, refs);
-  if (!edit || before.slice(0, edit.start) + edit.text + before.slice(edit.end) !== after) {
-    retained = retained.filter(ref => {
-      const token = "$" + ref.name;
-      const occurrences = (text: string) => text.split(token).length - 1;
-      return occurrences(before) <= 1 || occurrences(before) === occurrences(after);
-    });
-    let start = 0;
-    while (start < Math.min(before.length, after.length) && before[start] === after[start]) start++;
-    let end = before.length, nextEnd = after.length;
-    while (end > start && nextEnd > start && before[end - 1] === after[nextEnd - 1]) { end--; nextEnd--; }
-    edit = { start, end, text: after.slice(start, nextEnd) };
-  }
-  const delta = edit.text.length - (edit.end - edit.start);
-  return validSkillReferences(after, retained.flatMap(ref =>
-    ref.end <= edit.start ? [ref] : ref.start >= edit.end ? [{ ...ref, start: ref.start + delta, end: ref.end + delta }] : []));
-}
+export { validSkillReferences, syncSkillReferences } from "../../../packages/protocol/src/prompt-mentions";
+import { validSkillReferences, syncSkillReferences } from "../../../packages/protocol/src/prompt-mentions";
 
 export function orderedSkillCandidates(items: SkillCandidate[]): SkillCandidate[] {
   const seen = new Set<string>();

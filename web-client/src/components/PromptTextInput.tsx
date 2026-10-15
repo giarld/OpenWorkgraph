@@ -1,5 +1,5 @@
 import type { SkillReference } from "../../../packages/protocol/src/skills";
-import { legacySkillMentions, skillSourceLabel } from "../../../packages/protocol/src/skills";
+import { legacySkillMentions, skillSourceLabel, skillIdentityKey } from "../../../packages/protocol/src/skills";
 import { useLayoutEffect, useRef, useImperativeHandle, type Ref, type KeyboardEvent, type DragEvent } from 'react';
 import { extractReferenceMention } from '../real/reference-mentions';
 import { extractBuiltinFeatureMention } from '../real/builtin-feature-mentions';
@@ -120,14 +120,21 @@ function select(root: HTMLElement, start: number, end: number) {
   window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
   revealCaret(root);
 }
-function render(root: HTMLElement, value: string, skills: boolean, skillReferences: SkillReference[], skillNames: readonly string[], onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void, skillBackendNames: Readonly<Record<string, string>> = {}) {
+function render(root: HTMLElement, value: string, skills: boolean, skillReferences: SkillReference[], skillNames: readonly string[], onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void, skillBackendNames: Readonly<Record<string, string>> = {}, skillConflictReasons: Readonly<Record<string, string>> = {}) {
   const fragment = document.createDocumentFragment(); let cursor = 0;
   for (const token of tokens(value, skills, skillReferences, skillNames)) {
     fragment.append(document.createTextNode(value.slice(cursor, token.start)));
     const chip = document.createElement('span'); chip.contentEditable = 'false'; chip.className = 'prompt-mention-token';
     const reference = skillReferences.find(ref => ref.start === token.start && ref.end === token.end);
     if (reference) { chip.dataset.skillId = reference.skillId; chip.dataset.skillSource = reference.source; if (reference.source === 'agent') chip.dataset.skillBackendId = reference.backendId; }
-    chip.dataset.mention = token.raw; chip.dataset.kind = token.kind; chip.title = reference ? token.name + ' · ' + skillSourceLabel(reference, skillBackendNames) : token.path ?? token.name; chip.setAttribute('aria-label', token.name);
+    const conflict = reference && skillConflictReasons[skillIdentityKey(reference)];
+    if (conflict) {
+      chip.classList.add('prompt-skill-conflict'); chip.tabIndex = 0; chip.setAttribute('role', 'button'); chip.setAttribute('aria-expanded', 'false');
+      const toggle = () => { const expanded = chip.classList.toggle('show-conflict'); chip.setAttribute('aria-expanded', String(expanded)); };
+      chip.addEventListener('click', toggle);
+      chip.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); toggle(); } });
+    }
+    chip.dataset.mention = token.raw; chip.dataset.kind = token.kind; chip.title = reference ? token.name + ' · ' + skillSourceLabel(reference, skillBackendNames) : token.path ?? token.name; chip.setAttribute('aria-label', token.name + (conflict ? ' · ' + conflict : '')); if (conflict) chip.title += ' · ' + conflict;
     if ((token.path && onOpenFile) || (token.id && onOpenReference)) {
       chip.setAttribute('role', 'button'); chip.tabIndex = 0;
       const open = () => token.id ? onOpenReference?.(token.id) : onOpenFile?.({ name: token.name, relativePath: token.path!, kind: token.kind as 'file' | 'directory' });
@@ -141,7 +148,10 @@ function render(root: HTMLElement, value: string, skills: boolean, skillReferenc
     icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor'); icon.setAttribute('stroke-width', '1.8'); icon.setAttribute('aria-hidden', 'true');
     const path = document.createElementNS(icon.namespaceURI, 'path');
     path.setAttribute('d', (token.kind === 'skill' || token.kind === 'builtin-feature') ? 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z' : token.kind === 'directory' ? 'M3 7V5h6l2 2h10v13H3Z' : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h6');
-    icon.append(path); chip.append(icon, document.createTextNode(token.name)); fragment.append(chip); cursor = token.end;
+    if (conflict) path.setAttribute('d', 'M12 9v4M12 17h.01M10.3 3.9 1.8 18.6a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z');
+    icon.append(path); chip.append(icon, document.createTextNode(token.name));
+    if (conflict) { const reason = document.createElement('span'); reason.className = 'prompt-skill-conflict-reason'; reason.textContent = conflict; chip.append(reason); }
+    fragment.append(chip); cursor = token.end;
   }
   fragment.append(document.createTextNode(value.slice(cursor)));
   if (value.endsWith('\n')) { const tail = document.createElement('br'); tail.setAttribute('data-trailing-break', ''); fragment.append(tail); }
@@ -149,13 +159,14 @@ function render(root: HTMLElement, value: string, skills: boolean, skillReferenc
 }
 
 /** DOM mentions are atomic; persisted prompts remain Markdown and Codex skill text. */
-export function PromptTextInput({ ref, value, disabled, skillEnabled, skillReferences = [], skillNames = [], skillBackendNames = {}, label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile, onOpenReference }: {
+export function PromptTextInput({ ref, value, disabled, skillEnabled, skillReferences = [], skillNames = [], skillBackendNames = {}, skillConflictReasons = {}, label, placeholder, onChange, onSelect, onScroll, onBlur, onCompositionStart, onCompositionEnd, onKeyDown, onDragOver, onDrop, onOpenFile, onOpenReference }: {
   onOpenReference?: (id: string) => void;
   onOpenFile?: (item: ProjectFileMentionCandidate) => void;
   ref: Ref<PromptTextInputHandle>; value: string; disabled: boolean; skillEnabled: boolean; label: string; placeholder?: string;
   skillReferences?: SkillReference[];
   skillNames?: readonly string[];
   skillBackendNames?: Readonly<Record<string, string>>;
+  skillConflictReasons?: Readonly<Record<string, string>>;
   onChange(value: string, cursor: number, skillReferences: SkillReference[]): void; onSelect(): void; onScroll(): void; onBlur(): void;
   onCompositionStart(): void; onCompositionEnd(value: string, cursor: number): void;
   onKeyDown(event: KeyboardEvent<HTMLDivElement>): void;
@@ -173,7 +184,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
   openReferenceRef.current = onOpenReference;
   const openReference = onOpenReference ? (id: string) => openReferenceRef.current?.(id) : undefined;
   const renderedConfig = useRef('');
-  const config = String(skillEnabled) + ':' + String(!!onOpenFile) + ':' + String(!!onOpenReference) + ':' + JSON.stringify(skillReferences) + ':' + JSON.stringify(skillNames) + ':' + JSON.stringify(skillBackendNames);
+  const config = String(skillEnabled) + ':' + String(!!onOpenFile) + ':' + String(!!onOpenReference) + ':' + JSON.stringify(skillReferences) + ':' + JSON.stringify(skillNames) + ':' + JSON.stringify(skillBackendNames) + ':' + JSON.stringify(skillConflictReasons);
   const api: PromptTextInputHandle = {
     get element() { return root.current; }, get value() { return root.current ? textOf(root.current) : value; },
     get selectionStart() { return root.current ? selection(root.current)[0] : 0; }, get selectionEnd() { return root.current ? selection(root.current)[1] : 0; },
@@ -191,7 +202,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
     const element = root.current!; if (composing.current) return;
     if (current.current !== value || JSON.stringify(currentRefs.current) !== JSON.stringify(validSkillReferences(value, skillReferences))) { history.current.push({ value: current.current, caret: api.selectionStart, refs: currentRefs.current }); history.current = history.current.slice(-100); future.current = []; }
     const caret = selection(element);
-    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, validSkillReferences(value, skillReferences), skillNames, openFile, openReference, skillBackendNames); if (document.activeElement === element) select(element, ...caret); }
+    if (textOf(element) !== value || !element.childNodes.length || renderedConfig.current !== config) { render(element, value, skillEnabled, validSkillReferences(value, skillReferences), skillNames, openFile, openReference, skillBackendNames, skillConflictReasons); if (document.activeElement === element) select(element, ...caret); }
     current.current = value;
     currentRefs.current = validSkillReferences(value, skillReferences);
     renderedConfig.current = config;
@@ -204,7 +215,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
     const refs = restoredRefs ?? syncSkillReferences(current.current, next, currentRefs.current, edit);
     if (!composing.current && (next !== current.current || JSON.stringify(refs) !== JSON.stringify(currentRefs.current))) { history.current.push({ value: current.current, caret: previousCaret, refs: currentRefs.current }); history.current = history.current.slice(-100); future.current = []; }
     if (!composing.current) { current.current = next; currentRefs.current = refs; }
-    if (!composing.current) { render(root.current!, next, skillEnabled, refs, skillNames, openFile, openReference, skillBackendNames); select(root.current!, start, start); }
+    if (!composing.current) { render(root.current!, next, skillEnabled, refs, skillNames, openFile, openReference, skillBackendNames, skillConflictReasons); select(root.current!, start, start); }
     onChange(next, start, refs);
   };
   const replace = (text: string, backward = false, forward = false, pastedRefs: SkillReference[] = []) => {
@@ -223,7 +234,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
     const from = redo ? future.current : history.current; const to = redo ? history.current : future.current; const state = from.pop(); if (!state) return;
     if (state.value !== current.current) root.current?.dispatchEvent(new Event('owg-prompt-edit', { bubbles: true }));
     to.push({ value: api.value, caret: api.selectionStart, refs: currentRefs.current }); current.current = state.value; currentRefs.current = state.refs;
-    render(root.current!, state.value, skillEnabled, state.refs, skillNames, openFile, openReference, skillBackendNames); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret, state.refs);
+    render(root.current!, state.value, skillEnabled, state.refs, skillNames, openFile, openReference, skillBackendNames, skillConflictReasons); select(root.current!, state.caret, state.caret); onChange(state.value, state.caret, state.refs);
   };
   return <div ref={root} className="prompt-text-input" role="textbox" aria-label={label} aria-placeholder={placeholder} aria-multiline="true" aria-disabled={disabled} data-placeholder={placeholder}
     contentEditable={!disabled} suppressContentEditableWarning tabIndex={disabled ? -1 : 0}

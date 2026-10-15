@@ -45,18 +45,18 @@ export function useRunProgress(request: Request, runs: Run[], online: boolean, r
   return cache?.request === request ? cache.rows : {};
 }
 
-/** Submitted prompts are immutable run input, so read each latest node Run once per run list change. */
-export function useRunPrompts(request: Request, runs: Run[], online: boolean, revision: number) {
-  const [cache, setCache] = useState<{ request: Request; rows: Record<string, string> }>();
+/** Immutable inputs supply both submitted prompts and the historical model choice. */
+export function useRunInputs(request: Request, runs: Run[], online: boolean, revision: number) {
+  const [cache, setCache] = useState<{ request: Request; rows: Record<string, InputSnapshot> }>();
   const stamp = JSON.stringify(runs.map(run => [run.id, run.inputDigest]));
   useEffect(() => {
     if (!online) return;
     let live = true;
     const latest = [...new Map(runs.filter(run => !!run.id).map(run => [run.nodeId, run])).values()];
-    void Promise.all(latest.map(async (run): Promise<[string, string] | null> => {
+    void Promise.all(latest.map(async (run): Promise<[string, InputSnapshot] | null> => {
       try {
         const snapshot = await request<InputSnapshot>("/v1/runs/" + encodeURIComponent(run.id) + "/snapshot");
-        return [run.id, snapshot.prompt];
+        return [run.id, snapshot];
       } catch {
         return null;
       }
@@ -66,7 +66,7 @@ export function useRunPrompts(request: Request, runs: Run[], online: boolean, re
         request,
         rows: {
           ...(previous?.request === request ? previous.rows : {}),
-          ...Object.fromEntries(rows.filter((row): row is [string, string] => row !== null)),
+          ...Object.fromEntries(rows.filter((row): row is [string, InputSnapshot] => row !== null)),
         },
       }));
     });

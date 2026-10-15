@@ -84,6 +84,7 @@ export interface VisualizeNodeContent {
   title?: string;
   prompt: string;
   modelOverride?: ModelSelection;
+  agentModelOverride?: import('./agents.js').AgentModelPreference | null;
   skillReferences?: SkillReference[];
   features?: VisualizeFeatureSelection[];
   inputBindings: VisualizeInputBinding[];
@@ -199,6 +200,12 @@ export interface VisualizeHostContext {
 }
 /** Full form/state replacements. Refresh is explicit and preserves current form/state. */
 export interface VisualizeBridgeMethods {
+  signals: { params: import('./node-signals.js').NodeSignalCommand; result: { value: Json } };
+  runSlot: { params: { targetNodeId: string; action: 'submit' | 'cancel'; invocationId: string; runId?: string }; result: { runId: string; status: string } };
+  promptSlot: {
+    params: { targetNodeId: string; invocationId: string; prompt: string; expectedContentVersion?: number };
+    result: { nodeId: string; contentVersion: number; executionRevision: number };
+  };
   /** Creates a resource node directly; optional asset fields only occur in legacy receipts. */
   exportAsset: {
     params: { name: string; mime: string; bytes: number };
@@ -229,7 +236,7 @@ export interface VisualizeCapabilityUpdate {
 }
 export type VisualizeBridgeRequest = {
   [Method in VisualizeBridgeMethod]: VisualizeBridgeIdentity & {
-    type: 'request'; method: Method; expected: VisualizeExpectedRevisions; params: VisualizeBridgeMethods[Method]['params'];
+    type: 'request'; method: Method; expected: VisualizeExpectedRevisions; params: VisualizeBridgeMethods[Method]['params']; cause?: import('./node-signals.js').NodeSignalCause;
   }
 }[VisualizeBridgeMethod];
 export const VISUALIZE_ERROR_CODES = [
@@ -252,8 +259,10 @@ export type VisualizeBridgeResponse = {
     { ok: true; result: VisualizeBridgeMethods[Method]['result'] } | { ok: false; error: VisualizeProtocolError }
   )
 }[VisualizeBridgeMethod];
-/** No graph scope, credentials, filesystem handles, execution or installation API. */
+/** No credentials, filesystem handles or unrestricted graph API. Execution slots
+ * target only authenticated reference successors through the host. */
 export interface VisualizePageSdk {
+  readonly signals: import('./node-signals.js').NodeSignalSdk;
   /** Binary bytes travel separately from the JSON bridge. No target or node operation is accepted. */
   exportAsset(asset: { name: string; mime?: string; blob: Blob }): Promise<VisualizeBridgeMethods['exportAsset']['result']>;
   initialize(): Promise<VisualizeHostContext>;

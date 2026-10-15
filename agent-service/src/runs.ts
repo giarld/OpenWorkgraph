@@ -364,6 +364,23 @@ export class Runs {
       const interaction = this.interaction(interactionId); this.event(this.get(id), 1, 'interaction.changed', interactionId, json(interaction)); return interaction;
     });
   }
+  expireInteraction(id: string, token: RunToken, interactionId: string): void {
+    atomic(this.db, () => {
+      const runtime = this.runtime(id), run = this.get(id);
+      if (runtime.epoch !== token.epoch || runtime.revision !== token.revision) throw new ServiceError('CONFLICT', 'Stale native interaction cancellation');
+      const row = this.db.prepare('SELECT id FROM interactions WHERE id=? AND run_id=? AND epoch=?').get(interactionId, id, token.epoch);
+      if (!row) return;
+      const interaction = this.interaction(interactionId);
+      if (interaction.status === 'expired') return;
+      const delivered = new Set(Array.isArray(runtime.details.deliveredInteractionIds) ? runtime.details.deliveredInteractionIds : []);
+      if (runtime.details.deliveredInteractionId === interactionId || delivered.has(interactionId)) return;
+      if (!['running', 'waiting_answer', 'waiting_approval'].includes(run.status)) throw new ServiceError('CONFLICT', 'Stale native interaction cancellation');
+      this.db.prepare("UPDATE interactions SET status='expired',version=version+1 WHERE id=?").run(interactionId);
+      const active = this.activeInteraction(id);
+      this.transition(id, token, active ? active.kind === 'question' ? 'waiting_answer' : 'waiting_approval' : 'running', { activeInteractionId: active?.id ?? null });
+      const changed = this.interaction(interactionId); this.event(this.get(id), changed.version, 'interaction.changed', interactionId, json(changed));
+    });
+  }
   private expireInteractions(id: string): void {
     const runtime = this.runtime(id);
     const delivered = new Set(Array.isArray(runtime.details.deliveredInteractionIds) ? runtime.details.deliveredInteractionIds : []);

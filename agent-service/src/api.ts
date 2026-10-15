@@ -9,6 +9,7 @@ import { ServiceError } from './errors.js';
 import { ResourceApi } from './resource-api.js';
 import { WorkflowRuntime } from './runtime.js';
 import { RunApi } from './run-api.js';
+import { AgentConfigurationApi } from './agents-api.js';
 import { Backups } from './operations/backups.js';
 import { BackupApi } from './backup-api.js';
 import { TransferApi } from './transfer-api.js';
@@ -37,6 +38,7 @@ export class BusinessApi {
   private storageApi?:StorageApi;
   private visualizeApi?:VisualizeApi;
   private visualizeLibraryApi?:VisualizeLibraryApi;
+  private agentConfigurationApi?: AgentConfigurationApi;
   constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
     this.visualizeLibraryApi??=new VisualizeLibraryApi(new VisualizeLibrary(this.graphs,this.runtime.resources),this.auth);
@@ -69,6 +71,10 @@ export class BusinessApi {
     const transfer=await this.transferApi.handle(request,path,token,origin);if(transfer.handled)return transfer;
     const backup=await this.backupApi.handle(request,path,token,origin);if(backup.handled)return backup;
     const resource=await this.resources.handle(request,path,token,origin);if(resource.handled)return resource;
+    if (this.runtime.agentConfiguration && this.runtime.agentDiscovery) {
+      this.agentConfigurationApi ??= new AgentConfigurationApi(this.runtime.agentConfiguration, this.runtime.agentDiscovery, this.auth);
+      const agent = await this.agentConfigurationApi.handle(request, path, token, origin); if (agent.handled) return agent;
+    }
     const run=await this.runApi.handle(request,path,token,origin);if(run.handled)return run;
     const match=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs(?:[/]([a-zA-Z0-9_-]+))?(?:[/](commands|history|all|archive|trash|restore|purge|permanent-delete))?$/.exec(path);
     if(!match)return {handled:false};
