@@ -77,15 +77,3 @@ Web UI 参考了 [basketikun/infinite-canvas](https://github.com/basketikun/infi
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。第三方来源的版权与许可声明按原始归属保留。
-
-## 阶段 3 当前实现与限制（2026-10-13）
-
-默认生产组合注册 Codex 和 Claude Code 正式插件。Claude CLI 需在工作空间机器独立安装和认证，不随 npm 包分发。Claude 插件支持执行、文本与 visualize 生成，文件/图片及经原生工具处理的视频输入、命令与联网、后台任务、审批/提问、技能与配置、动态技能命令和会话恢复。完全访问自动审批，提问仍需用户答复。原生生图及 OS 沙盒不在支持范围；视频/Office 解码依赖设备工具，Linux/Windows 的支持声明不代表已完成设备验收。实现和验证边界见 [Claude 插件能力](docs/development/claude-plugin-capabilities.md)。
-
-dynamic 模型目录来自原生 stream-json control initialize，不发 user 消息。保留模型/effort 顺序，别名不表示版本锁。完整插件要求 CLI 2.1.296 起；2026-10-14 真实 macOS 问答、页面和技能命令已通过，版本/目录诊断仍不等于所有模型与平台健康。设备凭据、executable、env 不进入 Web options 或冻结快照；managed hooks 与完整设备矩阵单列验收。
-
-新版配置独立存储于 config/agent-configuration.sqlite，generation 为 agent-configuration-v1，不读取或迁移旧设置。GET/POST /v1/agents/configuration 以 section CAS 分别管理公共 permissions、各 backend、default 与 order；旧 API、缺省 agent 的旧请求和图片路由保留原语义。新版提交显式携带 generation、backend configRevision 和 permissions（revision/project/runs），接受时复核并冻结，后续全局设置不改写已接受任务。
-
-公共 project 可保存 read-only/workspace-write/danger-full-access，runs 固定 read-write；保存不等于所有插件都支持。当前 Codex 原生 readOnly 禁 runs 写入，workspaceWrite 又将项目 cwd 纳入可写，不能实现项目只读+runs 可写，明确拒绝新版 read-only 提交（capability_unsupported）。含 Codex 的工作空间仍能保存公共 read-only，UI 可提示该限制；Codex workspace-write/full 可用，历史权限语义保留。Claude 使用 //absolute/path 的 Edit scoped allow/deny（Edit 同时控制 Write）；workspace-write 通过原生权限机制及 Web 审批，danger-full-access 自动批准权限请求，read-only 禁止项目修改和命令/Agent 工具。Claude 不提供 OS 命令沙盒。宿主保留项目身份、资源完整性及输出路径业务校验，不新增自定义权限执行器。
-
-restoredRunStart 是恢复备份冻结任务后重新预检并启动，不是 --resume、续聊或重新附着；无原 responder 时不能伪造协调成功。结果未知保留占用，不切换插件或自动重启原 attempt。插件 completed 仍须经宿主 Publication 校验才能交付。原生证据见 [阶段 3 原生验证](docs/validation/agent-plugin-phase-3.md)，工程包证据见 [阶段 3 打包验证](docs/validation/agent-plugin-phase-3-packaging.md)。

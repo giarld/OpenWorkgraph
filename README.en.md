@@ -76,15 +76,3 @@ The Web UI draws on the visual style and canvas interactions of [basketikun/infi
 ## License
 
 This project is licensed under the [MIT License](LICENSE). Copyright and license notices for third-party sources are retained with their original attribution.
-
-## Current Phase 3 implementation and limits (2026-10-13)
-
-The production registry includes Codex and Claude Code plugins. Claude CLI must be installed and authenticated separately on the Workspace machine. The plugin supports execution, text and visualize generation, native commands/network tools, background tasks, approvals/questions, skills/configuration, protected native skill commands and session recovery. Full access automatically approves permission requests; questions still require answers. Image generation and OS sandboxing are excluded. Video/Office decoding needs device tools; declared Linux/Windows support is separate from device validation. See [Claude plugin capabilities](docs/development/claude-plugin-capabilities.md).
-
-The native model/effort catalog uses control initialize without inference and preserves native order. The complete plugin requires CLI 2.1.296 or newer. Actual macOS questions, page publication and configured native commands passed on October 14, 2026; version/catalog checks still do not establish every model or platform as healthy. Credentials, executable paths and env values remain outside Web options and frozen snapshots. Managed hooks and complete device matrices need separate validation.
-
-New settings use independent config/agent-configuration.sqlite storage, generation agent-configuration-v1, and section CAS via GET/POST /v1/agents/configuration. They do not read or migrate legacy settings. Legacy APIs, requests omitting agent and the image route retain their semantics. New submissions explicitly carry generation, backend revision and shared permissions, checked and frozen at acceptance; later changes do not rewrite accepted runs.
-
-Shared project modes can be saved as read-only/workspace-write/danger-full-access, with runs always read-write. Saving a mode does not establish native support by all plugins. Current Codex policies cannot combine a read-only project with writable runs, so new-generation Codex submissions reject that combination with capability_unsupported. A Workspace containing Codex can still save shared read-only settings and the UI can explain the limit. Codex workspace-write/full work; legacy semantics remain. Claude maps file access to native Edit rules. Workspace-write uses native permissions and Web approvals; full access automatically approves permission requests. Read-only denies project edits and command/Agent tools. No OS command sandbox is provided.
-
-restoredRunStart means rechecking and starting a restored frozen backup run, not --resume, conversation continuation or reattachment. Unknown outcomes retain ownership; no silent plugin switching or invented recovery. Publication still validates delivery. See [native evidence and gaps](docs/validation/agent-plugin-phase-3.md) and [package validation](docs/validation/agent-plugin-phase-3-packaging.md).

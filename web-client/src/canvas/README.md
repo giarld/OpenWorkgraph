@@ -58,4 +58,4 @@ Geometry invariants: ../../tests/geometry.test.ts. Real Chrome interactions and 
 
 Viewport animation coverage: ../../tests/browser/viewport-motion.spec.ts with ../../tests/fixtures/viewport-motion.html (controlled and uncontrolled modes). Tests verify intermediate frames, immediate trackpad pan/pinch, pointer anchors, focus bounds, interruption, reduced motion and cleanup. Geometry tests that need the final viewport wait until data-viewport-animating is false.
 
-The browser tests cover actual native clipboard shortcuts, editing, source deletion after copy, group membership mapping, history, input locks and provenance filtering. This integration note stays within Canvas ownership; central .memory closeout is delegated to the coordinating task.
+The browser tests cover actual native clipboard shortcuts, editing, source deletion after copy, group membership mapping, history, input locks and provenance filtering.
