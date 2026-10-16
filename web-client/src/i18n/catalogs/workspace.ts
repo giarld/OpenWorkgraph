@@ -1,4 +1,6 @@
 export const workspaceZhCN: Record<string, string> = {
+  'Unconfirmed changes': '待确认的修改',
+  'Reconcile changes': '对账并恢复',
   "Node page status": "节点页面状态",
   "Page ready": "已就绪",
   "Page loading": "正在加载",

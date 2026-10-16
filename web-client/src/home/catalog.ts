@@ -1,6 +1,6 @@
 import { zhCN } from '../i18n/messages';
 export const homeZhCN: Record<string, string> = {
-  'OpenWorkgraph · Visual Agent Workbench': 'OpenWorkgraph · 可视化智能体工作台',
+  'OpenWorkgraph · Visual Agent Workbench': '万象画布 · 可视化智能体工作台',
   'Page settings': '页面设置',
   'Visual': '可视化',
   'Agent Workbench': '智能体工作台',
@@ -22,7 +22,7 @@ export const homeZhCN: Record<string, string> = {
   'Bring your materials, thinking, and conclusions together.': '让收集的资料、思考过程与结论在一处汇合。',
   'A workflow of your own': '属于你的工作流',
   'Give your next project a shape that works for you.': '为下一个项目，找到适合自己的组织方式。',
-  'AI is the magic of creation. Workgraph puts the wand in your hands.': 'AI 是创造万象的魔法，Workgraph 是执掌魔法的魔杖。',
+  'AI creates all things. All things converge in the forge.': 'AI造万象，万象归熔炉。',
 };
 
 Object.assign(zhCN, homeZhCN);

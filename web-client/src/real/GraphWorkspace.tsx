@@ -196,6 +196,9 @@ interface CanvasUploadJob {
   place?: () => Promise<GraphSnapshot>;
 }
 export interface GraphWorkspaceProps {
+  pendingRequests?: import('../adapter/transport').PendingRequest[];
+  reconciliationPending?: boolean;
+  onReconcileRequest?: (pending: import('../adapter/transport').PendingRequest) => Promise<void>;
   agentStore?: WorkspaceAgentStore;
   projectName?: string;
   graphActions?: (closeMenu: () => void) => ReactNode;
@@ -1702,7 +1705,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const referenceContent = object(referenceWire?.content ?? {});
   const generatedOutputNode = g.nodes.find(n => n.id === generatedOutputNodeId);
   const generatedOutput = object(object(generatedOutputNode?.content ?? {}).generatedOutput);
-  const saveLabel = state.drafts.length
+  const saveLabel = props.reconciliationPending ? t('Saving') : props.pendingRequests?.length ? t('Recovery pending') : state.drafts.length
     ? state.drafts.some((d) => d.state === "conflict")
       ? t('Conflict')
       : state.drafts.some((d) => d.state === "recovery")
@@ -1712,7 +1715,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           : state.drafts.some((d) => d.state === "saving")
             ? t('Saving')
             : t('Unsaved')
-    : t('Saved');
+    : state.busy ? t('Saving') : t('Saved');
   // Canvas cards and output previews deliberately share this rendering path.
   const linkedPreviewLayers = markdownLinkedFiles.map(file => ({
     id: String(file.id), title: file.name,
@@ -1923,7 +1926,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             title={readOnly ? g.title : t('Double-click to rename the Work Graph')} onDoubleClick={beginTitleEdit}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === 'F2') { e.preventDefault(); beginTitleEdit(); } }}>{g.title}</strong>}
         <SaveStatusMenu label={(titleSaving ? t('Saving') : saveLabel) + (readOnly ? t(' · Read-only') : '')}
-          drafts={state.drafts} graph={g} disabled={readOnly || titleSaving} locked={locked}
+          drafts={state.drafts} graph={g} disabled={readOnly || titleSaving || !!props.reconciliationPending} locked={locked}
+          pendingRequests={props.pendingRequests} reconcileRequest={props.onReconcileRequest}
           resolve={(draft, content) => editor.resolve(draft.nodeId, content, draft.draftId)} onError={props.onError}/>
       </div>
       {mainMenu && <>

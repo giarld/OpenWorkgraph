@@ -104,7 +104,7 @@ export function VisualizeStandalone() {
   const node = graph?.nodes.find(item => item.id === selection?.nodeId && item.type === 'visualize');
   const content = object(node?.content);
   const title = typeof content.title === 'string' && content.title ? content.title : t('Interactive page');
-  useEffect(() => { document.title = title + ' · OpenWorkgraph'; }, [title]);
+  useEffect(() => { document.title = title + ' · ' + t('OpenWorkgraph'); }, [title, t]);
   return <main className="ow-visualize-standalone">
     <header><PanelsTopLeft size={18} aria-hidden="true"/><h1>{title}</h1></header>
     {!selection || (graph && !node) ? <p role="alert">{t('The visualization node is unavailable.')}</p> : <>

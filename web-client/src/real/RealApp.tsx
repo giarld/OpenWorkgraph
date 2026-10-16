@@ -8,13 +8,14 @@ import { randomId } from "../adapter/random";
 import { FILE_NODE_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
 import { runtimeStatus } from './runtime-status';
 import { runtimeNeedsUpgrade } from '../domain/runtime-version';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { ConnectionRegistry, RUNTIME_NAME_MAX_LENGTH, type Connection } from "../adapter/connections";
 import { createPairingIdentity, type PairingIdentity } from '../adapter/client-pairing';
 import {
   Transport,
   LifecycleCancelledError,
   isLifecycleCancellation,
+  type PendingRequest,
 } from "../adapter/transport";
 import { EventSubscription } from "../adapter/events";
 import type {
@@ -57,6 +58,8 @@ import { WelcomeDialog } from './WelcomeDialog';
 import { WelcomeCommand } from './WelcomeCommand';
 import { WorkspaceRestartHint } from './WorkspaceRestartHint';
 import webClientPackage from '../../package.json';
+const noPendingSubscription = () => () => {};
+const noPendingRevision = () => 0;
 interface ServiceData {
   generation: number;
   projects: Project[];
@@ -513,6 +516,35 @@ export function RealApp() {
   // use the same transport after the event channel reconnects.
   const graphTransport = useMemo(() => graphConnection && graphConnection.status !== 'invalid' ? graphConnection.serviceId === transport?.serviceId ? transport : new Transport(registry, graphConnection.serviceId) : undefined,
     [registry, transport, graphConnection?.serviceId, graphConnection?.generation, graphConnection?.session.id]);
+  const [reconcilingRequest, setReconcilingRequest] = useState<PendingRequest>();
+  const reconciliation = useRef<string | undefined>(undefined);
+  useSyncExternalStore(transport?.subscribe ?? noPendingSubscription, transport?.getPendingRevision ?? noPendingRevision);
+  useSyncExternalStore(graphTransport?.subscribe ?? noPendingSubscription, graphTransport?.getPendingRevision ?? noPendingRevision);
+  const pendingTransports = [...new Set([transport, graphTransport].filter((source): source is Transport => !!source))];
+  const graphRequests = [...new Map([...(graphTransport?.pending() ?? []), ...(reconcilingRequest ? [reconcilingRequest] : [])].map(p => [p.id, p])).values()];
+  const pendingGraphRequests = localMode || !graph ? [] : graphRequests.filter(p => p.serviceId === graph.serviceId &&
+    (p.path === graphPath(graph.projectId, graph.graphId) + '/commands' || p.path === graphPath(graph.projectId, graph.graphId) + '/history'));
+  const reconcilePendingRequest = async (source: Transport, pending: PendingRequest) => {
+    if (reconciliation.current) return;
+    reconciliation.current = pending.id;
+    setReconcilingRequest(pending);
+    const owner = editor.current;
+    const scope = owner?.getSnapshot().graph;
+    const ownsGraph = scope?.serviceId === pending.serviceId &&
+      (pending.path === graphPath(scope.projectId, scope.graphId) + '/commands' || pending.path === graphPath(scope.projectId, scope.graphId) + '/history');
+    let succeeded = false;
+    try { await source.retry(pending.id); succeeded = true; }
+    finally {
+      // Definite rejections also remove the journal and must update recovery UI.
+      try {
+        changed();
+        if (ownsGraph && !source.pending().some(item => item.id === pending.id)) {
+          const refresh = owner!.reconcileRequest(pending.idempotencyKey);
+          if (succeeded) await refresh; else await refresh.catch(onError);
+        }
+      } finally { reconciliation.current = undefined; setReconcilingRequest(undefined); }
+    }
+  };
   const graphRequest = useMemo<Request>(() => graphTransport === transport ? request : async <T,>(path: string, body?: unknown, method?: string, options?: { journal?: 'session' | 'memory'; range?: { start: number; end: number } }) => {
     if (!graphTransport) throw new LifecycleCancelledError();
     if ((body !== undefined || method === 'DELETE') && !isSnapshotSafeReadRequest(path, method) &&
@@ -1116,13 +1148,13 @@ export function RealApp() {
         target={toastViewport}
         items={[
           ...toastItems,
-          ...(transport?.pending() ?? []).map(p => ({
+          ...pendingTransports.flatMap(source => source.pending().map(p => ({
             id: `pending-${p.id}`,
             role: 'alert' as const,
             duration: null,
             className: 'real-pending-request-toast',
-            content: <><strong>{t('Request with unknown result')}</strong><span>{p.persistence === 'memory' ? t('The original request is stored only in this tab. Do not close the page or repeat the import; reconnect to reconcile it here.') : t('Do not create another operation. Reconnect and use the original request to reconcile it; runs are not resubmitted automatically.')}</span><code>{p.path}</code><button disabled={!online || busy} onClick={() => act(async () => { await transport!.retry(p.id); changed(); })}>{t('Reconcile with the original key and body')}</button></>,
-          })),
+            content: <><strong>{t('Request with unknown result')}</strong><span>{p.persistence === 'memory' ? t('The original request is stored only in this tab. Do not close the page or repeat the import; reconnect to reconcile it here.') : t('Do not create another operation. Reconnect and use the original request to reconcile it; runs are not resubmitted automatically.')}</span><code>{p.path}</code><button disabled={registry.get(source.serviceId)?.status !== 'paired' || busy || !!reconcilingRequest} onClick={() => act(() => reconcilePendingRequest(source, p))}>{t('Reconcile with the original key and body')}</button></>,
+          }))),
         ]}
         onDismiss={dismissToast}
       />
@@ -1179,8 +1211,8 @@ export function RealApp() {
               navigate(() => { location.href = './index.html'; });
             }}>
               <img src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/>
-              <span className="sidebar-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span>
-              <h1 className="visually-hidden">OpenWorkgraph</h1>
+              <span className="sidebar-version-badge" title={`${t('OpenWorkgraph')} v${webClientPackage.version}`}>v{webClientPackage.version}</span>
+              <h1 className="visually-hidden">{t('OpenWorkgraph')}</h1>
             </a>
           </footer>
         </aside>
@@ -1225,7 +1257,7 @@ export function RealApp() {
         />}
         <section className={"real-main workspace " + (page === "library" ? "library-active" : "")}>
           {page === 'library' && <section className="workgraph-library" aria-label={t('Work Graph list')}>
-            <header><div><div className="library-brand"><img className="library-brand-logo" src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/><span className="brand-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span></div><h1>{t('Work Graph')}</h1></div></header>
+            <header><div><div className="library-brand"><img className="library-brand-logo" src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/><span className="brand-version-badge" title={`${t('OpenWorkgraph')} v${webClientPackage.version}`}>v{webClientPackage.version}</span></div><h1>{t('Work Graph')}</h1></div></header>
           <div className="library-filters">
           <label>{t('Workspace')}<select aria-label={t('Select Workspace')} value={localMode ? 'browser' : serviceId} onChange={event => {
             const value = event.target.value;
@@ -1518,6 +1550,9 @@ export function RealApp() {
                 runs={localMode ? [] : current?.runs ?? []}
                 refreshToken={localMode ? local.revision : current?.revision ?? 0}
                 onChanged={canvasChanged}
+                pendingRequests={pendingGraphRequests}
+                reconciliationPending={pendingGraphRequests.some(p => p.id === reconcilingRequest?.id)}
+                onReconcileRequest={pending => reconcilePendingRequest(graphTransport!, pending)}
                 onCanvas={attachCanvas}
                 onAssetsChanged={() => setAssetsRevision(value => value + 1)}
                 onOpenProjectDirectory={path => {

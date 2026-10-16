@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { GraphCommand, Json, SubmitRun } from '@openworkgraph/protocol';
 import type { PreparedBlob } from './blob-store.js';
 import { Graphs, resourceLinks } from './graphs.js';
-import { Resources } from './resources.js';
+import { ProjectFileMissingError, Resources } from './resources.js';
 import { ServiceError } from './errors.js';
 import { insertTransferredVisualizeNode, prepareVisualizeCopy } from './visualize-transfer.js';
 
@@ -17,7 +17,7 @@ export async function prepareDeletedOutputHistory(graphs: Graphs, resources: Res
     if (op.type !== 'node.delete' || prepared.has(op.nodeId) || !graph.nodes.some(node => node.id === op.nodeId && node.type === 'execution')) continue;
     if (!graphs.executionOutputs(command, op.nodeId).length) continue;
     const request: SubmitRun = { ...command, nodeId: op.nodeId, kind: 'execution' };
-    const preserve = await prepareOutputHistory(graphs, resources, request, cleanups, copies);
+    const preserve = await prepareOutputHistory(graphs, resources, request, cleanups, copies, { skipMissingProjectFiles: true });
     prepared.set(op.nodeId, () => preserve(request, graphs));
   }
   return () => {
@@ -52,14 +52,14 @@ function arrangeHistoryGroups(graphs: Graphs, request: SubmitRun): void {
 }
 
 /** Prepare live files before the auth transaction; commit copies with submission. */
-export async function prepareOutputHistory(graphs: Graphs, resources: Resources, request: SubmitRun, cleanups: (() => unknown)[], sharedCopies?: Map<string, string>) {
+export async function prepareOutputHistory(graphs: Graphs, resources: Resources, request: SubmitRun, cleanups: (() => unknown)[], sharedCopies?: Map<string, string>, options: { skipMissingProjectFiles?: boolean } = {}) {
   const outputs = graphs.executionOutputs(request, request.nodeId);
   const graph = graphs.snapshot(request);
   const visible = new Set(graph.edges.filter(edge => edge.kind === 'delivery' && edge.sourceId === request.nodeId).map(edge => edge.targetId));
   const owner = graph.nodes.find(node => node.id === request.nodeId)!;
-  const anchor = outputs.find(node => visible.has(node.id)) ?? { x: owner.x + (owner.width ?? 300) + 80, y: owner.y };
   const files = new Map<string, PreparedBlob>();
   const visualizations = new Map<string, () => Json>();
+  const skipped = new Set<string>();
   for (const output of outputs) {
     if (output.type === 'visualize') {
       visualizations.set(output.id, await prepareVisualizeCopy(graphs, resources, request, output, cleanups));
@@ -69,15 +69,23 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
     const source = content.source as Record<string, Json> | undefined;
     if (source?.kind === 'project-file') {
       if (source.serviceId !== request.serviceId || source.projectId !== request.projectId || typeof source.relativePath !== 'string') throw new ServiceError('INPUT_BLOCKED', 'Invalid historical project file');
-      const blob = await resources.prepareProjectFile(request, source.relativePath, typeof content.mime === 'string' ? content.mime : 'application/octet-stream');
-      files.set(output.id, blob);
-      cleanups.push(() => resources.discardPrepared(blob));
+      try {
+        const blob = await resources.prepareProjectFile(request, source.relativePath, typeof content.mime === 'string' ? content.mime : 'application/octet-stream');
+        files.set(output.id, blob);
+        cleanups.push(() => resources.discardPrepared(blob));
+      } catch (error) {
+        if (!options.skipMissingProjectFiles || !(error instanceof ProjectFileMissingError)) throw error;
+        skipped.add(output.id);
+      }
     }
   }
+  const retained = outputs.filter(output => !skipped.has(output.id));
+  const anchor = retained.find(node => visible.has(node.id)) ?? { x: owner.x + (owner.width ?? 300) + 80, y: owner.y };
   return (_request: SubmitRun, current: Graphs) => {
+    // Keep the complete baseline so skipped files cannot bypass output CAS or locks.
     current.assertOutputPreservation(request, request.nodeId, outputs);
     const nodeCopies = new Map<string, string>();
-    outputs.forEach((output, index) => {
+    retained.forEach((output, index) => {
       let content = structuredClone(output.content) as Record<string, Json>;
       let type = output.type;
       const file = files.get(output.id);
@@ -135,7 +143,7 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
         rewired = true;
       }
     }
-    if (outputs.length) {
+    if (nodeCopies.size) {
       const nodes = current.snapshot(request).nodes;
       const execution = nodes.find(node => node.id === request.nodeId)!;
       const executionContent = execution.content as Record<string, Json>;

@@ -11,6 +11,8 @@ const binaryAssets = import.meta.glob<string>([
   '/node_modules/pdfjs-dist/cmaps/*.bcmap',
   '/node_modules/pdfjs-dist/standard_fonts/*.{pfb,ttf}',
   '/node_modules/pdfjs-dist/wasm/*.wasm',
+  // PDF scripting is unused; omit its QuickJS engine from the build.
+  '!/node_modules/pdfjs-dist/wasm/quickjs-eval.wasm',
 ], { query: '?url', import: 'default', eager: true });
 const assetUrls = new Map(Object.entries(binaryAssets).map(([path, url]) => [path.split('/').pop()!, url]));
 class LocalPdfBinaryData {

@@ -314,7 +314,7 @@
 .real-toolbar .workgraph-save-trigger { display: inline-flex; align-items: center; gap: 4px; margin: 0 -5px; padding: 2px 5px; min-height: 24px; border: 0; border-radius: 5px; background: transparent; font-size: 11px; color: var(--muted); }
 .real-toolbar .workgraph-save-trigger:hover:not(:disabled), .real-toolbar .workgraph-save-trigger[aria-expanded="true"] { background: var(--fill); color: var(--text); }
 .workgraph-save-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
-.workgraph-save-menu { position: fixed; width: min(320px, calc(100vw - 32px)); max-height: min(70vh, 600px); overflow: auto; padding: 6px; z-index: 63; font-size: 13px; }
+.workgraph-save-menu { position: fixed; width: min(320px, calc(100vw - 32px)); max-height: min(70vh, 600px); overflow: auto; padding: 6px; z-index: 111; font-size: 13px; }
 .workgraph-save-menu[data-empty="true"] { width: min(260px, calc(100vw - 32px)); }
 .workgraph-save-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; color: var(--muted); font-size: 12px; line-height: 18px; }
 .workgraph-save-count { font-size: 11px; font-variant-numeric: tabular-nums; }

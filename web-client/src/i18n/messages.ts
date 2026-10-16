@@ -4,7 +4,8 @@ export type MessageVariables = Record<string, string | number>;
 export type TranslationCatalog = Record<string, string>;
 
 export const coreZhCN = {
-  'OpenWorkgraph · Work Graph': 'OpenWorkgraph · 工作图',
+  'OpenWorkgraph': '万象画布',
+  'OpenWorkgraph · Work Graph': '万象画布 · 工作图',
   'Loading workspace…': '正在载入工作区…',
   'Change language': '切换语言',
   'Language': '语言',

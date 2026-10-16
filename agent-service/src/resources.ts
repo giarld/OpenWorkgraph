@@ -32,6 +32,14 @@ export const IMAGE_THUMBNAIL_LEVELS = [320, 640, 1280, 2560, 4096] as const;
 const invalid=(message: string): never => {throw new ServiceError('INVALID_REQUEST',message);};
 const missing=(): never => {throw new ServiceError('NOT_FOUND','Resource not found in this scope');};
 const conflict=(message='Resource changed'): never => {throw new ServiceError('REVISION_CONFLICT',message);};
+/** Only a missing source file, never a missing project root or preparation directory. */
+export class ProjectFileMissingError extends ServiceError {
+ constructor(cause: unknown) { super('NOT_FOUND','项目文件不存在。',{cause}); }
+}
+function projectFileFailure(cause: unknown): never {
+ if (['ENOENT','ENOTDIR'].includes((cause as NodeJS.ErrnoException)?.code ?? '')) throw new ProjectFileMissingError(cause);
+ throw cause;
+}
 function name(value: string): string {if (typeof value!=='string' || !value.trim() || value.length>512 || [...value].some(c=>c.charCodeAt(0)<32)) return invalid('Invalid resource name'); return value.trim();}
 function integer(value: number): void {if (!Number.isSafeInteger(value) || value<0) invalid('Expected a nonnegative safe integer');}
 type AssetPresentationCache = {presentation: VisualizeAssetPresentation; logoSvg: string};
@@ -132,9 +140,11 @@ export class Resources {
  async prepareProjectFile(scope: ResourceScope, path: string, mime='application/octet-stream'): Promise<PreparedBlob> {
   this.outside();this.project(scope);const registeredRoot=String(this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(scope.projectId)!['canonical_path']);const root=await realpath(registeredRoot);
   if(root!==registeredRoot) throw new ServiceError('PROJECT_UNAVAILABLE','Registered project path was replaced by a symlink');
-  const resolved=await realpath(resolve(root,path));const rel=relative(root,resolved);
+  const candidate=resolve(root,path), lexical=relative(root,candidate);
+  if (!lexical || lexical==='..' || lexical.startsWith('..'+sep) || isAbsolute(lexical)) invalid('File is outside project');
+  const resolved=await realpath(candidate).catch(projectFileFailure);const rel=relative(root,resolved);
   if (!rel || rel==='..' || rel.startsWith('..'+sep) || isAbsolute(rel)) invalid('File is outside project');
-  const file=await open(resolved,constants.O_RDONLY|constants.O_NOFOLLOW);
+  const file=await open(resolved,constants.O_RDONLY|constants.O_NOFOLLOW).catch(projectFileFailure);
   try {
    const before=await file.stat();
    if (!before.isFile()) invalid('Expected a regular file');

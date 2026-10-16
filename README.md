@@ -1,19 +1,19 @@
-# OpenWorkgraph
+# 万象画布（OpenWorkgraph）
 
 > [!IMPORTANT]
-> OpenWorkgraph 是基于无限画布思想的全能可视化智能体工作台产品，除了图、文、视频生成、软件开发等工作，还能组织各种用途的 Agent 工作流。
+> 万象画布（OpenWorkgraph）是基于无限画布思想的全能可视化智能体工作台产品，除了图、文、视频生成、软件开发等工作，还能组织各种用途的 Agent 工作流。
 >
 > 可视化智能体工作台
 >
 > Visual Agent Workbench
 >
-> AI 是创造万象的魔法，Workgraph 是执掌魔法的魔杖。
+> AI造万象，万象归熔炉。
 
 简体中文 | [English](README.en.md)
 
 ## 快速开始
 
-打开 [OpenWorkgraph 官方编辑器](https://canvas.giarld.com)，按照页面提供的引导完成配置即可开始使用。
+打开 [万象画布官方编辑器](https://canvas.giarld.com)，按照页面提供的引导完成配置即可开始使用。
 
 ## 设计哲学：第一性原理
 

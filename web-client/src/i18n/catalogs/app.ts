@@ -104,7 +104,7 @@ export const appZhCN: Record<string, string> = {
   'For frequent use, install the CLI globally, then start your Workspace:': '经常使用时，也可以先全局安装 CLI，再启动工作空间：',
   'Run this command in a terminal on the device that will run your Workspace:': '在工作空间所在设备的终端执行以下命令：',
   'Workspace name': '工作空间名称',
-  'Welcome to Workgraph': '欢迎使用 Workgraph',
+  'Welcome to Workgraph': '欢迎使用万象画布',
   'Bring ideas, tasks, and outputs together in one Work Graph. Whether you write with others, create art, or build software and hardware, collaborate with AI to turn ideas into reality.': '在同一张工作图中组织想法、任务与产出。无论是作家的协作写作、艺术家的绘画创作，还是工程师的软硬件开发，都能与 AI 协作，让想法变为现实。',
   'Quick start': '快速开始',
   'Install skills': '安装技能',

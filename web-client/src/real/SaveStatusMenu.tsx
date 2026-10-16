@@ -2,16 +2,19 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Copy, FileText, RefreshCw, RotateCcw } from 'lucide-react';
 import type { Draft } from './editor';
+import type { PendingRequest } from '../adapter/transport';
 import type { GraphSnapshot, Json } from './contracts';
 import { messageOf } from './contracts';
 import { useI18n } from '../i18n/I18nProvider';
 
 /** Saving failures can belong to a different node than the open prompt. */
-export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve, onError }: {
+export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve, onError, pendingRequests = [], reconcileRequest }: {
   label: string; drafts: Draft[]; graph: GraphSnapshot; disabled: boolean;
   locked(nodeId: string): boolean;
   resolve(draft: Draft, content?: Json): Promise<void>;
   onError(error: unknown): void;
+  pendingRequests?: PendingRequest[];
+  reconcileRequest?: (pending: PendingRequest) => Promise<void>;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -21,6 +24,7 @@ export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const count = drafts.length + pendingRequests.length;
   useLayoutEffect(() => {
     if (!open) return;
     const position = () => {
@@ -33,7 +37,7 @@ export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve
     };
     position(); window.addEventListener('resize', position);
     return () => window.removeEventListener('resize', position);
-  }, [open, drafts.length > 0]);
+  }, [open, count > 0]);
   const close = () => { setOpen(false); trigger.current?.focus(); };
   useEffect(() => {
     if (!open) return;
@@ -54,7 +58,7 @@ export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve
       aria-haspopup="menu" aria-expanded={open} onClick={() => { setError(''); setCopied(''); setOpen(value => !value); }}>
       {label}<ChevronDown size={12} aria-hidden="true"/>
     </button></span>
-    {open && createPortal(<div ref={menu} className="workgraph-save-menu panel" data-empty={!drafts.length} role="menu" aria-label={t('Handle unsaved changes')} tabIndex={-1} aria-busy={busy}
+    {open && createPortal(<div ref={menu} className="workgraph-save-menu panel" data-empty={!count} role="menu" aria-label={t('Handle unsaved changes')} tabIndex={-1} aria-busy={busy}
       onKeyDown={event => {
         event.stopPropagation();
         if (event.key === 'Escape') { event.preventDefault(); close(); }
@@ -68,9 +72,13 @@ export function SaveStatusMenu({ label, drafts, graph, disabled, locked, resolve
           buttons[next].focus();
         }
       }}>
-      <div className="workgraph-save-menu-heading"><span>{drafts.length ? t('Handle unsaved changes') : t('Save status')}</span>{drafts.length > 0 && <span className="workgraph-save-count">{drafts.length}</span>}</div>
-      {!drafts.length ? <div className="workgraph-save-empty"><Check size={16} aria-hidden="true"/><span>{t('All changes are saved.')}</span></div> : <>
-        {disabled && <p className="workgraph-save-note">{t('Saving is currently unavailable. You can still copy unsaved content.')}</p>}
+      <div className="workgraph-save-menu-heading"><span>{count ? t('Handle unsaved changes') : t('Save status')}</span>{count > 0 && <span className="workgraph-save-count">{count}</span>}</div>
+      {!count ? <div className="workgraph-save-empty"><Check size={16} aria-hidden="true"/><span>{t('All changes are saved.')}</span></div> : <>
+        {disabled && drafts.length > 0 && <p className="workgraph-save-note">{t('Saving is currently unavailable. You can still copy unsaved content.')}</p>}
+        {pendingRequests.map(pending => <section key={pending.id} role="group" aria-label={t('Unconfirmed changes')} className="workgraph-save-entry">
+          <div className="workgraph-save-entry-heading"><RefreshCw size={14} aria-hidden="true"/><strong>{t('Unconfirmed changes')}</strong></div>
+          <div className="workgraph-save-actions"><button type="button" role="menuitem" disabled={disabled || busy || !reconcileRequest} onClick={() => void handle(() => reconcileRequest!(pending))}><RefreshCw size={14}/>{t('Reconcile changes')}</button></div>
+        </section>)}
         {drafts.map((draft, index) => {
           const node = graph.nodes.find(node => node.id === draft.nodeId);
           const content = draft.content && typeof draft.content === 'object' && !Array.isArray(draft.content) ? draft.content : {};

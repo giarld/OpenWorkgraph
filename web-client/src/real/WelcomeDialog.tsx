@@ -110,7 +110,7 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
               alt=""
               aria-hidden="true"
             />
-            <span className="brand-version-badge" title={`OpenWorkgraph v${webClientPackage.version}`}>v{webClientPackage.version}</span>
+            <span className="brand-version-badge" title={`${t('OpenWorkgraph')} v${webClientPackage.version}`}>v{webClientPackage.version}</span>
           </div>
           <h1>{t('Welcome to Workgraph')}</h1>
           <p>{t('Bring ideas, tasks, and outputs together in one Work Graph. Whether you write with others, create art, or build software and hardware, collaborate with AI to turn ideas into reality.')}</p>

@@ -45,15 +45,25 @@ function immutableMediaPath(path: string): boolean {
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*\/visualize-logo$/.test(pathname)
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/(?:thumbnail|media|content)$/.test(pathname);
 }
-const memoryJournals = new WeakMap<ConnectionRegistry, Map<string, Map<string, PendingRequestEntry>>>();
+/** All transports on a connection share active ownership and journal settlement.
+ * Storage/prefix/session boundaries still isolate persistent replay records. */
+interface SharedRequests {
+  memory: Map<string, PendingRequestEntry>;
+  inFlight: Map<string, number>;
+  listeners: Set<() => void>;
+  revision: number;
+  journals: Map<StorageLike | null, Map<string, Map<string, PendingRequestEntry>>>;
+}
+const sharedRequests = new WeakMap<ConnectionRegistry, Map<string, SharedRequests>>();
 /** Service-bound authenticated HTTP. No write is retried implicitly. */
 export class Transport {
   private unknown = new Map<string, PendingRequestEntry>();
   private readonly memoryUnknown: Map<string, PendingRequestEntry>;
+  private readonly shared: SharedRequests;
   /** Journal rows are persisted before sending, but are not unknown while an
    * active request still owns their outcome. Counts keep concurrent retries
    * from exposing the row when only one of them has settled. */
-  private readonly inFlight = new Map<string, number>();
+  private readonly inFlight: Map<string, number>;
   private storage: StorageLike | null;
   private prefix: string;
   private readonly owner: ConnectionLease;
@@ -64,10 +74,12 @@ export class Transport {
     options: TransportOptions = {},
   ) {
     this.owner = registry.lease(serviceId);
-    let byService = memoryJournals.get(registry);
-    if (!byService) { byService = new Map(); memoryJournals.set(registry, byService); }
-    this.memoryUnknown = byService.get(serviceId) ?? new Map();
-    byService.set(serviceId, this.memoryUnknown);
+    let byService = sharedRequests.get(registry);
+    if (!byService) { byService = new Map(); sharedRequests.set(registry, byService); }
+    this.shared = byService.get(serviceId) ?? { memory: new Map(), inFlight: new Map(), listeners: new Set(), revision: 0, journals: new Map() };
+    byService.set(serviceId, this.shared);
+    this.memoryUnknown = this.shared.memory;
+    this.inFlight = this.shared.inFlight;
     for (const [id, entry] of this.memoryUnknown) if (entry.sessionId !== this.owner.sessionId) this.memoryUnknown.delete(id);
     this.lifecycleSignal = options.signal;
     this.storage =
@@ -78,6 +90,12 @@ export class Transport {
         : options.pendingStorage;
     this.prefix =
       (options.pendingPrefix ?? "openworkgraph.pending.v1.") + serviceId;
+    let journals = this.shared.journals.get(this.storage);
+    if (!journals) { journals = new Map(); this.shared.journals.set(this.storage, journals); }
+    const journalKey = JSON.stringify([this.prefix, this.owner.sessionId]);
+    const journal = journals.get(journalKey);
+    if (journal) { this.unknown = journal; return; }
+    journals.set(journalKey, this.unknown);
     try {
       const rows: unknown = JSON.parse(
         this.storage?.getItem(this.prefix) ?? "[]",
@@ -114,13 +132,24 @@ export class Transport {
       .filter(entry => !this.inFlight.has(entry.id))
       .map(({ body: _body, payload: _payload, ...entry }) => structuredClone(entry));
   }
+  subscribe = (listener: () => void) => {
+    this.shared.listeners.add(listener);
+    return () => { this.shared.listeners.delete(listener); };
+  };
+  getPendingRevision = () => this.shared.revision;
+  private changed() {
+    ++this.shared.revision;
+    for (const listener of this.shared.listeners) listener();
+  }
   private begin(entry: PendingRequestEntry): void {
     this.inFlight.set(entry.id, (this.inFlight.get(entry.id) ?? 0) + 1);
+    this.changed();
   }
   private end(entry: PendingRequestEntry): void {
     const count = this.inFlight.get(entry.id) ?? 0;
     if (count <= 1) this.inFlight.delete(entry.id);
     else this.inFlight.set(entry.id, count - 1);
+    this.changed();
   }
   private removeEntry(entry: PendingRequestEntry) {
     (entry.persistence === "memory" ? this.memoryUnknown : this.unknown).delete(entry.id);

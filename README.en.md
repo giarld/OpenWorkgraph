@@ -1,11 +1,11 @@
 # OpenWorkgraph
 
 > [!IMPORTANT]
-> OpenWorkgraph is an all-purpose visual agent workbench built around the infinite canvas concept. Beyond image, text, and video generation and software development, it helps you organize agent workflows for a wide range of purposes.
+> OpenWorkgraph (万象画布 in Chinese) is an all-purpose visual agent workbench built around the infinite canvas concept. Beyond image, text, and video generation and software development, it helps you organize agent workflows for a wide range of purposes.
 >
 > Visual Agent Workbench
 >
-> AI is the magic of creation. Workgraph puts the wand in your hands.
+> AI creates all things. All things converge in the forge.
 
 [简体中文](README.md) | English
 

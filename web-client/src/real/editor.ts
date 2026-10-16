@@ -309,6 +309,14 @@ export class GraphEditor {
     this.emit({ graph: this.confirmed, busy: false, error: messageOf(error) });
     for (const command of cancelled) command.reject(error);
   }
+  /** The transport has settled this exact request; refresh before releasing its edit fence. */
+  async reconcileRequest(idempotencyKey: string): Promise<void> {
+    await this.refresh();
+    if (this.historyRequest?.body.idempotencyKey === idempotencyKey) {
+      this.historyRequest = undefined;
+      this.emit();
+    }
+  }
   /** Fence all accepted edits, then ask the Runtime to move the shared document cursor. */
   async travelHistory(direction: 'undo' | 'redo'): Promise<GraphSnapshot> {
     if (this.historyLocked) throw Error(translate('Wait for undo or redo to finish.'));
