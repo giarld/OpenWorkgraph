@@ -6,6 +6,7 @@ import type { DataDirectories } from '../directories.js';
 import type { SkillSessions } from '../skill-sessions.js';
 import type { ProjectProbe } from '../project-probe.js';
 import { RuntimeBackend } from '../runtime-backend.js';
+import type { VisualizePreviews } from '../visualize-preview.js';
 import { Runs } from '../runs.js';
 import { redactSkillValues } from '../backend/redaction.js';
 import { AgentError, agentError as normalizeAgentError } from './errors.js';
@@ -41,7 +42,7 @@ function agentError(error: unknown, fallback: AgentFailureReason = 'protocol_err
 export class AgentRouter implements SchedulerBackend {
   private readonly attached = new Map<string, AttachedAgent>();
   private readonly options: Required<AgentRouterOptions>;
-  constructor(readonly runs: Runs, readonly directories: DataDirectories, private readonly plugin: (id: string) => AgentPlugin, private readonly assertFrozen: (snapshot: InputSnapshot, kind: Run['status'] | string) => void, private readonly legacy: SchedulerBackend, private readonly probe: ProjectProbe, private readonly skills: SkillSessions, options: AgentRouterOptions = {}, private readonly compatibility?: (run: Run, snapshot: InputSnapshot) => AgentExecutionSelection) {
+  constructor(readonly runs: Runs, readonly directories: DataDirectories, private readonly plugin: (id: string) => AgentPlugin, private readonly assertFrozen: (snapshot: InputSnapshot, kind: Run['status'] | string) => void, private readonly legacy: SchedulerBackend, private readonly probe: ProjectProbe, private readonly skills: SkillSessions, options: AgentRouterOptions = {}, private readonly compatibility?: (run: Run, snapshot: InputSnapshot) => AgentExecutionSelection, private readonly visualizePreviews?: VisualizePreviews) {
     this.options = { timeoutMs: options.timeoutMs ?? 30000, abortGraceMs: options.abortGraceMs ?? 1000, pollMs: options.pollMs ?? 25, callbackLimit: options.callbackLimit ?? 256 };
     if (Object.values(this.options).some(value => !Number.isSafeInteger(value) || value < 1) || this.options.timeoutMs > 60000 || this.options.abortGraceMs > 60000 || this.options.pollMs > 1000 || this.options.callbackLimit > 256) throw new AgentError('invalid_configuration');
   }
@@ -206,7 +207,7 @@ export class AgentRouter implements SchedulerBackend {
         respond: async (id, interactionId, reply) => this.control(id, entry, 'respond', () => adapter.respond(id, interactionId, reply)),
         reconcile: async id => this.control(id, entry, 'reconcile', () => adapter.reconcile(id)),
       };
-      entry.bridge = new RuntimeBackend(this.runs, this.directories, guarded, this.probe, this.skills);
+      entry.bridge = new RuntimeBackend(this.runs, this.directories, guarded, this.probe, this.skills, {}, this.visualizePreviews);
       await entry.bridge.start(run, snapshot, context);
     } catch (error) {
       const safe = this.record(run.id, entry, 'agent.start_error', 'start', agentError(error, 'outcome_unknown'));

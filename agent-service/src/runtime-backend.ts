@@ -17,6 +17,7 @@ import { RunContexts, type RunLineage } from './run-context.js';
 import type { SkillSessions } from './skill-sessions.js';
 import { hasVisualizeFeature } from './visualize-features.js';
 import { validateVisualizeOutput } from './visualize-output-validation.js';
+import type { VisualizePreviews } from './visualize-preview.js';
 
 const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -59,7 +60,7 @@ export class RuntimeBackend implements SchedulerBackend {
   private readonly contexts = new Map<string, BackendContext>();
   readonly runContexts: RunContexts;
   private readonly callbackTimeoutMs: number;
-  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number } = {}) {
+  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number } = {}, readonly visualizePreviews?: VisualizePreviews) {
     this.runContexts = new RunContexts(runs, dirs);
     this.callbackTimeoutMs = options.callbackTimeoutMs ?? 30000;
     if (!Number.isSafeInteger(this.callbackTimeoutMs) || this.callbackTimeoutMs < 1 || this.callbackTimeoutMs > 60000) throw new ServiceError('INVALID_REQUEST', 'Invalid host callback timeout');
@@ -225,6 +226,11 @@ export class RuntimeBackend implements SchedulerBackend {
       }),
       queryHistory: query => this.asyncCallback(run.id, context, 'queryHistory', () => this.queryHistory(run.id, query)),
       readRunContext: request => this.asyncCallback(run.id, context, 'readRunContext', () => this.runContexts.read(run.id, request)),
+      ...(this.visualizePreviews && (runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features)) ? {
+        previewVisualizeOutput: (pagePath: string) => this.asyncCallback(run.id, context, 'previewVisualizeOutput', check => this.visualizePreviews!.create(run.id, context.epoch, pagePath, check)),
+        inspectVisualizePreview: (sessionId: string) => this.asyncCallback(run.id, context, 'inspectVisualizePreview', () => this.visualizePreviews!.inspect(run.id, context.epoch, sessionId)),
+        closeVisualizePreview: (sessionId: string) => this.asyncCallback(run.id, context, 'closeVisualizePreview', () => this.visualizePreviews!.release(run.id, context.epoch, sessionId)),
+      } : {}),
       ...(runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features) ? { validateVisualizeOutput: (pagePath: string) => this.asyncCallback(run.id, context, 'validateVisualizeOutput', async () => {
         const current = this.runs.runtime(run.id);
         if (current.epoch !== context.epoch || current.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(run.id).status)) throw new ServiceError('CONFLICT', 'Run is no longer available for output validation.');

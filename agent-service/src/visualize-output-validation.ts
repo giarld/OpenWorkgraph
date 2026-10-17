@@ -11,8 +11,7 @@ export type VisualizeOutputValidation =
 
 /** Read-only validation of actual Output files. Publication still owns resource
  * authorization, registration and installation; this is not a publication receipt. */
-export async function validateVisualizeOutput(root: string, path: string, kind: 'execution' | 'visualize_generation'): Promise<VisualizeOutputValidation> {
-  try {
+export async function readValidatedVisualizeOutput(root: string, path: string, kind: 'execution' | 'visualize_generation', prefix = 'preflight-') {
     if (typeof path !== 'string' || !path || path.length > 512) throw new ServiceError('INVALID_REQUEST', 'Provide a page path relative to this Run Output directory.');
     const manifestBytes = await readPublicationOutput(root, 'manifest.json', MAX_MANIFEST);
     const manifest = parsePublicationManifest(JSON.parse(manifestBytes.toString('utf8')), kind === 'execution' ? 2 : 1, kind === 'visualize_generation');
@@ -22,16 +21,24 @@ export async function validateVisualizeOutput(root: string, path: string, kind: 
     const sha256 = hashBytes(bytes);
     if (bytes.length !== output.bytes || sha256 !== output.sha256) throw new ServiceError('INVALID_REQUEST', 'Page size/hash mismatch. Recompute manifest.json bytes and sha256 after every page edit, then validate again.');
     const generated = new Map<string, GeneratedVisualizeAsset>();
+    const assets = new Map<string, { bytes: Buffer; mime: string }>();
     for (const item of manifest.outputs) {
       if (item.role === 'project-file' || !/^(image|video|audio)[/]/.test(item.mime)) continue;
       const media = await readPublicationOutput(root, item.path, Math.min(item.bytes, 64 * 1024 * 1024));
       validatePublicationOutputBytes(item, media);
       // These identities exist only in this validation copy; no persistent IDs or
       // resource records are allocated before the real publication transaction.
-      generated.set(item.outputKey, { resourceId: 'preflight-' + item.outputKey, resourceVersion: 1, mime: item.mime });
+      const resourceId = prefix + hashBytes(Buffer.from(item.outputKey)).slice(0, 32);
+      generated.set(item.outputKey, { resourceId, resourceVersion: 1, mime: item.mime });
+      assets.set(resourceId, { bytes: media, mime: item.mime });
     }
-    const { warnings } = prepareGeneratedVisualizePage(JSON.parse(bytes.toString('utf8')), generated);
-    return { valid: true, path, bytes: bytes.length, sha256, warnings, checks: ['publication-manifest', 'page-size-and-sha256', 'generated-media-size-sha256-and-mime', 'page-logo-normalization', 'page-protocol'], remainingChecks: ['Publication verifies existing resource access and project dependencies, then installs the page.', 'Browser interactions and downloads require separate testing.'] };
+    const { page, warnings } = prepareGeneratedVisualizePage(JSON.parse(bytes.toString('utf8')), generated);
+    return { page, assets, validation: { valid: true as const, path, bytes: bytes.length, sha256, warnings, checks: ['publication-manifest', 'page-size-and-sha256', 'generated-media-size-sha256-and-mime', 'page-logo-normalization', 'page-protocol'], remainingChecks: ['Publication verifies existing resource access and project dependencies, then installs the page.', 'Browser interactions and downloads require separate testing.'] } };
+}
+
+export async function validateVisualizeOutput(root: string, path: string, kind: 'execution' | 'visualize_generation'): Promise<VisualizeOutputValidation> {
+  try {
+    return (await readValidatedVisualizeOutput(root, path, kind)).validation;
   } catch (error) {
     if (error instanceof VisualizeValidationError) return { valid: false, error: { code: error.code, message: error.message, fields: error.fields } };
     if (error instanceof ServiceError) {

@@ -130,6 +130,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   const attach = useRef<() => void>(() => undefined);
   const pushCapabilities = useRef<() => void>(() => undefined);
   const pushVisibility = useRef<() => void>(() => undefined);
+  const pushTheme = useRef<() => void>(() => undefined);
   const compact = useVisualizeDetail(box, !!props.expanded);
   const [intersecting, setIntersecting] = useState(!!props.expanded);
   const visible = intersecting && !compact;
@@ -331,6 +332,10 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         const capabilities = entry?.context?.capabilities ?? context.capabilities;
         iframe.current.contentWindow.postMessage({ channel: "openworkgraph.visualize", version: 1, sessionId: identity.sessionId, nodeId, type: "capabilities", capabilities: { readOnly: current.readOnly || capabilities.readOnly, online: current.temporary || current.online, canCreateSuccessors: !current.temporary && current.online && !current.readOnly && capabilities.canCreateSuccessors, canExportAssets: !current.temporary && current.online && !current.readOnly && !!capabilities.canExportAssets } }, "*");
       };
+      pushTheme.current = () => {
+        if (!live || !binding.current) return;
+        iframe.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.theme', version: 1, sessionId: identity.sessionId, nodeId, theme: presentation().theme }, '*');
+      };
       attach.current = () => {
         if (!live || !iframe.current) return;
         if (binding.current) { binding.current.dispose(); binding.current = null; owner.close(nodeId); setError(t("The page navigated away. Reload it to reconnect.")); return; }
@@ -354,7 +359,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
           if (live && message.type === 'event' && message.event.signal === 'inputs.invalidated') setChanged(true);
           if (live && source && iframe.current?.contentWindow === source && iframe.current.isConnected) source.postMessage(message, '*');
         }, () => live && visibleRef.current && latest.current.canRender() && (latest.current.online || !!latest.current.temporary)));
-        pushCapabilities.current(); pushVisibility.current(); setFrameLoaded(true);
+        pushCapabilities.current(); pushVisibility.current(); pushTheme.current(); setFrameLoaded(true);
       };
       pushVisibility.current = () => iframe.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.visibility', sessionId: identity.sessionId, nodeId, active: visibleRef.current }, '*');
       if (!live) return;
@@ -369,10 +374,17 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       if (connectionPending) { setError(''); setWaitingForConnection(true); }
       else setError(message);
     });
-    return () => { live = false; for (const release of releaseAssets) release(); binding.current?.dispose(); binding.current = null; attach.current = () => undefined; pushCapabilities.current = () => undefined; pushVisibility.current = () => undefined; };
+    return () => { live = false; for (const release of releaseAssets) release(); binding.current?.dispose(); binding.current = null; attach.current = () => undefined; pushCapabilities.current = () => undefined; pushVisibility.current = () => undefined; pushTheme.current = () => undefined; };
     // Keep the running document until a page replacement or an explicit reload.
     // Theme/locale and ordinary graph snapshots do not recreate its runtime.
   }, [entered, props.owner, props.nodeId, props.pageRevision, props.temporary, retry]);
+  useEffect(() => {
+    let live = true;
+    // RealApp applies root CSS tokens in its parent effect. Read them after
+    // that commit, without recreating the document or recapturing inputs.
+    queueMicrotask(() => { if (live) pushTheme.current(); });
+    return () => { live = false; };
+  }, [props.theme, document]);
   useEffect(() => {
     if (visible && awaitingViewport) setRetry(value => value + 1);
   }, [visible, awaitingViewport]);

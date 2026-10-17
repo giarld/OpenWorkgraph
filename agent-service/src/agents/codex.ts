@@ -106,7 +106,9 @@ class CodexAgentAdapter implements AgentAdapter {
     if (this.started) throw new AgentError('outcome_unknown');
     if (!this.tools) {
       const callbacks = { ...context.callbacks };
-      if (!(context.context.kind === 'visualize_generation' || context.context.kind === 'execution' && hasVisualizeFeature(context.context.features))) delete callbacks.validateVisualizeOutput;
+      if (!(context.context.kind === 'visualize_generation' || context.context.kind === 'execution' && hasVisualizeFeature(context.context.features))) {
+        delete callbacks.validateVisualizeOutput; delete callbacks.previewVisualizeOutput; delete callbacks.inspectVisualizePreview; delete callbacks.closeVisualizePreview;
+      }
       this.tools = new AgentHostTools(context.runId, context.attemptId, callbacks, () => this.active && !this.disposed && !context.signal.aborted && !this.dependencies.signal?.aborted);
     }
   }

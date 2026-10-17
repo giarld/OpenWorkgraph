@@ -462,26 +462,23 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     props.onCanvas?.(handle);
   }, [props.onCanvas]);
   const workspaceElement = useRef<HTMLElement>(null);
-  const dockElement = useRef<HTMLDivElement>(null);
   const [editorBottomInset, setEditorBottomInset] = useState(104);
+  const [editorBottomLimitInset, setEditorBottomLimitInset] = useState(20);
   useLayoutEffect(() => {
-    const workspace = workspaceElement.current, dock = dockElement.current;
+    const workspace = workspaceElement.current;
     const surface = workspace?.querySelector<HTMLElement>('.owg-canvas');
     const zoom = workspace?.querySelector<HTMLElement>('.owg-zoom-controls');
-    if (!workspace || !dock || !surface || !zoom) return;
+    if (!workspace || !surface || !zoom) return;
     const position = () => {
       const area = surface.getBoundingClientRect(), parent = workspace.getBoundingClientRect();
-      const controls = zoom.getBoundingClientRect(), width = dock.getBoundingClientRect().width;
-      const center = area.left + area.width / 2, left = center - width / 2;
-      const overlaps = left < controls.right + 12 && left + width > controls.left - 12;
-      dock.style.setProperty('--dock-center', (center - parent.left) + 'px');
-      dock.style.setProperty('--dock-bottom', (overlaps ? parent.bottom - controls.top + 12 : parent.bottom - area.bottom + 20) + 'px');
-      workspace.style.setProperty('--workspace-hints-bottom', (parent.bottom - dock.getBoundingClientRect().top + 12) + 'px');
-      setEditorBottomInset(Math.max(104, area.bottom - dock.getBoundingClientRect().top + 28));
+      const controls = zoom.getBoundingClientRect();
+      workspace.style.setProperty('--workspace-hints-bottom', (parent.bottom - controls.top + 12) + 'px');
+      setEditorBottomInset(Math.max(104, area.bottom - controls.top + 28));
+      setEditorBottomLimitInset(Math.max(0, area.bottom - controls.bottom));
     };
     position();
     const observer = new ResizeObserver(position);
-    for (const element of [workspace, surface, dock, zoom]) observer.observe(element);
+    for (const element of [workspace, surface, zoom]) observer.observe(element);
     return () => observer.disconnect();
   }, []);
   const file = useRef<HTMLInputElement>(null);
@@ -1231,10 +1228,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       canGroup = false;
     }
   }
-  const canUngroup =
-    !!selected.length &&
-    selectedGroups.length === selected.length &&
-    canGeometry(selected);
+  const ungroupMode = !!selected.length && selectedGroups.length === selected.length;
+  const canUngroup = ungroupMode && canGeometry(selected);
   let canCopyText = false;
   if (node && node.type !== 'execution' && !locked(node.id)) {
     try {
@@ -1989,30 +1984,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <fieldset><legend>{t('Resolution')}</legend><div className="image-setting-options">{IMAGE_SCALES.map(scale=>{const supported=availableImageScales.includes(scale);return <button type="button" disabled={!supported} aria-pressed={selectedImageScale===scale} className={selectedImageScale===scale?'active':''} onClick={()=>chooseImageScale(scale)} key={scale}>{scale==='auto'?t('Auto'):scale.toUpperCase()}</button>;})}</div></fieldset>
         <fieldset><legend>{t('Aspect ratio')}</legend><div className="image-aspect-options">{availableImageRatios.map(value=><button type="button" aria-pressed={imageOptions.aspectRatio===value} className={imageOptions.aspectRatio===value?'active':''} onClick={()=>chooseImageRatio(value)} key={value}>{value==='auto'?t('Auto'):value}</button>)}</div></fieldset>
       </section></div>}
-      <div ref={dockElement} className="bottom-dock panel" role="toolbar" aria-label={t("Work Graph tools")}>
-        <button className={"icon-button " + (tool === "pan" ? "active" : "")} aria-pressed={tool === "pan"} aria-label={t(tool === "pan" ? "Switch to selection" : "Switch to pan")} title={t(tool === "pan" ? "Switch to selection" : "Switch to pan")} onClick={() => setTool(tool === "pan" ? "select" : "pan")}>{tool === "pan" ? <Hand size={18}/> : <MousePointer2 size={18}/>}</button>
-        <button className="icon-button" aria-label={t("Fit Work Graph")} title={t("Fit Work Graph")} onClick={() => canvas.current?.fit()}><Maximize size={18}/></button>
-        <button className="icon-button" aria-label={t("Undo")} title={historyState.reason || t("Undo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canUndo} onClick={() => act(() => travelHistory(false))}><Undo2 size={18}/></button>
-        <button className="icon-button" aria-label={t("Redo")} title={t("Redo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo} onClick={() => act(() => travelHistory(true))}><Redo2 size={18}/></button>
-        <span className="topbar-divider"/>
-        <button className="icon-button" aria-label={t("Add execution")} title={t("Add execution")} disabled={readOnly} onClick={() => act(() => create("execution"))}><Play size={18}/></button>
-        <button className="icon-button" aria-label={t("Add text")} title={t("Add text")} disabled={readOnly} onClick={() => act(() => create("text"))}><Type size={18}/></button>
-        <button className="icon-button" aria-label={t("Add image")} title={t("Add image")} disabled={readOnly} onClick={() => act(() => create("image"))}><Image size={18}/></button>
-        <button className="icon-button" aria-label={t("Add Visualize")} title={t("Add Visualize")} disabled={readOnly} onClick={() => act(() => create("visualize"))}><PanelsTopLeft size={18}/></button>
-        <button className="icon-button" aria-label={t("Add document")} title={t("Add document")} disabled={readOnly} onClick={() => act(() => create("document"))}><FileText size={18}/></button>
-        <button className="icon-button" aria-label={t("Add file")} title={t("Add file")} disabled={readOnly} onClick={() => act(() => create("file"))}><FileIcon size={18}/></button>
-        <button className="icon-button" aria-label={t("Add preview")} title={t("Add preview")} disabled={readOnly} onClick={() => act(() => create("preview"))}><Eye size={18}/></button>
-        <button className="icon-button" aria-label={t("Upload to Work Graph")} title={t("Upload to Work Graph")} disabled={readOnly} onClick={() => { replacement.current = undefined; file.current?.click(); }}><Upload size={18}/></button>
-        <button className="icon-button" aria-label={t("Add node")} title={t("Add node")} disabled={readOnly} onClick={e => { const r = e.currentTarget.getBoundingClientRect(); const dock = dockElement.current?.getBoundingClientRect(); const v = canvas.current?.getViewport(); if (v) setCreateMenu({ world: { x: (300 - v.x) / v.k, y: (250 - v.y) / v.k }, screen: { x: r.left, y: dock?.top ?? r.top }, preferAbove: true }); }}><Plus size={18}/></button>
-        <span className="topbar-divider"/>
-        <button className="icon-button" aria-label={t("Group")} title={t("Group")} disabled={!canGroup} onClick={() => act(groupSelection)}><Group size={18}/></button>
-        <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={18}/></button>
-        {selectedGroups.length === 1 && selectedMembers.length > 0 && <>
-          <button disabled={!canGeometry(selected)} onClick={() => act(() => updateMembers(false))}>{t("Add to selected group")}</button>
-          <button disabled={!canGeometry(selected)} onClick={() => act(() => updateMembers(true))}>{t("Remove from selected group")}</button>
-        </>}
-        <button className="icon-button" aria-label={t("Change Work Graph background")} title={t("Change Work Graph background")} onClick={() => setBackground(background === "lines" ? "dots" : background === "dots" ? "blank" : "lines")}><Grid2X2 size={18}/></button>
-      </div>
       {props.sidebarTarget && createPortal(<>
         <div className="node-outline-controls">
           <div className="sidebar-search"><Search size={15} aria-hidden="true"/><input aria-label={t('Find nodes')} placeholder={t('Search nodes')} value={search} onChange={e => setSearch(e.target.value)}/></div>
@@ -2131,6 +2102,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       >
         <Canvas
           editorBottomInset={editorBottomInset}
+          editorBottomLimitInset={editorBottomLimitInset}
           key={viewportKey}
           ref={attachCanvas}
           initialViewport={readViewport(localStorage, viewportKey)}
@@ -2190,7 +2162,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               }}/>
             {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16}/></button>}
             {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
-            {n.type === 'visualize' && latestNodeRuns.get(n.id) && <button className="icon-button" aria-label={t('View run details')} title={t('View run details')} disabled={!props.onOpenRun} onClick={() => { selectNodes([n.id]); setNodeEditorOpen(n.id, true); }}><FileText size={16}/></button>}
             {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
             {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
             {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
@@ -2207,6 +2178,20 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             {n.type === 'group' && <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16}/></button>}
             <button className="icon-button" aria-label={t("Delete selected node")} title={t("Delete selected node")} disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
           </div>}
+          zoomControlsNavigationExtra={
+            <button className="icon-button" aria-label={t("Change Work Graph background")} title={t("Change Work Graph background")} onClick={() => setBackground(background === "lines" ? "dots" : background === "dots" ? "blank" : "lines")}><Grid2X2 size={18}/></button>
+          }
+          zoomControlsExtra={<>
+            <span className="owg-divider"/>
+            <button className="icon-button" aria-label={t("Undo")} title={historyState.reason || t("Undo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canUndo} onClick={() => act(() => travelHistory(false))}><Undo2 size={18}/></button>
+            <button className="icon-button" aria-label={t("Redo")} title={t("Redo")} disabled={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo} onClick={() => act(() => travelHistory(true))}><Redo2 size={18}/></button>
+            <button className="icon-button" aria-label={t(ungroupMode ? "Ungroup" : "Group")} title={t(ungroupMode ? "Ungroup" : "Group")} disabled={ungroupMode ? !canUngroup : !canGroup} onClick={() => act(ungroupMode ? ungroupSelection : groupSelection)}>{ungroupMode ? <Ungroup size={18}/> : <Group size={18}/>}</button>
+            {selectedGroups.length === 1 && selectedMembers.length > 0 && <>
+              <button className="group-member-action" disabled={!canGeometry(selected)} onClick={() => act(() => updateMembers(false))}>{t("Add to selected group")}</button>
+              <button className="group-member-action" disabled={!canGeometry(selected)} onClick={() => act(() => updateMembers(true))}>{t("Remove from selected group")}</button>
+            </>}
+            <button className={"icon-button " + (tool === "pan" ? "active" : "")} aria-pressed={tool === "pan"} aria-label={t(tool === "pan" ? "Switch to selection" : "Switch to pan")} title={t(tool === "pan" ? "Switch to selection" : "Switch to pan")} onClick={() => setTool(tool === "pan" ? "select" : "pan")}>{tool === "pan" ? <Hand size={18}/> : <MousePointer2 size={18}/>}</button>
+          </>}
           onUndo={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canUndo ? undefined : () => act(() => travelHistory(false))}
           onRedo={readOnly || pasteState.count > 0 || historyState.busy || !historyState.canRedo ? undefined : () => act(() => travelHistory(true))}
           onMove={

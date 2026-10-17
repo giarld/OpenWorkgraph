@@ -181,13 +181,27 @@ function bootstrap(config: Bootstrap): void {
     errors.append(line);
     window.dispatchEvent(new CustomEvent('visualize:resource-error', { detail: { id, media, code: 'RESOURCE_UNAVAILABLE' } }));
   }
+  const themeTokens = new Set<string>();
+  let latestTheme: VisualizeHostContext['theme'] | undefined;
   function theme(value: VisualizeHostContext['theme']): void {
     document.documentElement.dataset.theme = value.mode;
+    for (const name of themeTokens) document.documentElement.style.removeProperty(name);
+    themeTokens.clear();
     for (const [key, color] of Object.entries(value.tokens)) {
-      if (/^(?:--)?[a-z][a-z0-9-]{0,63}$/.test(key) && CSS.supports('color', color)) document.documentElement.style.setProperty(key.startsWith('--') ? key : '--' + key, color);
+      if (/^(?:--)?[a-z][a-z0-9-]{0,63}$/.test(key) && CSS.supports('color', color)) {
+        const name = key.startsWith('--') ? key : '--' + key;
+        document.documentElement.style.setProperty(name, color); themeTokens.add(name);
+      }
     }
   }
   theme(config.theme);
+  window.addEventListener('message', event => {
+    const message = event.data;
+    if (event.source !== window.parent || event.origin !== config.hostOrigin || message?.channel !== 'openworkgraph.visualize.theme' || message.version !== 1 || message.sessionId !== config.sessionId || message.nodeId !== config.nodeId) return;
+    const value = message.theme;
+    if (!value || !['light', 'dark'].includes(value.mode) || !value.tokens || typeof value.tokens !== 'object' || Array.isArray(value.tokens) || Object.keys(value.tokens).length > 64 || Object.entries(value.tokens).some(([key, color]) => !/^(?:--)?[a-z][a-z0-9-]{0,63}$/.test(key) || typeof color !== 'string' || color.length > 256 || /[<>{};]|url\s*\(/i.test(color))) return;
+    latestTheme = value; theme(value);
+  });
   const objectUrls = new Set<string>();
   function receiveAssets(event: MessageEvent): void {
     const message = event.data;
@@ -233,7 +247,10 @@ function bootstrap(config: Bootstrap): void {
   page.visualize = sdk;
   page.visualizeReady = new Promise((resolve, reject) => {
     const initialize = () => window.setTimeout(() => {
-      sdk.initialize().then(value => { theme(value.theme); resolve(value); }, error => { report('Workspace', 'bridge'); reject(error); });
+      sdk.initialize().then(value => {
+        const context = latestTheme ? { ...value, theme: latestTheme } : value;
+        theme(context.theme); resolve(context);
+      }, error => { report('Workspace', 'bridge'); reject(error); });
     }, 0);
     if (document.readyState === 'complete') initialize(); else window.addEventListener('load', initialize, { once: true });
   });

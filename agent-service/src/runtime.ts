@@ -38,6 +38,7 @@ import { BuiltinSkills, type BuiltinSkillsOptions } from './builtin-skills.js';
 import { SkillConfigs } from './skill-configs.js';
 import { SkillSessions } from './skill-sessions.js';
 import { VisualizePages } from './visualize-pages.js';
+import { VisualizePreviews } from './visualize-preview.js';
 import { VisualizeInputs } from './visualize-inputs.js';
 import { VisualizeBridge } from './visualize-bridge.js';
 import { prepareVisualizeRunSlot } from './visualize-run-slots.js';
@@ -94,6 +95,7 @@ export class WorkflowRuntime {
   readonly skillConfigs: SkillConfigs;
   readonly skillSessions: SkillSessions;
   readonly visualize: VisualizePages;
+  readonly visualizePreviews: VisualizePreviews;
   readonly visualizeInputs: VisualizeInputs;
   readonly visualizeBridge: VisualizeBridge;
   readonly agentSettings: AgentSettingsStore | undefined;
@@ -166,8 +168,9 @@ export class WorkflowRuntime {
     this.history = new History(db); this.publication = new Publication(db, directories, this.resources, this.graphs, this.runs);
     this.executionChains = new ExecutionChains(this.runs,this.graphs,this.resources);
     this.adapter = options.backend || this.productionAgents ? undefined : new CodexBackendAdapter(options.backendOptions);
-    const codexBackend = options.backend ?? (this.adapter ? new RuntimeBackend(this.runs, directories, this.adapter, this.probe, this.skillSessions) : { start: async () => { throw new AgentError('runtime_unavailable'); }, cancel: async () => 'unknown' as const });
-    this.agentRouter = options.agentRegistry ? new AgentRouter(this.runs, directories, id => options.agentRegistry!.get(id), (snapshot, kind) => assertFrozenAgent(options.agentRegistry!, snapshot, String(kind)), codexBackend, this.probe, this.skillSessions, {}, this.productionAgents ? (run, snapshot) => resolveProductionSelection(options.agentRegistry!, snapshot, this.runs.runtime(run.id).details) : undefined) : undefined;
+    this.visualizePreviews = new VisualizePreviews(this.runs, directories, this.resources);
+    const codexBackend = options.backend ?? (this.adapter ? new RuntimeBackend(this.runs, directories, this.adapter, this.probe, this.skillSessions, {}, this.visualizePreviews) : { start: async () => { throw new AgentError('runtime_unavailable'); }, cancel: async () => 'unknown' as const });
+    this.agentRouter = options.agentRegistry ? new AgentRouter(this.runs, directories, id => options.agentRegistry!.get(id), (snapshot, kind) => assertFrozenAgent(options.agentRegistry!, snapshot, String(kind)), codexBackend, this.probe, this.skillSessions, {}, this.productionAgents ? (run, snapshot) => resolveProductionSelection(options.agentRegistry!, snapshot, this.runs.runtime(run.id).details) : undefined, this.visualizePreviews) : undefined;
     const backend = new RoutedImageBackend(this.agentRouter ?? codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
     this.scheduler = new Scheduler(this.runs, backend, { projectLockRetryMs: 1000, publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
@@ -629,6 +632,7 @@ export class WorkflowRuntime {
   }
   /** Bind/startup failure only: never drain or mutate persisted service state. */
   disposeUnstarted(): void {
+    this.visualizePreviews.close();
     if (this.starting || this.recovering || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
     if (this.closed) return;
     this.closed = true; this.executionChains.stop(); this.probe.close();
@@ -654,6 +658,7 @@ export class WorkflowRuntime {
     await this.agentRouter?.disposeDrained();
   }
   private finishClose(): void {
+    this.visualizePreviews.close();
     this.visualizeBridge.dispose();
     if (this.closed) return; this.closed = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; this.stopPumpSubscription?.(); this.stopPumpSubscription = undefined; this.probe.close();
     this.catalogRpc?.close();
@@ -663,6 +668,7 @@ export class WorkflowRuntime {
     // No adapter.close(): disconnecting unresolved child processes is not cancellation.
   }
   close(): void {
+    this.visualizePreviews.close();
     if (this.closed) return; this.stopAccepting(); this.closing = true;
     if (!this.active().length) this.finishClose();
     else if (!this.timer) this.schedulePump(0);

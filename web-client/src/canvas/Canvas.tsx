@@ -76,8 +76,10 @@ export interface CanvasHandle {
   getPlacementPosition(size: Size): Point;
 }
 export interface CanvasProps {
-  /** Reserve screen space for the host toolbar below the prompt editor. */
+  /** Initial placement inset above the host toolbar; does not limit dragging. */
   editorBottomInset?: number;
+  /** Bottom edge limit, separate from the initial placement above tools. */
+  editorBottomLimitInset?: number;
   graph: WorkGraph;
   readOnly?: boolean;
   adapter?: WorkgraphAdapter;
@@ -136,6 +138,10 @@ export interface CanvasProps {
   backgroundMode?: "lines" | "dots" | "blank";
   showMinimap?: boolean;
   showZoomButtons?: boolean;
+  /** Application navigation tools placed before shortcut help. */
+  zoomControlsNavigationExtra?: ReactNode;
+  /** Additional application tools appended to the bottom-left controls. */
+  zoomControlsExtra?: ReactNode;
   className?: string;
 }
 // Viewport frames change geometry, not document content. Keep expensive node
@@ -169,6 +175,23 @@ const element = (target: EventTarget | null) =>
   target instanceof Element ? target : null;
 const interactive = (target: EventTarget | null) =>
   !!element(target)?.closest(INTERACTIVE);
+// Native scrollbar events target the scroll container itself. Preserve its
+// default pointer action even when the surrounding content can drag a node.
+function hitsNativeScrollbar(event: PE) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || !target.closest('[data-canvas-scrollable]')) return false;
+  const rect = target.getBoundingClientRect();
+  if (!rect.width || !rect.height) return false;
+  const style = getComputedStyle(target);
+  const verticalGutter = target.offsetWidth - target.clientWidth - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
+  const horizontalGutter = target.offsetHeight - target.clientHeight - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth);
+  // Convert screen coordinates back to layout pixels, including at graph zoom.
+  // clientLeft also includes a left-side scrollbar in RTL containers.
+  const x = (event.clientX - rect.left) * target.offsetWidth / rect.width - target.clientLeft;
+  const y = (event.clientY - rect.top) * target.offsetHeight / rect.height - target.clientTop;
+  return (verticalGutter > 0 && (x < 0 || x >= target.clientWidth)) ||
+    (horizontalGutter > 0 && (y < 0 || y >= target.clientHeight));
+}
 const CLIPBOARD = "application/x-openworkgraph-nodes";
 const acceptsInput = (node: WorkNode) =>
   ["text", "image", "execution", "file", "preview", "visualize"].includes(node.type);
@@ -225,7 +248,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         {props.renderTitlePrefix?.(node)}
         <span className="owg-node-title-text">{node.title}</span>
       </div>
-      <div className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize'].includes(node.type) ? ' owg-preview-body' : "")}>
+      <div data-canvas-scrollable={node.type === 'document' || undefined} className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize'].includes(node.type) ? ' owg-preview-body' : "")}>
         {['preview', 'visualize'].includes(node.type) ? <>
           <div className="owg-preview-content" inert={!props.selectedIds.includes(node.id)}>
             <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />
@@ -465,8 +488,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       width: nav ? nav.right - nav.left : size.width, height: size.height };
     const editorBottomInset = props.editorBottomInset ?? 104;
     const panelArea = { x: editorArea.x + 16, y: 16,
-      // Keep the panel and its outer resize arc above the bottom tools.
-      width: Math.max(1, editorArea.width - 32), height: Math.max(1, size.height - editorBottomInset) };
+      // Allow moving/resizing down to the bottom edge of the tools.
+      width: Math.max(1, editorArea.width - 32), height: Math.max(1, size.height - 16 - (props.editorBottomLimitInset ?? 20)) };
     const defaultPanelBounds = { x: panelCenter - panelWidth / 2,
       y: size.height - editorBottomInset - 360, width: panelWidth, height: 360 };
     const panelVisible = !!panelNode && intersects(panelNode, {
@@ -654,7 +677,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         if (gestureRef.current) return;
         if (e.ctrlKey || primaryModifier(e)) {
           if (element(e.target)?.closest('[data-canvas-no-zoom]')) return;
-        } else if (interactive(e.target)) return;
+        } else if (interactive(e.target) || element(e.target)?.closest('[data-canvas-scrollable]')) return;
         e.preventDefault();
         const pointer = relative({ x: e.clientX, y: e.clientY });
         // Keep high-frequency wheel input direct so it does not lag behind
@@ -726,6 +749,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       setGesture(data);
     }
     function down(event: PE<HTMLDivElement>) {
+      if (hitsNativeScrollbar(event)) return;
       if (
         interactive(event.target) &&
         !element(event.target)?.closest("[data-port],[data-resize],[data-canvas-draggable]")
@@ -1497,6 +1521,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             (!props.tool || props.showZoomButtons ? " owg-zoom-expanded" : "")
           }
           data-canvas-no-zoom
+          role={props.zoomControlsExtra ? "toolbar" : undefined}
+          aria-label={props.zoomControlsExtra ? t("Work Graph tools") : undefined}
         >
           {!props.tool && (
             <>
@@ -1612,6 +1638,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           >
             <LocateFixed size={16} />
           </button>
+          {props.zoomControlsNavigationExtra}
           <button
             aria-label={t("Keyboard shortcut help")}
             title={t("Keyboard shortcuts")}
@@ -1621,6 +1648,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           >
             <CircleHelp size={16} />
           </button>
+          {props.zoomControlsExtra}
         </div>
         {shortcutsOpen && (
           <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />

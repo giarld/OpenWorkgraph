@@ -24,6 +24,9 @@ export interface BackendCallbacks {
   readRunContext?(request: RunContextRequest): Promise<string>;
   /** Read-only preflight of an actual page file in the calling Run Output directory. */
   validateVisualizeOutput?(path: string): Promise<import('../visualize-output-validation.js').VisualizeOutputValidation>;
+  previewVisualizeOutput?(path: string): Promise<import('../visualize-preview.js').VisualizePreviewLink>;
+  inspectVisualizePreview?(sessionId: string): Promise<unknown>;
+  closeVisualizePreview?(sessionId: string): Promise<unknown>;
   /** Private host-side resolution; its return value must never be sent as tool content. */
   skillEnvironment?(skillId: string): Promise<Record<string,string>>;
   /** Holds configuration locks through a synchronous launch/dispatch. null checks

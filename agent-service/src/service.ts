@@ -21,6 +21,7 @@ import { Auth, normalizeOrigin } from "./auth.js";
 import { ServiceError } from "./errors.js";
 import { readJson } from "./http.js";
 import { visualizeCompatibility } from './visualize-compatibility.js';
+import { handleVisualizePreview } from './visualize-preview-api.js';
 import { acceptsHost, listenerInfo } from "./network.js";
 import { Projects } from "./projects.js";
 import { ProjectProbe } from "./project-probe.js";
@@ -176,6 +177,7 @@ export function createService(
           "Host 请求头无效。",
         );
       const rawPath = request.url ?? "";
+      if (await handleVisualizePreview(request, response, runtime.visualizePreviews)) return;
       const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
       const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills(?:[/]search)?(?:[?]|$)/.test(rawPath) || /^[/]v1[/]agents[/][a-z][a-z0-9._-]*[/]skills(?:[?]|$)/.test(rawPath);
       const skillsManagementRoute = /^[/]v1[/]skills(?:[/][^/?#]+(?:[/](?:install|update|uninstall|config|files))?)?(?:[?]|$)/.test(rawPath);

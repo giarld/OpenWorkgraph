@@ -468,7 +468,6 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-workspace .graph-recent-menu,
 .real-workspace .workgraph-save-menu,
 .real-workspace .workspace-status-hints > .panel,
-.real-workspace .bottom-dock,
 .real-workspace .owg-zoom-controls {
   background-color: color-mix(in srgb, var(--panel) 72%, transparent);
   /* A faint, static texture breaks up visible steps in the blurred grid. */
@@ -485,7 +484,14 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-search { position: absolute; top: 76px; left: 16px; z-index: 30; width: 190px; padding: 0 10px; font-size: 12px; max-height: 40%; overflow: auto; }
 .real-search label { margin: 8px 0; gap: 4px; }
 .real-search input { padding: 5px 8px; }
-.real-workspace .bottom-dock { left: var(--dock-center, 50%); right: auto; bottom: var(--dock-bottom, 88px); transform: translateX(-50%); margin: 0; max-width: calc(100% - 32px); }
+.real-workspace .owg-zoom-controls .group-member-action { width: auto; padding: 0 8px; }
+.real-workspace .owg-zoom-controls {
+  width: max-content;
+  max-width: calc(100% - 40px);
+  height: auto;
+  min-height: 56px;
+  flex-wrap: wrap;
+}
 .real-service-panel { position: absolute; right: 16px; top: 70px; bottom: 16px; width: min(380px, calc(100vw - 32px)); z-index: 55; border: 1px solid var(--stroke); border-radius: 12px; box-shadow: var(--shadow); transform-origin: right top; visibility: visible; transition: transform 240ms cubic-bezier(.2, .8, .2, 1), opacity 180ms ease, visibility 0s; }
 .real-service-panel-collapsed { transform: scale(.86); opacity: 0; visibility: hidden; pointer-events: none; transition-delay: 0s, 0s, 240ms; }
 

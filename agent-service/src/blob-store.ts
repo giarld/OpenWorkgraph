@@ -45,6 +45,14 @@ export async function readBounded(file: FileHandle, max: number): Promise<Buffer
 }
 import { sniffResourceMime as sniffMime } from '@openworkgraph/protocol';
 export { sniffMime };
+/** Validate resource bytes without writing a blob, also used by temporary previews. */
+export function validateResourceBytes(bytes: Uint8Array, declaredMime: string): {mime: string; text: string | null} {
+ const declared=declaredMime.toLowerCase().split(';')[0]!.trim(), sniffed=sniffMime(bytes);
+ if (!validMime(declared) || !mimeMatchesBytes(declared,sniffed,true)) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Declared MIME does not match content');
+ if (declared==='application/json') { try { JSON.parse(Buffer.from(bytes).toString('utf8')); } catch { throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Invalid JSON content'); } }
+ const mime=supportsText(declared)||opaqueFileMime(declared)?declared:sniffed;
+ return {mime,text:supportsText(mime)?new TextDecoder('utf-8',{fatal:true}).decode(bytes):null};
+}
 /** Files are generation-addressed, not overwritten by hash. A committed GC queue
  * can never unlink a later upload of the same bytes. Paths are private service data. */
 export class BlobStore {
@@ -70,13 +78,10 @@ export class BlobStore {
  }
  async prepare(bytes: Uint8Array, declaredMime='application/octet-stream', expectedHash?: string): Promise<PreparedBlob> {
   if (bytes.byteLength>this.maxBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','Resource exceeds configured maximum');
-  const stable=Buffer.from(bytes); const sha256=hashBytes(stable), mime=sniffMime(stable);
+  const stable=Buffer.from(bytes); const sha256=hashBytes(stable);
   if (expectedHash!==undefined && (!/^[a-f0-9]{64}$/.test(expectedHash) || sha256!==expectedHash)) throw new ServiceError('INVALID_REQUEST','SHA-256 mismatch');
-  const declared=declaredMime.toLowerCase().split(';')[0]!.trim();
-  if (!validMime(declared) || !mimeMatchesBytes(declared,mime,true)) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Declared MIME does not match content');
-  if (declared==='application/json') { try { JSON.parse(stable.toString('utf8')); } catch { throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Invalid JSON content'); } }
-  const effectiveMime=supportsText(declared)||opaqueFileMime(declared)?declared:mime;
-  const result=Object.freeze({sha256,bytes:stable.byteLength,mime:effectiveMime,path:await this.write(stable,'objects'),text:supportsText(effectiveMime)?new TextDecoder('utf-8',{fatal:true}).decode(stable):null});
+  const {mime,text}=validateResourceBytes(stable,declaredMime);
+  const result=Object.freeze({sha256,bytes:stable.byteLength,mime,path:await this.write(stable,'objects'),text});
   this.prepared.add(result); return result;
  }
  assertPrepared(blob: PreparedBlob): void { if (!this.prepared.has(blob)) throw new ServiceError('INVALID_REQUEST','Expected an immutable blob prepared by this store'); }
