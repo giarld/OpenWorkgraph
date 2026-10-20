@@ -39,6 +39,7 @@ build/Release
 
 # Dependency directories
 node_modules/
+/agent-service/.opencode-sdk/
 jspm_packages/
 
 # Snowpack dependency directory (https://snowpack.dev/)
@@ -73,6 +74,7 @@ web_modules/
 .env
 .env.*
 !.env.example
+!.env.cloudflare.example
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache

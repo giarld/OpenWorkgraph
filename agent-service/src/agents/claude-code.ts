@@ -1,3 +1,4 @@
+import { modelProviderGroup } from './model-groups.js';
 import { AGENT_PLUGIN_API_VERSION, SERVICE_VERSION } from '@openworkgraph/protocol';
 import type { AgentDescriptor, AgentAvailability, ResourceEnvelope, ProjectFileInput, FrozenSkill, VisualizeFeatureSelection, Json } from '@openworkgraph/protocol';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -10,8 +11,8 @@ import { AgentError } from './errors.js';
 import { normalizeConfiguration } from './configuration.js';
 import { validateSelectionGeneration } from './workspace-configuration-validation.js';
 import { validateRunPaths, within } from '../backend/paths.js';
-import { agentGuidance } from './guidance.js';
-import { DEVELOPMENT_CHANGED_FILES_GUIDANCE, executionDeliveryGuidance, referenceGuidance, upstreamGuidance } from '../backend/adapter.js';
+import { nodeGenerationGuidance } from '../prompts/index.js';
+import { claudeNativeGuidance } from './claude/guidance.js';
 import { publicProgressText } from '../backend/progress.js';
 import { redactSkillValues } from '../backend/redaction.js';
 import { AgentHostTools } from './host-tools.js';
@@ -176,7 +177,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
       // Relative materialized references are relative to Input, never native cwd.
       const promptContext = { ...context, ...(context.files ? { files: context.files.map(file => { const path = isAbsolute(file.path) ? file.path : resolve(context.inputPath, file.path); if (!isAbsolute(file.path) && !within(context.inputPath, path)) throw new AgentError('invalid_configuration'); return { ...file, path }; }) } : {}) };
       const skillRead = publicSkillGuidance(context.skills ?? [], { backendId: descriptor.id, dynamicSkillCommands: descriptor.capabilities.dynamicSkillCommands });
-      const prompt = [agentGuidance(context, { preferFinalAnswer: context.kind !== 'visualize_generation' }), 'For multi-step work, send concise public progress updates as ordinary assistant text before starting tools and after meaningful milestones. State what was done and what comes next. Do not include private reasoning, tool arguments or raw tool output, absolute paths, or credentials. Simple requests can be answered directly. Respect user instructions to omit progress updates.', context.kind === 'execution' ? 'For a simple textual request, answer directly without tools or a manifest. For development work, the final answer must include the normal response, actual changes as unified diffs, and actual validation or limitations. ' + DEVELOPMENT_CHANGED_FILES_GUIDANCE + ' The following file publication instructions apply only when the user explicitly requests separate content files or Work Graph output nodes: ' + executionDeliveryGuidance(Boolean(callbacks.setNodeTitle)) + upstreamGuidance(context) : context.kind === 'text_generation' ? 'Return the complete requested content, starting with a concise Markdown heading. Final answer must contain the entire result, not a summary or local path.' : '', referenceGuidance(promptContext, { nativeImageGeneration: false, commandSandbox: false }), skillRead, 'Use native tools to read inputs and verify outputs. For PDF use Read; for Office/binary inputs use available native commands or installed converters. For video inspect actual frames and audio via installed native tools; do not infer content from filenames. Report unavailable decoders. Preserve existing edits. Never commit/reset/stash automatically. Finish or stop every background task before final delivery.', 'User request follows:', context.prompt].join(String.fromCharCode(10));
+      const prompt = [nodeGenerationGuidance(promptContext, { generateTitle: Boolean(callbacks.setNodeTitle) }), skillRead, claudeNativeGuidance(), 'User request follows:', context.prompt].filter(Boolean).join('\n');
       for (const path of skillDirectories) args.push('--add-dir', path);
       const cwd = context.kind === 'execution' ? context.projectPath : context.outputPath;
       this.interactions = new ClaudeInteractions(this.dependencies.selection.options.sandboxMode === 'danger-full-access', () => this.current(), async interaction => {
@@ -209,8 +210,12 @@ class ClaudeAgentAdapter implements AgentAdapter {
           this.finish = this.finishClosed(code, nativeSignal).catch(() => { this.snapshot.state = 'unknown'; this.snapshot.reason = 'Claude 结束状态尚未确认。'; this.emit(); });
           return this.finish;
         });
-        this.timer = setTimeout(() => { this.snapshot.failureReason = 'timeout'; this.protocolFailure(); }, this.options.runTimeoutMs ?? 10 * 60 * 1000);
-        this.timer.unref();
+        // Long development/visualize runs may keep making progress for hours.
+        // Only a host-supplied execution deadline may terminate the native run.
+        if (this.options.runTimeoutMs !== undefined) {
+          this.timer = setTimeout(() => { this.snapshot.failureReason = 'timeout'; this.protocolFailure(); }, this.options.runTimeoutMs);
+          this.timer.unref();
+        }
         this.abort = () => { void this.cancel(context.runId).catch(() => {}); };
         signal.addEventListener('abort', this.abort, { once: true });
         return child;
@@ -341,6 +346,10 @@ class ClaudeAgentAdapter implements AgentAdapter {
       this.turnActive = false; this.endInput();
     }
   }
+  private unconfirmedClose(reason: string): void {
+    if (this.snapshot.state === 'unknown' && this.snapshot.reason === reason && !this.snapshot.progress) return;
+    this.snapshot.state = 'unknown'; this.snapshot.reason = reason; delete this.snapshot.progress; this.emit();
+  }
   private async finishClosed(code: number | null, nativeSignal: NodeJS.Signals | null): Promise<void> {
     clearTimeout(this.timer); clearTimeout(this.inputEndTimer); this.active = false;
     await this.preparationDone;
@@ -348,7 +357,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
     if (this.child && claudeGroupAlive(this.child)) {
       signalClaude(this.child, 'SIGKILL');
       // A surviving process group is unresolved, even though its parent closed.
-      this.snapshot.state = 'unknown'; this.snapshot.reason = 'Claude 原生进程组尚未确认结束。'; this.emit(); return;
+      this.unconfirmedClose('Claude 原生进程组尚未确认结束。'); return;
     }
     // No permission response can reach a closed, drained native connection.
     // Withdraw its requests before deciding whether independent work remains.
@@ -356,7 +365,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
     await this.interactions?.abandonAll('main');
     await this.callbackQueue;
     if (this.pendingHooks.size || this.pendingTasks.size || this.turnActive || this.interactions?.pending || this.operations.unresolved || this.actionsUnknown || this.startupFailed) {
-      this.snapshot.state = 'unknown'; this.snapshot.reason = '原生独立动作或启动副作用尚未确认结束。'; delete this.snapshot.progress; this.emit(); await this.callbackQueue; return;
+      this.unconfirmedClose('原生独立动作或启动副作用尚未确认结束。'); await this.callbackQueue; return;
     }
     await this.sessionStore?.closed();
     const result = this.result;
@@ -475,6 +484,7 @@ export function createClaudePlugin(options: ClaudePluginOptions = {}): AgentPlug
       const id = key(dependencies.runId, dependencies.attemptId); if (attached.has(id)) throw new AgentError('outcome_unknown');
       const adapter = new ClaudeAgentAdapter({ ...dependencies, selection: structuredClone(selection) }, privateOptions, () => attached.delete(id)); attached.set(id, adapter); return adapter;
     },
+    modelGroup: modelProviderGroup,
     async listModels(context) {
       context.signal.throwIfAborted();
       if (!descriptor.capabilities.platforms!.includes(context.platform)) throw new AgentError('capability_unsupported');

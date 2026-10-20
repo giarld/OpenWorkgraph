@@ -37,7 +37,7 @@ export function validateConfigurationUpdate(value: unknown): asserts value is im
       if (!exactKeys(input, ['section', 'expectedRevision', 'project'])) fail();
       validateProjectPermissions({ revision: input.expectedRevision, project: input.project, runs: 'read-write' }); break;
     case 'backend':
-      if (!exactKeys(input, ['section', 'expectedRevision', 'backendId', 'enabled', 'schemaVersion', 'options', 'models']) || !id(input.backendId) || typeof input.enabled !== 'boolean' || !configurationRevision(input.schemaVersion) || input.schemaVersion === 0 || !isPlainRecord(input.options) || !Array.isArray(input.models) || input.models.length > 4096 || input.models.some(m => !isPlainRecord(m) || !exactKeys(m, ['id', 'visible']) || !text(m.id, 256) || typeof m.visible !== 'boolean') || new Set(input.models.map(m => m.id)).size !== input.models.length) fail();
+      if (!exactKeys(input, ['section', 'expectedRevision', 'backendId', 'enabled', 'schemaVersion', 'options', 'models', 'source']) || input.source !== undefined && input.source !== 'settings' || !id(input.backendId) || typeof input.enabled !== 'boolean' || !configurationRevision(input.schemaVersion) || input.schemaVersion === 0 || !isPlainRecord(input.options) || !Array.isArray(input.models) || input.models.length > 4096 || input.models.some(m => !isPlainRecord(m) || !exactKeys(m, ['id', 'visible']) || !text(m.id, 256) || typeof m.visible !== 'boolean') || new Set(input.models.map(m => m.id)).size !== input.models.length) fail();
       break;
     case 'default': {
       if (!exactKeys(input, ['section', 'expectedRevision', 'selection'])) fail();

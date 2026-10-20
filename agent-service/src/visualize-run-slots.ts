@@ -40,7 +40,7 @@ export async function prepareVisualizeRunSlot(rt: WorkflowRuntime, scope: GraphS
         if (!backendId) throw new ServiceError('MODEL_UNAVAILABLE', '工作空间默认模型不可用。');
         const backend = rt.agentConfiguration.getBackend(backendId);
         const query = rt.agentConfiguration.query(backendId);
-        const models = await rt.agentDiscovery.listModels(backendId, { options: query.options, schemaVersion: query.schemaVersion });
+        const models = await rt.agentDiscovery.listModels(backendId, { options: query.options, schemaVersion: query.schemaVersion, permissions: query.permissions });
         const first = models[0];
         const selected = object(preference.model);
         const defaultModel = configuration.default.selection;

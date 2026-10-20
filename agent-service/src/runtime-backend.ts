@@ -18,6 +18,9 @@ import type { SkillSessions } from './skill-sessions.js';
 import { hasVisualizeFeature } from './visualize-features.js';
 import { validateVisualizeOutput } from './visualize-output-validation.js';
 import type { VisualizePreviews } from './visualize-preview.js';
+import { validateAgentForm, validateAgentFormAnswer } from './agents/forms.js';
+import { canonicalJson } from './persistence/repositories.js';
+import { atomic } from './persistence/database.js';
 
 const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -41,6 +44,10 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
     return { kind: 'approval', decision: decision as 'accept' | 'decline' };
   }
   const questions = payload?.questions;
+  if (payload.form && object(answer) && answer.kind === 'form') {
+    if (Object.keys(answer).some(key => !['kind', 'values'].includes(key))) throw new ServiceError('INVALID_REQUEST', 'Unknown form answer field');
+    return { kind: 'form', values: validateAgentFormAnswer(payload.form, answer.values) };
+  }
   if (!Array.isArray(questions) || !questions.length || questions.length > 32 || questions.some(question => !object(question) || !identifier(question.id)) || new Set(questions.map(question => question.id)).size !== questions.length) throw new ServiceError('INVALID_REQUEST', 'Invalid question group');
   const ids = questions.map(question => question.id);
   const answers = typeof answer === 'string' && ids.length === 1 ? { [ids[0]!]: [answer] } : answer && typeof answer === 'object' && !Array.isArray(answer) && answer.kind === 'question' ? answer.answers : null;
@@ -58,6 +65,7 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
 /** Trusted host bridge. Never accepts browser paths or creates isolation evidence. */
 export class RuntimeBackend implements SchedulerBackend {
   private readonly contexts = new Map<string, BackendContext>();
+  private readonly failedInteractionCallbacks = new Set<string>();
   readonly runContexts: RunContexts;
   private readonly callbackTimeoutMs: number;
   constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number } = {}, readonly visualizePreviews?: VisualizePreviews) {
@@ -93,7 +101,13 @@ export class RuntimeBackend implements SchedulerBackend {
     const identified = identity || (!backendId || backendId === 'codex') && snapshot.threadId && snapshot.turnId && progress && identifier(progress.itemId);
     const summary = content && !duplicate && identified && progress && ['commentary', 'final_answer'].includes(progress.phase)
       ? { source: 'agentMessage', ...(identifier(progress.itemId) ? { itemId: progress.itemId } : {}), ...(identity ? { messageId: identity.messageId } : {}), phase: progress.phase, text: content } : null;
-    if (!duplicate) context.emit({ type: 'progress', payload: { state: snapshot.state, threadId: snapshot.threadId, turnId: snapshot.turnId, observedAt: snapshot.observedAt, ...(identity ? { identity: { ...identity } } : {}), ...(summary ? { summary } : {}), ...(snapshot.transportFailure ? { transportFailure: { kind: snapshot.transportFailure.kind, ...(snapshot.transportFailure.exitCode !== undefined ? { exitCode: snapshot.transportFailure.exitCode } : {}), ...(snapshot.transportFailure.exitSignal !== undefined ? { exitSignal: snapshot.transportFailure.exitSignal } : {}), ...(snapshot.transportFailure.observedFrameBytes !== undefined ? { observedFrameBytes: snapshot.transportFailure.observedFrameBytes } : {}) } } : {}) } });
+    if (!duplicate) {
+      const payload = { state: snapshot.state, threadId: snapshot.threadId, turnId: snapshot.turnId, observedAt: snapshot.observedAt, ...(identity ? { identity: { ...identity } } : {}), ...(summary ? { summary } : {}), ...(snapshot.transportFailure ? { transportFailure: { kind: snapshot.transportFailure.kind, ...(snapshot.transportFailure.exitCode !== undefined ? { exitCode: snapshot.transportFailure.exitCode } : {}), ...(snapshot.transportFailure.exitSignal !== undefined ? { exitSignal: snapshot.transportFailure.exitSignal } : {}), ...(snapshot.transportFailure.observedFrameBytes !== undefined ? { observedFrameBytes: snapshot.transportFailure.observedFrameBytes } : {}) } } : {}) };
+      // The same observation can arrive from a callback, an operation return
+      // and every reconciliation tick, even when it has no message identity.
+      const previous = this.runs.db.prepare("SELECT payload FROM run_process_records WHERE run_id=? AND kind='backend.progress' ORDER BY id DESC LIMIT 1").get(run.id);
+      if (previous?.payload !== canonicalJson(payload)) context.emit({ type: 'progress', payload });
+    }
     if (snapshot.state === 'completed') context.emit({ type: 'completed', result: { answer: snapshot.answer } });
     else if (snapshot.state === 'failed') context.emit({ type: 'failed', error: snapshot.reason ?? 'Backend confirmed failure' });
     else if (snapshot.state === 'cancelled') context.emit({ type: 'stopped' });
@@ -112,6 +126,24 @@ export class RuntimeBackend implements SchedulerBackend {
       }
       throw error;
     }
+  }
+  /** Only an exact failed callback on the attached epoch can recover interaction
+   * persistence. Unrelated callbacks cannot turn unknown work into running. */
+  private interactionCallback(runId: string, context: BackendContext, name: 'onInteraction' | 'onInteractionCancelled', value: unknown, work: () => void): void {
+    this.callback(runId, context, name, () => {
+      const key = createHash('sha256').update(JSON.stringify([runId, context.epoch, name, value])).digest('hex');
+      try {
+        atomic(this.runs.db, () => {
+          const token = this.runs.runtime(runId);
+          const recovering = this.failedInteractionCallbacks.has(key) && this.contexts.get(runId)?.epoch === context.epoch
+            && token.epoch === context.epoch && this.runs.get(runId).status === 'reconciling'
+            && token.details.cancelRequested !== true && token.details.unresolvedCompletion !== true;
+          if (recovering) this.runs.transition(runId, token, 'running');
+          work();
+        });
+        this.failedInteractionCallbacks.delete(key);
+      } catch (error) { this.failedInteractionCallbacks.add(key); throw error; }
+    });
   }
   private active(runId: string, context: BackendContext): void {
     const token = this.runs.runtime(runId);
@@ -141,7 +173,8 @@ export class RuntimeBackend implements SchedulerBackend {
     const token = this.runs.runtime(runId); const run = this.runs.get(runId);
     if (token.epoch !== context.epoch || token.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(run.status)) return;
     if (!identifier(value.id) || !['question', 'approval'].includes(value.kind) || JSON.stringify(value).length > 65536 || !Array.isArray(value.questions) || value.questions.length > 32) throw new ServiceError('INVALID_REQUEST', 'Invalid or unbounded backend interaction');
-    if (value.kind === 'question' && (!value.questions.length || new Set(value.questions.map(question => question.id)).size !== value.questions.length || value.questions.some(question => !identifier(question.id) || typeof question.text !== 'string' || !question.text.trim() || question.text.length > 16000 || !Array.isArray(question.options) || question.options.length > 64 || question.options.some(option => typeof option !== 'string' || !option.trim() || option.length > 16000) || question.mode !== undefined && !['text', 'single', 'multiple'].includes(question.mode) || question.allowOther !== undefined && typeof question.allowOther !== 'boolean'))) throw new ServiceError('INVALID_REQUEST', 'Invalid backend question group');
+    if (value.kind === 'question' && ((!value.questions.length && !value.form) || new Set(value.questions.map(question => question.id)).size !== value.questions.length || value.questions.some(question => !identifier(question.id) || typeof question.text !== 'string' || !question.text.trim() || question.text.length > 16000 || !Array.isArray(question.options) || question.options.length > 64 || question.options.some(option => typeof option !== 'string' || !option.trim() || option.length > 16000) || question.mode !== undefined && !['text', 'single', 'multiple'].includes(question.mode) || question.allowOther !== undefined && typeof question.allowOther !== 'boolean'))) throw new ServiceError('INVALID_REQUEST', 'Invalid backend question group');
+    const form = value.form === undefined ? undefined : validateAgentForm(value.form);
     const hostId = 'backend-' + createHash('sha256').update(JSON.stringify([runId, context.epoch, value.id])).digest('hex');
     const canApprove = value.canApprove === true && (value.details === undefined || approvableDetails(value.details));
     const details = value.details;
@@ -149,7 +182,7 @@ export class RuntimeBackend implements SchedulerBackend {
     const payload = JSON.parse(JSON.stringify({ id: hostId, kind: value.kind, reason: value.reason, command: value.command, canApprove,
       questions: value.questions.map(question => ({ id: question.id, text: question.text, options: question.options, ...(question.mode !== undefined ? { mode: question.mode } : {}), ...(question.allowOther !== undefined ? { allowOther: question.allowOther } : {}) })),
       ...(details !== undefined ? { details: object(details) ? { version: details.version, kind: details.kind, summary: details.summary, ...(details.command !== undefined ? { command: details.command } : {}), ...(details.paths !== undefined ? { paths: details.paths } : {}), ...(details.permissions !== undefined ? { permissions: details.permissions } : {}), ...(details.scope !== undefined ? { scope: details.scope } : {}) } : details } : {}),
-      backendInteractionId: value.id, attemptId: context.epoch })) as Json;
+      ...(form ? { form } : {}), backendInteractionId: value.id, attemptId: context.epoch })) as Json;
     const prior = this.runs.db.prepare('SELECT id FROM interactions WHERE id=? AND run_id=?').get(hostId, runId);
     if (prior) {
       const stored = this.runs.interaction(hostId);
@@ -218,8 +251,8 @@ export class RuntimeBackend implements SchedulerBackend {
         if (token.epoch !== context.epoch) return false;
         return this.runs.updateNodeTitle(run.id, token, title);
       } } : {}),
-      onInteraction: value => this.callback(run.id, context, 'onInteraction', () => this.interaction(value, context, run.id)),
-      onInteractionCancelled: id => this.callback(run.id, context, 'onInteractionCancelled', () => {
+      onInteraction: value => this.interactionCallback(run.id, context, 'onInteraction', value, () => this.interaction(value, context, run.id)),
+      onInteractionCancelled: id => this.interactionCallback(run.id, context, 'onInteractionCancelled', id, () => {
         if (!identifier(id)) throw new ServiceError('INVALID_REQUEST', 'Invalid cancelled interaction identity');
         const hostId = 'backend-' + createHash('sha256').update(JSON.stringify([run.id, context.epoch, id])).digest('hex');
         this.runs.expireInteraction(run.id, this.runs.runtime(run.id), hostId);

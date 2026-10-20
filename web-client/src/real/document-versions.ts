@@ -93,7 +93,7 @@ export function recordDocumentVersion(record: VersionedDocument, next: GraphSnap
     t.cursor = t.versions.length-1;
   }
   let bytes = t.versions.reduce((n,v)=>n+new TextEncoder().encode(JSON.stringify(v.graph)).length,0);
-  while (t.cursor>0 && (t.versions.length>51 || bytes>64*1024*1024)) {
+  while (t.cursor>0 && (t.versions.length>16 || bytes>64*1024*1024)) {
     bytes -= new TextEncoder().encode(JSON.stringify(t.versions.shift()!.graph)).length; t.cursor--;
   }
   t.executionRevision = next.executionRevision; t.layoutRevision = next.layoutRevision;

@@ -23,7 +23,7 @@ export function ShortcutsDialog({ onClose }: { onClose: () => void }) {
     { keys: [primaryLabel, "A"], description: t("Select all nodes") },
     { keys: [primaryLabel, "C / V"], description: t("Copy / paste nodes or clipboard content") },
     { keys: [primaryLabel, "S"], description: t("Save Work Graph edits now") },
-    { keys: [primaryLabel, "G"], description: t("Group selected nodes") },
+    { keys: [primaryLabel, "G"], description: t("Group or ungroup selected nodes") },
     { keys: [primaryLabel, "Shift", "G"], description: t("Ungroup the selected group") },
     { keys: [primaryLabel, "Z"], description: t("Undo Work Graph edits") },
     { keys: [primaryLabel, "Shift", "Z"], description: t("Redo Work Graph edits") },

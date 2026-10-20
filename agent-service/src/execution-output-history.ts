@@ -27,27 +27,30 @@ export async function prepareDeletedOutputHistory(graphs: Graphs, resources: Res
   };
 }
 
-/** Keep history batches on one row, moving each group's members with its frame. */
-function arrangeHistoryGroups(graphs: Graphs, request: SubmitRun): void {
+/** Place only the new batch, avoiding nearby history without moving existing work. */
+function positionHistoryGroup(graphs: Graphs, request: SubmitRun, groupId: string): void {
   const nodes = graphs.snapshot(request).nodes;
   const byId = new Map(nodes.map(node => [node.id, node]));
+  const group = byId.get(groupId)!;
+  const width = group.width ?? 300, height = group.height ?? 220;
   const groups = nodes.filter(node => {
-    if (node.type !== 'group' || node.schemaVersion !== 1) return false;
+    if (node.id === groupId || node.type !== 'group' || node.schemaVersion !== 1) return false;
     const content = node.content as Record<string, Json>;
-    return typeof content.title === 'string' && /-历史输出-\d{13}$/.test(content.title);
-  });
-  if (!groups.length) return;
-  let x = groups[0]!.x;
-  const y = groups[0]!.y;
+    return typeof content.title === 'string' && /-历史输出-\d{13}$/.test(content.title)
+      && node.y < group.y + height && node.y + (node.height ?? 220) > group.y;
+  }).sort((a, b) => a.x - b.x);
+  let x = group.x;
+  for (const other of groups) {
+    const right = other.x + (other.width ?? 300);
+    if (x < right + 32 && x + width + 32 > other.x) x = right + 32;
+  }
+  const dx = x - group.x;
+  if (!dx) return;
   const move = graphs.db.prepare('UPDATE nodes SET x=x+?,y=y+? WHERE id=? AND graph_id=?');
-  for (const group of groups) {
-    const dx = x - group.x, dy = y - group.y;
-    if (dx || dy) for (const id of [group.id, ...(group.memberIds ?? [])]) {
-      const node = byId.get(id)!;
-      if (!Number.isFinite(node.x + dx) || !Number.isFinite(node.y + dy) || Math.abs(node.x + dx) > 1e9 || Math.abs(node.y + dy) > 1e9) throw new ServiceError('INVALID_REQUEST', '历史输出分组排布超出工作图坐标范围。');
-      move.run(dx, dy, id, request.graphId);
-    }
-    x += (group.width ?? 300) + 32;
+  for (const id of [group.id, ...(group.memberIds ?? [])]) {
+    const node = byId.get(id)!;
+    if (!Number.isFinite(node.x + dx) || Math.abs(node.x + dx) > 1e9) throw new ServiceError('INVALID_REQUEST', '历史输出分组排布超出工作图坐标范围。');
+    move.run(dx, 0, id, request.graphId);
   }
 }
 
@@ -156,12 +159,13 @@ export async function prepareOutputHistory(graphs: Graphs, resources: Resources,
       const copies = nodes.filter(node => copyIds.has(node.id));
       const right = Math.max(...copies.map(copy => copy.x + copy.width!));
       const bottom = Math.max(...copies.map(copy => copy.y + copy.height!));
+      const groupId = randomUUID();
       current.insertNode(request, {
-        id: randomUUID(), type: 'group', schemaVersion: 1, contentVersion: 1,
+        id: groupId, type: 'group', schemaVersion: 1, contentVersion: 1,
         content: { title: title + suffix }, x, y, width: right - x + 24, height: bottom - y + 24,
         memberIds: [...nodeCopies.values()], readOnly: false,
       }, true);
-      arrangeHistoryGroups(current, request);
+      positionHistoryGroup(current, request, groupId);
       current.db.prepare('UPDATE graphs SET execution_revision=execution_revision+?,layout_revision=layout_revision+1 WHERE id=?').run(Number(rewired), request.graphId);
       current.event(request);
     }

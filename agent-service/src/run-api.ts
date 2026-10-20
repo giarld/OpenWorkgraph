@@ -1,3 +1,4 @@
+import { parseRunInput } from '@openworkgraph/protocol';
 import type { IncomingMessage } from 'node:http';
 import type { ImageRoute, InteractionReply, Json, ModelSelection, SubmitRun } from '@openworkgraph/protocol';
 import type { ApiResult } from './api.js';
@@ -54,7 +55,7 @@ export class RunApi {
   constructor(readonly runtime:WorkflowRuntime,readonly auth:Auth){}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
     const graph=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs[/]([a-zA-Z0-9_-]+)[/](runs|input-preview)$/.exec(path);
-    const run=/^[/]v1[/]runs(?:[/]([a-zA-Z0-9_-]+))?(?:[/](cancel|cancel-chain|reply|history|snapshot|public-metadata|interactions|active-interaction|candidate|continue|input-changes|execution-plan|start))?$/.exec(path);
+    const run=/^[/]v1[/]runs(?:[/]([a-zA-Z0-9_-]+))?(?:[/](cancel|cancel-chain|reply|history|snapshot|public-metadata|interactions|active-interaction|candidate|continue|input-changes|execution-plan|start|agent-operation))?$/.exec(path);
     const notifications=path==='/v1/notifications';
     const notificationRead=/^[/]v1[/]notifications[/]([a-zA-Z0-9_-]+)[/]read$/.exec(path);
     const notificationReadAll=path==='/v1/notifications/read-all';
@@ -177,10 +178,10 @@ export class RunApi {
     if(path==='/v1/capacity'&&request.method==='GET')return ok(read(()=>rt.runs.capacity()));
     if(graph){
       const scope={serviceId:rt.serviceId,projectId:graph[1]!,graphId:graph[2]!};read(()=>rt.graphs.scope(scope));
-      if(graph[3]==='input-preview'&&request.method==='POST'){fields(body,['nodeId','excludeFiles']);if(body.excludeFiles!==undefined&&typeof body.excludeFiles!=='boolean')throw new ServiceError('INVALID_REQUEST','无效输入预检选项');return ok(read(()=>rt.inputs.inputPreview(scope.graphId,text(body.nodeId),body.excludeFiles===true)));}
+      if(graph[3]==='input-preview'&&request.method==='POST'){fields(body,['nodeId','excludeFiles','inputDraft']);if(body.excludeFiles!==undefined&&typeof body.excludeFiles!=='boolean')throw new ServiceError('INVALID_REQUEST','无效输入预检选项');return ok(read(()=>{ const nodeId=text(body.nodeId); if(body.inputDraft===undefined)return rt.inputs.inputPreview(scope.graphId,nodeId,body.excludeFiles===true); rt.graphs.runInputContent(scope,nodeId,body.inputDraft); return rt.previewRunInput(scope.graphId,nodeId,parseRunInput(body.inputDraft),body.excludeFiles===true); }));}
       if(graph[3]==='runs'&&request.method==='GET')return ok(read(()=>rt.runs.list(scope.projectId).filter(value=>value.graphId===scope.graphId)));
       if(graph[3]==='runs'&&request.method==='POST'){
-        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs','agent']);
+        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs','agent','inputDraft']);
         if('agent' in body&&(body.kind==='image_generation'||'imageRoute' in body||'modelOverride' in body))throw new ServiceError('INVALID_REQUEST','执行器选择不能与图片或旧模型选项混用。');
         const route=imageRoute(body);
         const input={...body,...scope,...(route?{imageRoute:route}:{})} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
@@ -208,6 +209,13 @@ export class RunApi {
       if(request.method==='GET'&&!id)return ok(read(()=>rt.runs.list()));
       if(id){
         const current=read(()=>rt.runs.get(id));
+        if(request.method==='POST'&&action==='agent-operation'){
+          fields(body,['attemptId','operation']);
+          if(typeof body.attemptId!=='string'||!body.operation||typeof body.operation!=='object'||Array.isArray(body.operation))throw new ServiceError('INVALID_REQUEST','原生操作请求无效。');
+          read(()=>{rt.graphs.scope(current);if(rt.runs.runtime(id).epoch!==body.attemptId)throw new ServiceError('REVISION_CONFLICT','任务执行身份已变化。');});
+          const result=await rt.agentOperation(id,body.attemptId,body.operation as Json);
+          return ok(read(()=>{rt.graphs.scope(current);return result;}));
+        }
         if(request.method==='GET'&&action==='execution-plan')return ok(read(()=>rt.executionChains.forRun(id)));
         if(request.method==='POST'&&action==='start'){
           fields(body,['nodeIds','expectedExecutionRevision','idempotencyKey','preserveHistoricalOutputs']);

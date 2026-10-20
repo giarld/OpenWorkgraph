@@ -16,6 +16,7 @@ import type {
 } from "@openworkgraph/protocol";
 import { initializeDirectories } from "./directories.js";
 import { openDatabase } from "./persistence/database.js";
+import { prepareStorageDatabase } from './operations/storage.js';
 import { Repositories } from "./persistence/repositories.js";
 import { Auth, normalizeOrigin } from "./auth.js";
 import { ServiceError } from "./errors.js";
@@ -70,6 +71,7 @@ export function createService(
   const db = openDatabase(directories.database);
   let serviceId: string;
   try {
+    prepareStorageDatabase(db);
     serviceId = new Repositories(db).identity();
   } catch (error) {
     db.close();

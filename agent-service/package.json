@@ -1,6 +1,6 @@
 {
   "name": "openworkgraph",
-  "version": "0.5.8",
+  "version": "0.5.11",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -12,6 +12,7 @@
     "openworkgraph": "dist/cli.js"
   },
   "files": [
+    "scripts/install-opencode-sdk.mjs",
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "README.md",
@@ -22,6 +23,7 @@
     "prebuild": "node ../scripts/check-versions.mjs --quiet",
     "build": "tsc -p tsconfig.json && node scripts/vendor-protocol.mjs && node scripts/build-visualize-preview.mjs",
     "prepack": "node scripts/prepare-pack.mjs",
+    "postinstall": "node scripts/install-opencode-sdk.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/cli.js",
     "test": "node --test test/*.test.mjs"
@@ -32,5 +34,8 @@
   },
   "devDependencies": {
     "esbuild": "0.28.2"
+  },
+  "optionalDependencies": {
+    "@opencode/sdk": ">=2.0.0"
   }
 }

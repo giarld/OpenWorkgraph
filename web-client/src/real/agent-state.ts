@@ -11,7 +11,7 @@ import type { Request } from './contracts';
 
 export const AGENT_CONFIGURATION_PATH = '/v1/agents/configuration';
 export type WorkspaceAgentConfiguration = AgentWorkspaceConfiguration;
-export interface AgentResource { settings?: AgentBackendConfiguration; models?: AgentModelOption[]; configuredModels?: AgentConfiguredModel[]; configRevision?: number; knownModelIds?: string[]; settingsError?: string; modelsError?: string; modelsUnsupported?: boolean; installation?: AgentInstallationStatus }
+export interface AgentResource { settings?: AgentBackendConfiguration; models?: AgentModelOption[]; configuredModels?: AgentConfiguredModel[]; configRevision?: number; knownModelIds?: string[]; settingsError?: string; modelsError?: string; modelsUnsupported?: boolean; installation?: AgentInstallationStatus; installationMessage?: string }
 export interface AgentState {
   mode: 'loading' | 'legacy' | 'agents' | 'error';
   descriptors: AgentDescriptor[]; default?: AgentDefault; resources: Record<string, AgentResource>;
@@ -177,11 +177,13 @@ export class WorkspaceAgentStore {
   });
   checkInstallation = (backendId: string): Promise<void> => this.query('installation:' + backendId, async generation => {
     let installation: AgentInstallationStatus = 'unknown';
+    let installationMessage: string | undefined;
     try {
       const response: unknown = await this.request(AGENT_CONFIGURATION_PATH + '/' + encodeURIComponent(backendId) + '/diagnose', {});
       if (record(response) && typeof response.installation === 'string' && ['installed', 'missing', 'unknown'].includes(response.installation)) installation = response.installation as AgentInstallationStatus;
+      if (record(response) && installation === 'missing' && typeof response.message === 'string' && response.message.trim() && response.message.length <= 1024) installationMessage = response.message;
     } catch { /* Network/auth/version failures do not prove the CLI is missing. */ }
-    if (this.current(generation)) this.update({ resources: { ...this.state.resources, [backendId]: { ...this.state.resources[backendId], installation } } });
+    if (this.current(generation)) this.update({ resources: { ...this.state.resources, [backendId]: { ...this.state.resources[backendId], installation, installationMessage } } });
   });
   async saveConfiguration(update: AgentConfigurationUpdate) {
     this.assertCurrent();

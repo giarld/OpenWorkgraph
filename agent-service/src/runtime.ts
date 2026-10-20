@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { subscribeDatabaseChanges } from './persistence/changes.js';
 import type { DatabaseSync } from 'node:sqlite';
-import { PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
-import type { AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
+import { mergeRunInput, type RunInput, PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
+import type { AgentPlatform, AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
 import { prepareOutputHistory } from './execution-output-history.js';
@@ -58,16 +58,17 @@ import { normalizeConfiguration } from './agents/configuration.js';
 import { nativeSkillCatalog } from './agents/skills.js';
 import { createCodexPlugin, codexQueryFailure } from './agents/codex.js';
 import { createClaudePlugin, type ClaudePluginOptions } from './agents/claude-code.js';
+import { createOpenCodePlugin, type OpenCodePluginOptions } from './agents/opencode.js';
 import { AgentWorkspaceConfigurationStore } from './agents/workspace-configuration.js';
 import { sameProjectPermissions } from './agents/workspace-configuration-validation.js';
 import { resolveProductionSelection } from './agents/production-selection.js';
 import type { AgentExecutionSelection } from './agents/contracts.js';
-interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean; availabilityRevision?: number }
+interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean; availabilityRevision?: number; modelPolicy?: import('@openworkgraph/protocol').AgentModelOption }
 
 export interface WorkflowRuntimeOptions {
   backend?: SchedulerBackend; models?: BackendModel[];
   /** Default: discover on model reads/submission. True also probes at startup; false disables execution and discovery. */
-  enableBackend?: boolean; backendOptions?: AdapterOptions; claudeOptions?: ClaudePluginOptions;
+  enableBackend?: boolean; backendOptions?: AdapterOptions; claudeOptions?: ClaudePluginOptions; opencodeOptions?: OpenCodePluginOptions;
   skillsOptions?: BuiltinSkillsOptions;
   /** Explicit test/custom composition. Production statically registers the bundled agents. */
   agentRegistry?: AgentRegistry;
@@ -121,6 +122,7 @@ export class WorkflowRuntime {
       const registry = new AgentRegistry();
       registry.register(createCodexPlugin({ ...options.backendOptions, cwd: directories.root }));
       registry.register(createClaudePlugin(options.claudeOptions));
+      registry.register(createOpenCodePlugin(options.opencodeOptions));
       this.options = options = { ...options, agentRegistry: registry };
     }
     // A custom static composition must not secretly recover an unregistered
@@ -161,7 +163,9 @@ export class WorkflowRuntime {
     this.inputs = new InputPreparation(db, { plugins: this.plugins, readRepresentation: resource => this.resources.readPreparedRepresentation(resource) }); this.models = new ModelDefaultsStore(db);
     this.agentSettings = options.agentRegistry ? new AgentSettingsStore(db, options.agentRegistry) : undefined;
     this.agentConfiguration = options.agentRegistry ? new AgentWorkspaceConfigurationStore(directories.config, serviceId, options.agentRegistry) : undefined;
-    this.agentDiscovery = options.agentRegistry ? new AgentDiscovery(options.agentRegistry, this.productionAgents ? { ttlMs: 0 } : {}) : undefined;
+    // Native catalog cold starts have their own startup/request deadlines. Allow
+    // the complete production query to finish instead of aborting at ten seconds.
+    this.agentDiscovery = options.agentRegistry ? new AgentDiscovery(options.agentRegistry, this.productionAgents ? { ttlMs: 0, timeoutMs: 60_000 } : {}) : undefined;
     this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend || options.agentRegistry ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
       ? this.imageProviders.credentialAvailable(snapshot.imageRoute.providerId,snapshot.imageRoute.credentialRevision)
       : snapshot.agent || this.productionAgents ? this.agentEligible(_run.id, snapshot, String(this.runs.runtime(_run.id).details.kind)) : this.executionCapability.status === 'available');
@@ -175,6 +179,10 @@ export class WorkflowRuntime {
     this.scheduler = new Scheduler(this.runs, backend, { projectLockRetryMs: 1000, publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
   get catalog(): BackendModel[] { return structuredClone(this.availableModels); }
+  async agentOperation(runId: string, attemptId: string, request: Json): Promise<Json> {
+    if (!this.agentRouter) throw new AgentError('capability_unsupported');
+    return this.agentRouter.operation(runId, attemptId, request);
+  }
   private agentEligible(runId: string, snapshot: import('@openworkgraph/protocol').InputSnapshot, kind: string): boolean {
     let reason: string | null = null;
     try {
@@ -193,9 +201,17 @@ export class WorkflowRuntime {
     if (prior?.kind === 'agent.input_blocked') this.runs.record(runId, 'agent.input_ready', {});
     return true;
   }
-  private async prepareAgent(selection: AgentSelection): Promise<AgentPlan> {
+  private async prepareAgent(selection: AgentSelection, projectId?: string): Promise<AgentPlan> {
     selection = structuredClone(selection);
     if (!this.options.agentRegistry || !this.agentSettings || !this.agentDiscovery) throw new AgentError('runtime_unavailable');
+    const project = projectId ? this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(projectId) : undefined;
+    if (projectId && !project) throw new ServiceError('NOT_FOUND', '项目不存在。');
+    const projectPath = project ? String(project.canonical_path) : undefined;
+    const validateProfile = async (query: import('./agents/discovery.js').AgentDiscoveryRequest) => {
+      if (!this.options.agentRegistry!.get(selection.backendId).extensions?.nativeCatalog) return;
+      const native = await this.agentDiscovery!.nativeCatalog(selection.backendId, query);
+      if (native.profileOption && !native.profiles.some(profile => profile.id === query.options?.[native.profileOption!] && !profile.hidden && profile.mode !== 'subagent')) throw new AgentError('invalid_configuration');
+    };
     const availability = this.agentConfiguration?.getBackend(selection.backendId);
     if (availability && !availability.enabled) throw new AgentError('runtime_unavailable');
     if (selection.settingsGeneration !== undefined) {
@@ -206,27 +222,33 @@ export class WorkflowRuntime {
       const permissions = this.agentConfiguration.get().permissions;
       if (selection.configRevision !== current.revision || !sameProjectPermissions(selection.permissions, permissions)) throw new ServiceError('REVISION_CONFLICT', '工作空间 Agent 配置已变化，请刷新后重试。');
       if (!plugin.projectPermissions) throw new AgentError('capability_unsupported');
-      const native = plugin.projectPermissions(permissions.project, { runsPath: this.directories.runs });
-      const query = { options: normalizeConfiguration(plugin.descriptor.configuration, { ...current.options, ...selection.options, ...native }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
+      const native = plugin.projectPermissions(permissions.project, { runsPath: this.directories.runs, ...(projectPath ? { projectPath } : {}) });
+      const query = { options: normalizeConfiguration(plugin.descriptor.configuration, { ...current.options, ...selection.options, ...native }, selection.schemaVersion), schemaVersion: selection.schemaVersion, ...(projectPath ? { projectPath } : {}) };
       const [catalog, diagnosis] = await Promise.all([this.agentDiscovery.listModels(selection.backendId, query), this.agentDiscovery.diagnose(selection.backendId, query)]);
       if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
-      return { frozen: this.agentConfiguration.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null, runsPath: this.directories.runs }), independent: true };
+      await validateProfile(query);
+      const frozen = this.agentConfiguration.freeze(selection, { ...(projectPath ? { projectPath } : {}), availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null, runsPath: this.directories.runs });
+      const modelPolicy = catalog.find(model => model.id === frozen.model.model);
+      return { frozen, independent: true, ...(modelPolicy ? { modelPolicy } : {}) };
     }
     const current = this.agentSettings.get(selection.backendId);
     if (!current.enabled) throw new AgentError('runtime_unavailable');
     if (selection.configRevision !== current.revision) throw new ServiceError('REVISION_CONFLICT', '执行器设置已变化，请刷新后重试。');
     const descriptor = this.options.agentRegistry.get(selection.backendId).descriptor;
-    const query = { options: normalizeConfiguration(descriptor.configuration, { ...current.options, ...selection.options }, selection.schemaVersion), schemaVersion: selection.schemaVersion };
+    const query = { options: normalizeConfiguration(descriptor.configuration, { ...current.options, ...selection.options }, selection.schemaVersion), schemaVersion: selection.schemaVersion, ...(projectPath ? { projectPath } : {}) };
     const [catalog, diagnosis] = await Promise.all([this.agentDiscovery.listModels(selection.backendId, query), this.agentDiscovery.diagnose(selection.backendId, query)]);
     if (diagnosis.status === 'unavailable') throw new AgentError(diagnosis.reason ?? 'runtime_unavailable');
-    return { frozen: this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null }), independent: true, ...(availability ? { availabilityRevision: availability.revision } : {}) };
+    await validateProfile(query);
+    const frozen = this.agentSettings.freeze(selection, { availableModels: catalog, runtimeVersion: diagnosis.runtimeVersion ?? null });
+    const modelPolicy = catalog.find(model => model.id === frozen.model.model);
+    return { frozen, independent: true, ...(modelPolicy ? { modelPolicy } : {}), ...(availability ? { availabilityRevision: availability.revision } : {}) };
   }
   private nativeSkillCatalog(frozen: Pick<AgentExecutionSelection, 'backendId' | 'options'>, projectPath?: string) { return nativeSkillCatalog(this.options.agentRegistry!.get(frozen.backendId), frozen, { ...(projectPath ? { projectPath } : {}) }); }
   private async prepareImplicitCodex(input: SubmitRun): Promise<AgentPlan> {
     const settings = this.agentSettings!.get('codex');
     if (!settings.enabled || this.agentConfiguration && !this.agentConfiguration.getBackend('codex').enabled) throw new AgentError('runtime_unavailable');
     this.requireAvailable(input);
-    const plan = await this.prepareAgent({ backendId: 'codex', configRevision: settings.revision, schemaVersion: settings.schemaVersion, ...(input.modelOverride ? { model: input.modelOverride } : {}) });
+    const plan = await this.prepareAgent({ backendId: 'codex', configRevision: settings.revision, schemaVersion: settings.schemaVersion, ...(input.modelOverride ? { model: input.modelOverride } : {}) }, input.projectId);
     return { ...plan, implicit: true, image: input.kind === 'image_generation' };
   }
   /** Catalog reads require only the wire handshake, never login or execution self-checks. */
@@ -319,6 +341,9 @@ export class WorkflowRuntime {
     const state = request.kind === 'image_generation' && request.imageRoute?.type==='api' ? this.imageGenerationCapability : this.executionCapability;
     if (state.status !== 'available') throw new ServiceError('NOT_IMPLEMENTED', state.reason);
   }
+  previewRunInput(graphId:string,nodeId:string,fields:RunInput,excludeFiles=false) {
+    return new InputPreparation(this.db,{plugins:this.plugins,readRepresentation:resource=>this.resources.readPreparedRepresentation(resource),targetInput:{nodeId,fields}}).inputPreview(graphId,nodeId,excludeFiles);
+  }
   /** Returns a request-scoped synchronous commit closure; no shared mutable cache. */
   async prepareSubmission(input: SubmitRun, cleanups: (() => unknown)[] = [], principal?: string): Promise<(principal: string) => Run> {
     input = structuredClone(input);
@@ -332,9 +357,14 @@ export class WorkflowRuntime {
       };
     }
     if (input.agent && (String(input.kind) === 'image_generation' || input.modelOverride)) throw new AgentError('invalid_configuration');
-    const agentPlan = input.agent ? await this.prepareAgent(input.agent) : this.productionAgents && input.imageRoute?.type !== 'api' ? await this.prepareImplicitCodex(input) : undefined;
+    const agentPlan = input.agent ? await this.prepareAgent(input.agent, input.projectId) : this.productionAgents && input.imageRoute?.type !== 'api' ? await this.prepareImplicitCodex(input) : undefined;
     if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const graph=this.graphs.snapshot(input);
+    let inputRevision=0;
+    if(input.inputDraft){
+      const content=this.graphs.runInputContent(input,input.nodeId,input.inputDraft);
+      graph.nodes=graph.nodes.map(node=>{if(node.id!==input.nodeId)return node;inputRevision=Number(canonicalJson(node.content)!==canonicalJson(content));return {...node,content};});
+    }
     if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false,cleanups,agentPlan);
     const plan=this.executionChains.plan(graph,input.nodeId);
     const outgoing=graph.edges.some(e=>e.kind==='execution'&&e.sourceId===input.nodeId);
@@ -342,7 +372,7 @@ export class WorkflowRuntime {
     const auto=!outgoing&&!plan.requiresConfirmation&&!plan.nodes.some(n=>n.required&&n.missingPrompt);
     const selected=this.executionChains.selection(plan,plan.initialNodeIds);
     const preserve=input.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
-    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>this.prepareSingleSubmission(request,true,cleanups,agentPlan),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies)):undefined;
+    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>request.nodeId===input.nodeId?Promise.resolve(commit):this.prepareSingleSubmission(request,true,cleanups,agentPlan,inputRevision),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies),graph.executionRevision+inputRevision):undefined;
     return principal=>atomic(this.db,()=>{
       const run=this.runs.get(commit(principal).id);
       if(run.status!=='accepted'||run.executionStart==='dependencies')return run;
@@ -372,9 +402,11 @@ export class WorkflowRuntime {
     const commit = await prepareOutputHistory(this.graphs,this.resources,request,cleanups,copies);
     return () => commit(request,this.graphs);
   }
-  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true, cleanups: (() => unknown)[] = [], agentPlan?: AgentPlan): Promise<(principal: string) => Run> {
+  private async prepareSingleSubmission(input: SubmitRun, holdExecution = true, cleanups: (() => unknown)[] = [], agentPlan?: AgentPlan, commitRevisionOffset=0): Promise<(principal: string) => Run> {
     if (this.db.isTransaction) throw new ServiceError('CONFLICT', 'Preflight must precede the auth transaction');
     const request = structuredClone(input);
+    if(request.inputDraft)this.graphs.runInputContent(request,request.nodeId,request.inputDraft);
+    const targetInput=request.inputDraft?{nodeId:request.nodeId,fields:request.inputDraft}:undefined;
     if (agentPlan) {
       if (!agentPlan.implicit && (request.kind === 'image_generation' || request.modelOverride)) throw new AgentError('invalid_configuration');
       if (!agentPlan.implicit && !request.agent && !('legacy' in agentPlan.frozen)) request.agent = { backendId: agentPlan.frozen.backendId, configRevision: agentPlan.frozen.configRevision, schemaVersion: agentPlan.frozen.schemaVersion, options: { ...agentPlan.frozen.options }, model: { ...agentPlan.frozen.model } };
@@ -406,7 +438,7 @@ export class WorkflowRuntime {
     if (inspected(path).canonicalPath !== path) throw new ServiceError('PROJECT_UNAVAILABLE', 'Stored project path no longer resolves to itself');
     const versions = new Map<string, CanvasResourceVersion>();
     // Discover only direct input resources using the same declarative mappings.
-    const discovery = new InputPreparation(this.db, { plugins: this.plugins, readRepresentation: resource => { versions.set(resourceKey(resource), resource); return { state: 'ready', resourceSha256: resource.sha256, representationVersion: resource.representationVersion, text: null, contentHash: null }; } });
+    const discovery = new InputPreparation(this.db, { plugins: this.plugins, ...(targetInput?{targetInput}:{}), readRepresentation: resource => { versions.set(resourceKey(resource), resource); return { state: 'ready', resourceSha256: resource.sha256, representationVersion: resource.representationVersion, text: null, contentHash: null }; } });
     const preview = discovery.inputPreview(request.graphId, request.nodeId, !!apiRoute);
     if (preview.executionRevision !== request.expectedExecutionRevision) throw new ServiceError('REVISION_CONFLICT', 'Graph changed before preflight');
     const unsupportedProjectFile = preview.issues.find(item => item.reason.startsWith('API 生图不能读取项目文件引用'));
@@ -436,10 +468,10 @@ export class WorkflowRuntime {
       }
       prepared.set(key, Object.freeze({ state: 'ready', resourceSha256: resource.sha256, representationVersion: resource.representationVersion, text, contentHash: text === null ? null : createHash('sha256').update(text).digest('hex') }));
     }
-    const scopedInputs = new InputPreparation(this.db, { plugins: this.plugins, readRepresentation: resource => prepared.get(resourceKey(resource)) ?? null });
+    const scopedInputs = new InputPreparation(this.db, { plugins: this.plugins, ...(targetInput?{targetInput}:{}), readRepresentation: resource => prepared.get(resourceKey(resource)) ?? null });
     const scopedPreview = scopedInputs.inputPreview(request.graphId,request.nodeId,!!apiRoute);
     const targetContent = this.db.prepare('SELECT v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?').get(request.nodeId, request.graphId);
-    const nodeContent = targetContent ? JSON.parse(String(targetContent.content)) as Record<string, unknown> : {};
+    const nodeContent = mergeRunInput(targetContent ? JSON.parse(String(targetContent.content)) as Json : {},request.inputDraft);
     const skillReferences = nodeContent.skillReferences;
     const features = freezeVisualizeFeatures(nodeContent.features, request.kind === 'visualize_generation');
     if (features.length && !['execution', 'visualize_generation'].includes(request.kind)) throw new ServiceError('INPUT_BLOCKED', '可视化功能仅用于执行交付或可视化节点生成。');
@@ -456,6 +488,15 @@ export class WorkflowRuntime {
       ? await this.nativeSkillCatalog(agentPlan.frozen, path)
       : { backendId: agentPlan.frozen.backendId, configuredSkills: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.configuredSkills, dynamicSkillCommands: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.dynamicSkillCommands, skills: [] } : undefined;
     const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path, nativeSkills);
+    if (agentPlan?.modelPolicy) {
+      const availability = this.options.agentRegistry!.evaluate(agentPlan.frozen.backendId, {
+        kind: request.kind, platform: process.platform as AgentPlatform, options: agentPlan.frozen.options, model: agentPlan.frozen.model,
+        modelCapabilities: agentPlan.modelPolicy, skills: frozenSkills, resources: scopedPreview.resources, projectFiles: scopedPreview.projectFiles,
+        inputKinds: [...new Set([...scopedPreview.resources.map(resource => resource.kind), ...scopedPreview.projectFiles.map(file => file.kind)])],
+        visualize: request.kind === 'execution' && features.length > 0,
+      });
+      if (availability.status !== 'available') throw new AgentError(availability.reason ?? 'capability_unsupported');
+    }
     if(apiRoute){
       const references: {bytes:Buffer;mime:'image/png'|'image/jpeg'|'image/webp'}[]=[];
       for(const envelope of scopedPreview.resources){
@@ -492,11 +533,11 @@ export class WorkflowRuntime {
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
         : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
     });
-    return principal => agentPlan?.independent && !('legacy' in agentPlan.frozen) && agentPlan.frozen.settingsGeneration
+    return principal => { request.expectedExecutionRevision=input.expectedExecutionRevision+commitRevisionOffset; return agentPlan?.independent && !('legacy' in agentPlan.frozen) && agentPlan.frozen.settingsGeneration
       ? this.agentConfiguration!.withCurrent(agentPlan.frozen, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
       : agentPlan?.independent && agentPlan.availabilityRevision !== undefined
         ? this.agentConfiguration!.withEnabledBackend(agentPlan.frozen.backendId, agentPlan.availabilityRevision, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
-      : scoped.submit(request, principal, request.kind==='execution' && holdExecution);
+      : scoped.submit(request, principal, request.kind==='execution' && holdExecution); };
   }
   async prepareContinuation(id: string): Promise<(principal: string, idempotencyKey: string) => Run> {
     if (this.db.isTransaction) throw new ServiceError('CONFLICT', 'Continuation preflight must precede auth transaction');
@@ -626,7 +667,12 @@ export class WorkflowRuntime {
       if (this.runs.repo.setting('backupRestorePending') === true) {
         this.db.prepare("DELETE FROM settings WHERE key='backupRestorePending'").run();
         this.runs.recover(this.scheduler.epoch);
-      } else this.runs.abandonOnRestart(this.scheduler.epoch);
+      } else this.runs.abandonOnRestart(this.scheduler.epoch, run => {
+        const selection = this.runs.snapshot(run.id).agent;
+        if (!selection) return false;
+        try { return !!this.options.agentRegistry?.get(selection.backendId).extensions?.restartRecovery; }
+        catch { return true; }
+      });
     });
     await this.start();
   }

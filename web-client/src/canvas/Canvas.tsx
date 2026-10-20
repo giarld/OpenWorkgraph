@@ -924,7 +924,10 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           ...new Set([
             ...g.initial,
             ...props.graph.nodes
-              .filter((n) => intersects(box, n))
+              // A partial frame intersection must not select all of its members.
+              .filter((n) => n.type === 'group'
+                ? n.x >= box.x && n.y >= box.y && n.x + n.width <= box.x + box.width && n.y + n.height <= box.y + box.height
+                : intersects(box, n))
               .map((n) => n.id),
           ]),
         ]);
@@ -1255,15 +1258,18 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           }
           if (mod && key === "g" && props.adapter) {
             e.preventDefault();
+            if (e.repeat || e.altKey || !props.selectedIds.length) return;
             attempt(() => {
-              if (e.shiftKey) {
-                for (const id of props.selectedIds) {
-                  if (
-                    props.graph.nodes.find((n) => n.id === id)?.type === "group"
-                  )
-                    props.adapter!.ungroupNodes(props.graph.id, [id]);
-                }
-                props.onSelect([]);
+              const selected = new Set(props.selectedIds);
+              const groups = props.graph.nodes.filter(n => n.type === 'group' && (selected.has(n.id) ||
+                !!n.memberIds?.length && n.memberIds.every(id => selected.has(id))));
+              const groupIds = new Set(groups.map(n => n.id));
+              const members = new Set(groups.flatMap(n => n.memberIds ?? []));
+              const ungroupMode = !!groups.length && props.selectedIds.every(id => groupIds.has(id) || members.has(id));
+              if (e.shiftKey || ungroupMode) {
+                if (!groups.length) return;
+                props.adapter!.ungroupNodes(props.graph.id, [...groupIds]);
+                props.onSelect([...new Set([...props.selectedIds.filter(id => !groupIds.has(id)), ...members])]);
               } else {
                 const group = props.adapter!.groupNodes(
                   props.graph.id,

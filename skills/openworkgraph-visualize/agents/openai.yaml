@@ -1,0 +1,3 @@
+interface:
+  display_name: "OpenWorkgraph Visualize"
+  short_description: "Author, package and validate OpenWorkgraph .owgv tools"

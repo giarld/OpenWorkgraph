@@ -12,7 +12,7 @@ export function assertFrozenAgent(registry: AgentRegistry, snapshot: InputSnapsh
   if (!Array.isArray(snapshot.resources) || snapshot.projectFiles !== undefined && !Array.isArray(snapshot.projectFiles)) throw new AgentError('invalid_configuration');
   if (!['execution', 'text_generation', 'image_generation', 'visualize_generation'].includes(kind) || snapshot.imageRoute?.type === 'api') throw new AgentError('capability_unsupported');
   if (!snapshot.model || canonicalJson(snapshot.model as unknown as Json) !== canonicalJson(frozen.model as unknown as Json)) throw new AgentError('invalid_configuration');
-  registry.assertFrozen(frozen, { kind: kind as import('@openworkgraph/protocol').AgentRunKind, platform, options: frozen.options, inputKinds: [...new Set([...snapshot.resources.map(input => input.kind), ...(snapshot.projectFiles ?? []).map(input => input.kind)])], resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], visualize: kind === 'execution' && !!snapshot.features?.length, restoredRunStart });
+  registry.assertFrozen(frozen, { kind: kind as import('@openworkgraph/protocol').AgentRunKind, platform, options: frozen.options, inputKinds: [...new Set([...snapshot.resources.map(input => input.kind), ...(snapshot.projectFiles ?? []).map(input => input.kind)])], resources: snapshot.resources, skills: snapshot.skills ?? [], projectFiles: snapshot.projectFiles ?? [], visualize: kind === 'execution' && !!snapshot.features?.length, restoredRunStart });
   const descriptor = registry.get(frozen.backendId).descriptor;
   if (snapshot.skills !== undefined && !Array.isArray(snapshot.skills)) throw new AgentError('invalid_configuration');
   for (const skill of snapshot.skills ?? []) {

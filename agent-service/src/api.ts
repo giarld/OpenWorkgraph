@@ -74,7 +74,11 @@ export class BusinessApi {
     const backup=await this.backupApi.handle(request,path,token,origin);if(backup.handled)return backup;
     const resource=await this.resources.handle(request,path,token,origin);if(resource.handled)return resource;
     if (this.runtime.agentConfiguration && this.runtime.agentDiscovery) {
-      this.agentConfigurationApi ??= new AgentConfigurationApi(this.runtime.agentConfiguration, this.runtime.agentDiscovery, this.auth);
+      this.agentConfigurationApi ??= new AgentConfigurationApi(this.runtime.agentConfiguration, this.runtime.agentDiscovery, this.auth, id => {
+        const project = this.db.prepare('SELECT canonical_path,state FROM projects WHERE id=?').get(id);
+        if (!project || project.state !== 'active') throw new ServiceError('NOT_FOUND', '项目不存在或不可用。');
+        return String(project.canonical_path);
+      });
       const agent = await this.agentConfigurationApi.handle(request, path, token, origin); if (agent.handled) return agent;
     }
     const run=await this.runApi.handle(request,path,token,origin);if(run.handled)return run;

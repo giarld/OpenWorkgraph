@@ -105,10 +105,10 @@ export function npmInstallInvocation(
     // Invoke npm through the Windows command interpreter explicitly instead.
     return {
       command: environment.ComSpec ?? environment.COMSPEC ?? 'cmd.exe',
-      args: ['/d', '/s', '/c', `npm install -g ${PACKAGE_NAME}`],
+      args: ['/d', '/s', '/c', `npm install -g ${PACKAGE_NAME} --include=optional`],
     };
   }
-  return { command: 'npm', args: ['install', '-g', PACKAGE_NAME] };
+  return { command: 'npm', args: ['install', '-g', PACKAGE_NAME, '--include=optional'] };
 }
 
 export function npmVersionInvocation(

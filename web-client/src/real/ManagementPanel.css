@@ -78,7 +78,8 @@
 .management-setting-copy > span { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .management-setting-chevron { flex-shrink: 0; color: var(--muted); transition: transform 150ms; }
 .management-setting[open] > summary .management-setting-chevron { transform: rotate(180deg); }
-.management-setting[open] > summary { border-radius: 12px 12px 0 0; background: var(--fill); }
+.management-setting[open] { border-radius: 0 0 12px 12px; }
+.management-setting[open] > summary { position: sticky; top: 0; z-index: 1; border-radius: 0; background: var(--fill); }
 .management-setting-body { padding: 16px; border-top: 1px solid var(--stroke); min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
 .management-setting-body > :first-child { margin-top: 0; }
 .management-setting-body > :last-child { margin-bottom: 0; }

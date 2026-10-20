@@ -3,7 +3,7 @@ import { configurationError } from './errors.js';
 
 const platforms = ['darwin', 'linux', 'win32'];
 const schemaKeys = ['version', 'fields'];
-const fieldKeys = ['name', 'type', 'label', 'description', 'required', 'default', 'values', 'minimum', 'maximum', 'minLength', 'maxLength', 'integer', 'platforms'];
+const fieldKeys = ['name', 'type', 'label', 'description', 'required', 'default', 'values', 'minimum', 'maximum', 'minLength', 'maxLength', 'integer', 'platforms', 'hidden'];
 export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) && !Array.isArray(value);
 }
@@ -36,6 +36,7 @@ export function validateConfigurationSchema(value: unknown): asserts value is Ag
     if (!isPlainRecord(entry) || !exactKeys(entry, fieldKeys) || typeof entry.name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(entry.name) || /(?:secret|token|password|credential|api_?key|access_?key|private_?key|authorization|cookie|environment|^env$|path|executable|^args$)/i.test(entry.name) || ['constructor', 'prototype', '__proto__'].includes(entry.name) || names.has(entry.name) || !publicText(entry.label, 256) || (entry.description !== undefined && !publicText(entry.description)) || !['text', 'boolean', 'enum', 'number'].includes(String(entry.type))) configurationError();
     names.add(entry.name);
     if (entry.required !== undefined && typeof entry.required !== 'boolean') configurationError();
+    if (entry.hidden !== undefined && typeof entry.hidden !== 'boolean') configurationError();
     if (entry.platforms !== undefined && (!Array.isArray(entry.platforms) || entry.platforms.length === 0 || entry.platforms.length > 3 || !entry.platforms.every(validPlatform) || new Set(entry.platforms).size !== entry.platforms.length)) configurationError();
     if (entry.type === 'enum') {
       if (!Array.isArray(entry.values) || entry.values.length === 0 || entry.values.length > 128 || !entry.values.every(v => publicText(v, 256)) || new Set(entry.values).size !== entry.values.length) configurationError();

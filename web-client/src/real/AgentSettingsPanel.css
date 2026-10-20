@@ -16,6 +16,7 @@
 :is(.management-panel, .welcome-agent-settings) .agent-settings p { margin: 0; }
 :is(.management-panel, .welcome-agent-settings) .agent-settings :is(.agent-settings-section, .agent-model-settings, .management-controls) > button { justify-self: stretch; width: 100%; }
 :is(.management-panel, .welcome-agent-settings) .agent-settings .management-checkbox { display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 10px; min-height: 44px; margin: 0; cursor: pointer; }
+:is(.management-panel, .welcome-agent-settings) .agent-settings .agent-backend-toggle { width: max-content; max-width: 100%; }
 :is(.management-panel, .welcome-agent-settings) .agent-settings input[type=checkbox] { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; accent-color: var(--active); }
 .agent-settings .management-checkbox > span { min-width: 0; overflow-wrap: anywhere; }
 .agent-backend-list { display: grid; gap: 8px; min-width: 0; }
@@ -43,6 +44,16 @@
 :is(.management-panel, .welcome-agent-settings) .agent-settings .management-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 :is(.management-panel, .welcome-agent-settings) .agent-settings .management-actions > button { width: 100%; padding-inline: 8px; }
 .agent-model-list { display: grid; gap: 0; min-width: 0; }
+.agent-model-providers { display: grid; gap: 8px; min-width: 0; }
+.agent-model-provider { min-width: 0; border: 1px solid var(--stroke); border-radius: 8px; }
+.agent-model-provider > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 12px; box-sizing: border-box; border-radius: 7px; cursor: pointer; list-style: none; }
+.agent-model-provider > summary::-webkit-details-marker { display: none; }
+.agent-model-provider > summary > svg { flex-shrink: 0; }
+.agent-model-provider[open] > summary > svg { transform: rotate(90deg); }
+.agent-model-provider > summary > span { min-width: 0; overflow-wrap: anywhere; }
+.agent-model-provider > summary:hover { background: var(--fill); }
+.agent-model-provider > summary:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+.agent-model-provider > .agent-model-list { padding: 0 12px 8px; }
 .agent-model-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .agent-model-row + .agent-model-row { border-top: 1px solid var(--stroke); }
 .agent-model-row > label { flex: 1; }

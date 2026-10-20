@@ -9,6 +9,7 @@ import { ServiceError } from './errors.js';
 import { readJson } from './http.js';
 import { transaction } from './persistence/database.js';
 import { Resources } from './resources.js';
+import { compactStorageDatabase } from './operations/storage.js';
 
 export interface StorageUsage {
   totalBytes: number;
@@ -50,6 +51,7 @@ export async function measureStorage(directories: DataDirectories): Promise<Stor
 }
 
 export class StorageApi {
+  private compacting: Promise<void> | undefined;
   constructor(readonly db: DatabaseSync, readonly directories: DataDirectories, readonly resources: Resources, readonly auth: Auth) {}
 
   async handle(request: IncomingMessage, path: string, token: string, origin: string): Promise<ApiResult> {
@@ -63,8 +65,17 @@ export class StorageApi {
       const body = await readJson(request, 1024);
       if (Object.keys(body).length) throw new ServiceError('INVALID_REQUEST', '缓存清理不接受额外参数。');
       this.auth.withSession(token, origin, () => undefined);
-      const collected = transaction(this.db, () => this.resources.collectGarbage(undefined, true));
+      const collected = transaction(this.db, () => {
+        if (!this.db.prepare("SELECT 1 FROM resource_maintenance_leases WHERE kind='backup' LIMIT 1").get()) {
+          // Older migrations invalidated replay without discarding its snapshot.
+          // Retain the key/hash tombstone so cleanup can never repeat its effects.
+          this.db.prepare("UPDATE idempotency SET response='null' WHERE invalidated=1 AND response<>'null'").run();
+        }
+        return this.resources.collectGarbage(undefined, true);
+      });
       const deletion = await this.resources.drainFileDeletions();
+      this.compacting ??= compactStorageDatabase(this.directories.database).finally(() => { this.compacting = undefined; });
+      await this.compacting;
       const usage = await measureStorage(this.directories);
       return this.auth.withSession(token, origin, () => ({ handled: true, body: { collectedResources: collected.canvas, collectedBlobs: collected.blobs, removedFiles: deletion.removed, failedFiles: deletion.failed, usage } }));
     }

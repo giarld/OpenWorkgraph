@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body>
+<main class="visualize-page visualize-tool">
+  <form id="converter" class="visualize-stack">
+    <div class="visualize-grid">
+      <div class="visualize-field"><label for="value">数值</label><input id="value" type="number" step="any" required disabled></div>
+      <div class="visualize-field"><label for="factor">倍数</label><input id="factor" type="number" step="any" required disabled></div>
+    </div>
+    <p>结果：<output id="result" for="value factor"></output></p>
+    <p id="error" class="visualize-error" role="alert" hidden></p>
+    <p id="blocked" class="visualize-help" hidden></p>
+    <div class="visualize-actions"><button id="save" class="visualize-primary" type="submit" disabled>保存结果</button></div>
+  </form>
+</main>
+<script>
+(async () => {
+  const form = document.getElementById('converter');
+  const value = document.getElementById('value'), factor = document.getElementById('factor');
+  const result = document.getElementById('result'), save = document.getElementById('save');
+  const error = document.getElementById('error'), blocked = document.getElementById('blocked');
+  function showError(reason) {
+    error.textContent = [reason.code, reason.message || String(reason)].filter(Boolean).join(': ');
+    error.hidden = false;
+  }
+  if (!window.visualizeReady) throw new Error('请在万象画布 Visualize 宿主中打开');
+  const context = await window.visualizeReady;
+  const v = window.visualize;
+  value.value = context.form.data.value ?? '';
+  factor.value = context.form.data.factor ?? '';
+  const writable = !context.capabilities.readOnly && context.capabilities.online;
+  blocked.hidden = writable;
+  blocked.textContent = context.capabilities.readOnly ? '当前为只读，可计算但不能保存。' : '工作空间离线，暂时不能保存。';
+  value.disabled = false; factor.disabled = false;
+  let busy = false;
+  function calculate() {
+    const a = value.valueAsNumber, b = factor.valueAsNumber, product = a * b;
+    const valid = Number.isFinite(a) && Number.isFinite(b) && Number.isFinite(product);
+    result.value = valid ? String(product) : '—';
+    save.disabled = !valid || !writable || busy;
+    return valid ? {value:a, factor:b, result:product} : null;
+  }
+  value.addEventListener('input', calculate);
+  factor.addEventListener('input', calculate);
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (busy || !writable) return;
+    const data = calculate();
+    if (!data) return;
+    busy = true; calculate();
+    try {
+      await v.updateForm(data);
+      error.hidden = true;
+    } catch (reason) { showError(reason); }
+    finally { busy = false; calculate(); }
+  });
+  calculate();
+})().catch(reason => {
+  const error = document.getElementById('error');
+  error.textContent = reason.message || String(reason);
+  error.hidden = false;
+});
+</script>
+</body>
+</html>

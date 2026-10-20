@@ -11,6 +11,8 @@ export type { AgentOperation, AgentOperationPhase } from './operations.js';
 export { AgentHostTools } from './host-tools.js';
 export type { AgentHostTool, AgentToolCall, AgentToolResult } from './host-tools.js';
 export { agentGuidance } from './guidance.js';
+export { nodeGenerationGuidance, nodeTitleGuidance } from '../prompts/index.js';
+export type { NodeGenerationGuidanceOptions } from '../prompts/index.js';
 export { AgentError } from './errors.js';
 export { AgentControl } from './control.js';
 export { createCodexPlugin } from './codex.js';
@@ -18,3 +20,7 @@ export type { CodexPluginOptions } from './codex.js';
 export { createClaudePlugin } from './claude-code.js';
 export type { ClaudePluginOptions } from './claude-code.js';
 export type { RunContextRequest } from '../run-context.js';
+
+export { createOpenCodePlugin } from './opencode.js';
+export type { OpenCodePluginOptions } from './opencode.js';
+export { modelProviderGroup } from './model-groups.js';

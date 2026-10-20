@@ -1,3 +1,4 @@
+import { mergeRunInput, type RunInput } from '@openworkgraph/protocol';
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { CanvasResourceVersion, FrozenApiImageRoute, ImageInputMode, ImageRoute, InputSnapshot, Json, ModelSelection, ProjectFileInput, ResourceEnvelope } from '@openworkgraph/protocol';
@@ -21,7 +22,7 @@ export function visualizeInputDigest(graphId: string, nodeId: string, inputs: Vi
   return createHash('sha256').update(canonicalJson({ graphId, nodeId, inputs: business } as unknown as Json)).digest('hex');
 }
 export interface PreparedRepresentation { state: 'processing' | 'ready' | 'failed'; resourceSha256: string; representationVersion: number | null; text: string | null; contentHash: string | null }
-export interface InputOptions { plugins?: PluginRegistry; budget?: Partial<InputBudget>; readRepresentation?: (resource: CanvasResourceVersion) => PreparedRepresentation | null }
+export interface InputOptions { targetInput?: { nodeId: string; fields: RunInput }; plugins?: PluginRegistry; budget?: Partial<InputBudget>; readRepresentation?: (resource: CanvasResourceVersion) => PreparedRepresentation | null }
 export interface InputIssue { code: 'INPUT_BLOCKED' | 'INPUT_BUDGET_EXCEEDED' | 'PLUGIN_UNAVAILABLE'; nodeId: string; reason: string }
 export interface InputSource { edgeId: string; sourceNodeId: string; sourceNodeTitle?: string; contentVersion: number; resourceIndexes: number[]; projectFileIndexes: number[]; form?: VisualizeFormSnapshot; preview?: { nodeId: string; contentVersion: number; edgeId: string } }
 export interface InputPreview { graphId: string; nodeId: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; projectFiles: ProjectFileInput[]; sources: InputSource[]; issues: InputIssue[]; canSubmit: boolean; predecessorCount: number; totalBytes: number }
@@ -101,7 +102,8 @@ export class InputPreparation {
     const live = hasDeleted ? ' AND n.deleted=0' : '';
     const target = this.db.prepare(`SELECT n.type,n.schema_version,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?${live}`).get(nodeId,graphId);
     if (!target) throw new ServiceError('NOT_FOUND','Live target node not found in graph');
-    const content = JSON.parse(String(target['content'])) as Json;
+    const storedContent = JSON.parse(String(target['content'])) as Json;
+    const content = this.options.targetInput?.nodeId === nodeId ? mergeRunInput(storedContent, this.options.targetInput.fields) : storedContent;
     const promptValue = readField(content,'prompt'); const prompt = typeof promptValue === 'string' ? promptValue : '';
     const result: InputPreview = {graphId,nodeId,executionRevision:Number(graph['execution_revision']),prompt,resources:[],projectFiles:[],sources:[],issues:[],canSubmit:false,predecessorCount:0,totalBytes:Buffer.byteLength(prompt)};
     let textBudgetBytes=result.totalBytes,resourceBudgetBytes=0;

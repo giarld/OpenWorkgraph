@@ -1,3 +1,4 @@
+import { RUN_INPUT_FIELDS, mergeRunInput, parseRunInput, type RunInput } from '../../../packages/protocol/src/run-input';
 import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import { syncSkillReferences, validSkillReferences } from "./project-file-mentions";
 import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
@@ -27,6 +28,7 @@ export interface Draft {
 export interface EditorState {
   graph: GraphSnapshot;
   drafts: Draft[];
+  runInputs: Record<string, { id: string; fields: RunInput }>;
   online: boolean;
   error: string;
   busy: boolean;
@@ -34,6 +36,12 @@ export interface EditorState {
 export interface CommandReceipt { before: GraphSnapshot; after: GraphSnapshot; operations: GraphOperation[] }
 type CommandBody = { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; operations: GraphOperation[] };
 type PendingCommand = { operations: GraphOperation[]; epoch: number; body?: CommandBody; before?: GraphSnapshot; visualizeDraft?: Draft; resolve: (graph: GraphSnapshot) => void; reject: (error: unknown) => void };
+function sameInputValue(a:Json|undefined,b:Json|undefined):boolean {
+  if(a===b)return true;
+  if(!a || !b || typeof a!=='object' || typeof b!=='object')return false;
+  if(Array.isArray(a) || Array.isArray(b))return Array.isArray(a) && Array.isArray(b) && a.length===b.length && a.every((item,index)=>sameInputValue(item,b[index]));
+  return Object.keys(a).length===Object.keys(b).length && Object.keys(a).every(key=>Object.hasOwn(b,key) && sameInputValue(a[key],b[key]));
+}
 export const COMMAND_MAX_ATTEMPTS = 3;
 /** Service snapshots are authoritative. Drafts never become server state without CAS acknowledgement. */
 export interface RunSubmissionOptions { agent?: AgentSelection; modelOverride?: ModelSelection; imageRoute?: ImageRoute; preserveHistoricalOutputs?: boolean }
@@ -70,6 +78,43 @@ export class GraphEditor {
     return draft.draftId?.startsWith(this.writerId + ':') ?? false;
   }
   private storageKey: string;
+  private acceptedInputs = new Map<string,string>();
+  private runInputKey(nodeId:string) {
+    const g=this.confirmed;
+    return 'openworkgraph:run-input:v1:'+JSON.stringify([g.serviceId,g.projectId,g.graphId,nodeId]);
+  }
+  nodeContent(nodeId:string):Record<string,Json> {
+    const node=this.state.graph.nodes.find(node=>node.id===nodeId);
+    return mergeRunInput(this.state.drafts.find(d=>d.nodeId===nodeId)?.content ?? node?.content ?? {},this.state.runInputs[nodeId]?.fields);
+  }
+  editRunInput(nodeId:string, content:Json) {
+    if(this.historyLocked || this.historyRequest)throw Error(translate('Retry the pending history operation first.'));
+    this.writable();
+    const node=this.state.graph.nodes.find(node=>node.id===nodeId);
+    if(!node || node.readOnly || !['execution','text','image','visualize'].includes(node.type))throw Error(translate('The node does not exist or is read-only.'));
+    const value=mergeRunInput(content),previous=this.nodeContent(nodeId);
+    if(typeof value.prompt==='string' && value.prompt!==previous.prompt && value.skillReferences!==undefined && sameInputValue(previous.skillReferences,value.skillReferences))value.skillReferences=syncSkillReferences(String(previous.prompt??''),value.prompt,validSkillReferences(String(previous.prompt??''),previous.skillReferences)).map(ref=>({...ref}));
+    const fields:RunInput={...this.state.runInputs[nodeId]?.fields};
+    const promptChanged=typeof value.prompt==='string' && value.prompt!==previous.prompt;
+    for(const key of RUN_INPUT_FIELDS)if(Object.hasOwn(value,key) && (!sameInputValue(value[key],previous[key]) || promptChanged && ['skillReferences','features'].includes(key)))fields[key]=structuredClone(value[key]);
+    if(!Object.keys(fields).length)return;
+    const draft={id:randomId(),fields:parseRunInput(fields)};
+    try {this.storage?.setItem(this.runInputKey(nodeId),JSON.stringify(draft));}
+    catch {this.emit({error:translate('The browser could not preserve recovery drafts. Keep this page open.')});}
+    this.emit({runInputs:{...this.state.runInputs,[nodeId]:draft}});
+  }
+  private acknowledgeRunInputs(graph:GraphSnapshot) {
+    const runInputs={...this.state.runInputs};let changed=false;
+    for(const [nodeId,id] of this.acceptedInputs){
+      const draft=runInputs[nodeId],node=graph.nodes.find(node=>node.id===nodeId);
+      if(!draft || draft.id!==id){this.acceptedInputs.delete(nodeId);continue;}
+      const content=mergeRunInput(node?.content??{});
+      if(!node || !Object.entries(draft.fields).every(([key,value])=>sameInputValue(content[key],value)))continue;
+      delete runInputs[nodeId];this.acceptedInputs.delete(nodeId);changed=true;
+      try {if(JSON.parse(this.storage?.getItem(this.runInputKey(nodeId))??'null')?.id===id)this.storage?.removeItem(this.runInputKey(nodeId));}catch { /* Keep other tabs' drafts. */ }
+    }
+    return changed?runInputs:this.state.runInputs;
+  }
   constructor(
     private request: Request,
     graph: GraphSnapshot,
@@ -106,7 +151,12 @@ export class GraphEditor {
     } catch {
       error = translate("The browser could not read recovery drafts. Keep other editor pages open.");
     }
-    this.state = { graph, drafts, online: true, error, busy: false };
+    const runInputs:EditorState['runInputs']={};
+    try {for(const node of graph.nodes){
+      const value=JSON.parse(storage?.getItem(this.runInputKey(node.id))??'null');
+      if(value && typeof value.id==='string')runInputs[node.id]={id:value.id,fields:parseRunInput(value.fields)};
+    }} catch {error=translate('The browser could not read recovery drafts. Keep other editor pages open.');}
+    this.state = { graph, drafts, runInputs, online: true, error, busy: false };
   }
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => {
@@ -170,6 +220,13 @@ export class GraphEditor {
     if (this.state.drafts.some(d => d.nodeId === nodeId && ["conflict", "recovery"].includes(d.state)))
       throw Error(translate("Resolve the content conflict or recovery draft first."));
     const previous = prior?.content ?? node.content;
+    if(this.state.runInputs[nodeId]){
+      const next=mergeRunInput(content),saved=mergeRunInput(previous);
+      for(const key of Object.keys(this.state.runInputs[nodeId].fields)){
+        if(Object.hasOwn(saved,key))next[key]=saved[key];else delete next[key];
+      }
+      content=next;
+    }
     if (node.type === 'visualize') validateVisualizeConfiguration(previous, content);
     if (previous && typeof previous === 'object' && !Array.isArray(previous) && content && typeof content === 'object' && !Array.isArray(content) && typeof previous.prompt === 'string' && typeof content.prompt === 'string' && previous.prompt !== content.prompt && previous.skillReferences !== undefined && JSON.stringify(previous.skillReferences) === JSON.stringify(content.skillReferences)) {
       content = { ...content, skillReferences: syncSkillReferences(previous.prompt, content.prompt, validSkillReferences(previous.prompt, previous.skillReferences)).map(ref => ({ ...ref })) };
@@ -226,7 +283,7 @@ export class GraphEditor {
     )
       return;
     this.confirmed = graph;
-    this.emit({ graph: this.projection() });
+    this.emit({ graph: this.projection(), runInputs:this.acknowledgeRunInputs(graph) });
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.chain.then(work);
@@ -559,6 +616,8 @@ export class GraphEditor {
     preserveHistoricalOutputs = captured.preserveHistoricalOutputs;
     if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
     const epoch = this.connectionEpoch;
+    const localInput=this.state.runInputs[nodeId];
+    const inputDraft=localInput?structuredClone(localInput.fields):undefined;
     await this.flush();
     this.writable();
     if (epoch !== this.connectionEpoch)
@@ -570,11 +629,12 @@ export class GraphEditor {
     if (kind === 'visualize_generation' && node.type !== 'visualize') throw Error(translate('Page generation requires a visualization node.'));
     if (g.serviceId === 'browser-local' && kind === 'visualize_generation') throw Object.assign(Error(translate('Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.')), { code: 'TEMPORARY_SERVICE_REQUIRED' });
     const visualize = kind === 'visualize_generation';
+    const localInputChanged=()=>this.state.runInputs[nodeId]?.id!==localInput?.id;
     const changed = () => Error(translate("Inputs or the connection changed during preview. Click Run again."));
     for (let attempt = 0; attempt < (visualize ? COMMAND_MAX_ATTEMPTS : 1); attempt++) {
       if (visualize) {
         await this.refresh();
-        if (epoch !== this.connectionEpoch || this.state.drafts.length || !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
+        if (epoch !== this.connectionEpoch || localInputChanged() || this.state.drafts.length || !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
       }
       this.writable();
       if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
@@ -582,23 +642,26 @@ export class GraphEditor {
       const preview = await this.request<{
         canSubmit: boolean;
         issues: { reason: string }[];
-      }>(graphPath(current.projectId, current.graphId) + "/input-preview", { nodeId });
+      }>(graphPath(current.projectId, current.graphId) + "/input-preview", { nodeId, ...(inputDraft?{inputDraft}:{}), ...(kind==='image_generation' && imageRoute?.type==='api'?{excludeFiles:true}:{}) });
       if (!preview.canSubmit) throw Error(preview.issues.map((i) => i.reason).join("；"));
       if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
       // Local edits and changed generation inputs always abort this click.
-      if (epoch !== this.connectionEpoch || this.state.drafts.length || visualize && !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
+      if (epoch !== this.connectionEpoch || localInputChanged() || this.state.drafts.length || visualize && !sameVisualizeGenerationInputs(g, this.state.graph, nodeId)) throw changed();
       if (this.state.graph.executionRevision !== current.executionRevision) {
         if (visualize && attempt + 1 < COMMAND_MAX_ATTEMPTS) continue;
         throw changed();
       }
       this.writable();
       try {
-        return await this.request<Run>(graphPath(current.projectId, current.graphId) + "/runs", {
+        const submitted=await this.request<Run>(graphPath(current.projectId, current.graphId) + "/runs", {
           nodeId, kind, idempotencyKey: randomId(), expectedExecutionRevision: current.executionRevision,
+          ...(inputDraft?{inputDraft}:{}),
           ...(agent ? { agent } : modelOverride ? { modelOverride } : {}),
           ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
           ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
         });
+        if(localInput){this.acceptedInputs.set(nodeId,localInput.id);try {await this.refresh();}catch { /* The accepted Run remains successful; retain its local input until reconciliation. */ }}
+        return submitted;
       } catch (error) {
         // Only a definite revision rejection can start a fresh submission.
         // Unknown results are returned to the caller without another Run.

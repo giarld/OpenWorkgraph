@@ -34,6 +34,14 @@ After the build completes, run Agent Service in the foreground:
 node agent-service/dist/cli.js start
 ```
 
+### OpenCode Agent
+
+OpenWorkgraph configures its OpenCode integration dependencies during installation; no separate SDK installation is needed. Stable OpenCode versions >= 2.0.0 are supported. Each execution owns a separate native instance; existing user sessions are not taken over. Configure providers, models and authentication through native OpenCode on the Workspace device, then enable OpenCode and choose its model in Agent settings. Web tasks use the fixed build role and the same reasoning effort selector as Codex before submission; the plugin translates the selection into a native model variant. Catalog queries do not run model inference. If the integration is incomplete, run `npm install -g openworkgraph --include=optional` on the Workspace device, restart the Workspace and refresh the Agent catalog. Explicitly omitting optional dependencies skips OpenCode integration.
+
+Execution, text and visualization delivery are supported; OpenCode image generation is excluded. Workspace write mode uses native file rules and command approvals, without an OS sandbox. Read-only mode is currently unsupported. Full access automatically approves eligible permission requests while preserving native hard denials; user questions still require an answer. Advanced session, revert and terminal operations are available through the backend API, with no additional Web controls.
+
+After a crash, unresolved independent work retains the project lock and execution capacity. Inspect and stop the original work before using revision-checked recovery operations; do not release occupancy by editing the database. See the [OpenCode capability reference](docs/development/opencode-plugin-capabilities.md) and [Run and recovery operations](docs/development/opencode-run-operations.md) for installation and platform boundaries.
+
 ### Web Client
 
 Build Web Client from the repository root, then serve the production build with Vite Preview at `http://127.0.0.1:4173`:

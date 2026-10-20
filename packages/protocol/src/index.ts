@@ -1,14 +1,16 @@
 /** Public wire types. Never expose SQLite rows or backend-specific events here. */
 export * from './pairing.js';
+export * from './run-input.js';
 export * from './resource-mime.js';
 export * from './execution-chain.js';
 export * from './graph-title.js';
 export * from './node-title.js';
 export * from './graph-binary.js';
 export * from './agents.js';
+export * from './agent-forms.js';
 export * from './approval-permissions.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.5.8' as const;
+export const SERVICE_VERSION = '0.5.11' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -106,7 +108,7 @@ export type InputSnapshot = InputSnapshotBase & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute, { type: 'codex' }>; inputMode?: ImageInputMode }
   | { imageRoute: FrozenApiImageRoute; inputMode: ImageInputMode; model?: never }
 );
-export type SubmitRun = GraphScope & { nodeId: string; idempotencyKey: string; expectedExecutionRevision: number; preserveHistoricalOutputs?: boolean } & (
+export type SubmitRun = GraphScope & { nodeId: string; idempotencyKey: string; expectedExecutionRevision: number; preserveHistoricalOutputs?: boolean; inputDraft?: import('./run-input.js').RunInput } & (
   { kind: 'execution' | 'text_generation' | 'visualize_generation'; agent?: import('./agents.js').AgentSelection; modelOverride?: ModelSelection; imageRoute?: never }
   | { kind: 'image_generation'; agent?: never; modelOverride?: ModelSelection; imageRoute?: Extract<ImageRoute, { type: 'codex' }> }
   | { kind: 'image_generation'; agent?: never; imageRoute: Extract<ImageRoute, { type: 'api' }>; modelOverride?: never }

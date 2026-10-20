@@ -1,0 +1,30 @@
+{
+  "title": "数值倍数换算",
+  "prompt": "输入数值和倍数，保存数值、倍数及换算结果供下游使用。",
+  "htmlFile": "tool.html",
+  "page": {
+    "format": "openworkgraph.visualize-page",
+    "version": 2,
+    "bridgeVersion": 1,
+    "logoSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\"><path fill=\"#287568\" d=\"M12 18h30v-6l10 10-10 10v-6H12Z\"/><path fill=\"#D99A35\" d=\"M52 38H22v-6L12 42l10 10v-6h30Z\"/></svg>",
+    "dependencies": [],
+    "form": {
+      "dialect": "openworkgraph.visualize-form/1",
+      "version": 1,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {"type":"number","title":"数值"},
+          "factor": {"type":"number","title":"倍数"},
+          "result": {"type":"number","title":"结果"}
+        },
+        "required": ["value", "factor", "result"],
+        "additionalProperties": false
+      }
+    },
+    "initialForm": {"value":1,"factor":2,"result":2},
+    "initialState": {},
+    "layout": {"width":480,"height":360},
+    "inputNames": []
+  }
+}

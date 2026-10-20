@@ -6,7 +6,8 @@ import { ServiceError } from '../errors.js';
 import { AgentError } from './errors.js';
 import { AgentRegistry } from './registry.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText } from './configuration.js';
-import { validateAgentModels } from './discovery.js';
+import { validateAgentModels, assertModelVariant } from './discovery.js';
+import { modelGroupMetadata } from './model-groups.js';
 import { SETTINGS_GENERATION, configurationRevision, validateProjectPermissions, sameProjectPermissions, validateSelectionGeneration, workspaceConfigurationSchema, isPermissionOption, validateConfigurationUpdate } from './workspace-configuration-validation.js';
 
 export interface WorkspaceFreezeContext {
@@ -92,13 +93,14 @@ export class AgentWorkspaceConfigurationStore {
     try { const result = work(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  private selectedModel(backendId: string, value: ModelSelection, catalog: readonly AgentModelOption[], inferEffort = false): ModelSelection {
+  private selectedModel(backendId: string, value: ModelSelection, catalog: readonly AgentModelOption[], inferEffort = false, options: Readonly<Record<string, import('@openworkgraph/protocol').AgentOptionValue>> = {}): ModelSelection {
     if (!modelShape(value)) throw new AgentError('model_unavailable');
     const policy = this.registry.get(backendId).descriptor.models;
-    const known = validateAgentModels(catalog, policy.effort).find(m => m.id === value.model);
+    const known = validateAgentModels(catalog, policy.effort, !!policy.variantOption).find(m => m.id === value.model);
     if (!known && !policy.allowCustom || !policy.effort && value.reasoningEffort !== null || value.reasoningEffort !== null && (!known || !known.reasoningEfforts.includes(value.reasoningEffort))) throw new AgentError('model_unavailable');
-    // Plugin's effort list is its declared low-to-high order; never alphabetical.
+    // Use the plugin's display order, including named native variants.
     const effort = value.reasoningEffort ?? (inferEffort && policy.effort && known ? (known.reasoningEfforts.includes('medium') ? 'medium' : known.reasoningEfforts[0] ?? null) : null);
+    assertModelVariant(this.registry.get(backendId).descriptor, options, value.model, catalog, effort);
     return { model: value.model, reasoningEffort: effort };
   }
   set(update: AgentConfigurationUpdate, catalog: readonly AgentModelOption[] = [], platform: AgentPlatform = process.platform as AgentPlatform, expectedCatalogRevision?: number, expectedPermissionsRevision?: number): AgentWorkspaceConfiguration {
@@ -115,12 +117,12 @@ export class AgentWorkspaceConfigurationStore {
           validateProjectPermissions({ revision, project: update.project, runs: 'read-write' });
           value.permissions = { revision, project: update.project, runs: 'read-write' }; break;
         case 'backend': {
-          if (!exactKeys(update, ['section', 'expectedRevision', 'backendId', 'enabled', 'schemaVersion', 'options', 'models']) || typeof update.enabled !== 'boolean' || !this.models(update.models)) invalid();
+          if (!exactKeys(update, ['section', 'expectedRevision', 'backendId', 'enabled', 'schemaVersion', 'options', 'models', 'source']) || typeof update.enabled !== 'boolean' || !this.models(update.models)) invalid();
           const old = value.backends.find(b => b.backendId === update.backendId) ?? this.emptyBackend(update.backendId, platform);
           if (old.revision !== update.expectedRevision) conflict();
           const descriptor = this.registry.get(update.backendId).descriptor;
-          const options = normalizeConfiguration(workspaceConfigurationSchema(descriptor.configuration), update.options, update.schemaVersion, platform);
-          const models = validateAgentModels(catalog, descriptor.models.effort);
+          const options = this.normalizeOptions(update.backendId, update.options, update.schemaVersion, platform, update.source);
+          const models = validateAgentModels(catalog, descriptor.models.effort, !!descriptor.models.variantOption);
           // Delisted saved identities remain editable/hidden; only newly added
           // unknown IDs are rejected. Visibility is never an execution whitelist.
           if (!descriptor.models.allowCustom && update.models.some(m => !models.some(known => known.id === m.id) && !old.models.some(saved => saved.id === m.id))) throw new AgentError('model_unavailable');
@@ -134,7 +136,7 @@ export class AgentWorkspaceConfigurationStore {
           if (selection) {
             const backend = value.backends.find(b => b.backendId === selection!.backendId) ?? this.emptyBackend(selection.backendId, platform);
             if (!backend.enabled) throw new AgentError('runtime_unavailable');
-            selection = { backendId: selection.backendId, ...this.selectedModel(selection.backendId, { model: selection.model, reasoningEffort: selection.reasoningEffort }, catalog) };
+            selection = { backendId: selection.backendId, ...this.selectedModel(selection.backendId, { model: selection.model, reasoningEffort: selection.reasoningEffort }, catalog, false, backend.options) };
           }
           value.default = { revision, selection }; break;
         }
@@ -149,19 +151,27 @@ export class AgentWorkspaceConfigurationStore {
       return this.get(platform);
     });
   }
+  private normalizeOptions(backendId: string, input: unknown, schemaVersion: number, platform: AgentPlatform, source?: 'settings') {
+    const plugin = this.registry.get(backendId), schema = workspaceConfigurationSchema(plugin.descriptor.configuration);
+    const options = normalizeConfiguration(schema, input, schemaVersion, platform);
+    return source === 'settings' && plugin.normalizeSettings
+      ? normalizeConfiguration(schema, plugin.normalizeSettings(Object.freeze({ ...options }), platform), schemaVersion, platform)
+      : options;
+  }
   /** Discovery is read-only metadata: native schema defaults are not execution authority. */
-  query(backendId: string, overrides?: Record<string, import('@openworkgraph/protocol').AgentOptionValue>, platform: AgentPlatform = process.platform as AgentPlatform) {
+  query(backendId: string, overrides?: Record<string, import('@openworkgraph/protocol').AgentOptionValue>, platform: AgentPlatform = process.platform as AgentPlatform, source?: 'settings') {
     const value = this.get(platform); const backend = value.backends.find(b => b.backendId === backendId);
     if (!backend) throw new AgentError('runtime_unavailable');
     const plugin = this.registry.get(backendId); const schema = workspaceConfigurationSchema(plugin.descriptor.configuration);
-    const options = normalizeConfiguration(schema, overrides ?? backend.options, backend.schemaVersion, platform);
-    return { options: normalizeConfiguration(plugin.descriptor.configuration, options, backend.schemaVersion, platform), schemaVersion: backend.schemaVersion, configRevision: backend.revision, permissionsRevision: value.permissions.revision };
+    const options = this.normalizeOptions(backendId, overrides ?? backend.options, backend.schemaVersion, platform, source);
+    return { options: normalizeConfiguration(plugin.descriptor.configuration, options, backend.schemaVersion, platform), schemaVersion: backend.schemaVersion, configRevision: backend.revision, permissionsRevision: value.permissions.revision, permissions: structuredClone(value.permissions) };
   }
   /** Refresh is a draft: new catalog entries start hidden; saved flags survive. */
   modelDraft(backendId: string, catalog: readonly AgentModelOption[]): AgentBackendConfiguration['models'] {
     const saved = this.getBackend(backendId).models;
-    validateAgentModels(catalog, this.registry.get(backendId).descriptor.models.effort);
-    return [...structuredClone(saved), ...catalog.filter(m => !saved.some(s => s.id === m.id)).map(m => ({ id: m.id, visible: false }))];
+    const policy = this.registry.get(backendId).descriptor.models;
+    validateAgentModels(catalog, policy.effort, !!policy.variantOption);
+    return [...structuredClone(saved), ...catalog.filter(m => !saved.some(s => s.id === m.id)).map(m => ({ id: m.id, visible: false }))].map(model => ({ ...model, ...modelGroupMetadata(this.registry.get(backendId), model.id) }));
   }
   /** Select first backend even if unavailable; callers must not fall back. */
   defaultBackendId(): string {
@@ -186,7 +196,7 @@ export class AgentWorkspaceConfigurationStore {
     const selected = selection.model ?? (saved ? (saved.backendId === selection.backendId ? saved : undefined) : context.availableModels[0] ? { model: context.availableModels[0].id, reasoningEffort: null } : undefined);
     if (!selected) throw new AgentError('model_unavailable');
     if (!selection.model && !saved && this.defaultBackendId() !== selection.backendId) invalid();
-    const frozen: FrozenAgentSelection = { settingsGeneration: SETTINGS_GENERATION, permissions: structuredClone(value.permissions), backendId: selection.backendId, configRevision: current.revision, schemaVersion: schema.version, apiVersion: plugin.descriptor.apiVersion, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion: context.runtimeVersion ?? null, options, model: this.selectedModel(selection.backendId, { model: selected.model, reasoningEffort: selected.reasoningEffort }, context.availableModels, !selection.model && !saved) };
+    const frozen: FrozenAgentSelection = { settingsGeneration: SETTINGS_GENERATION, permissions: structuredClone(value.permissions), backendId: selection.backendId, configRevision: current.revision, schemaVersion: schema.version, apiVersion: plugin.descriptor.apiVersion, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion: context.runtimeVersion ?? null, options, model: this.selectedModel(selection.backendId, { model: selected.model, reasoningEffort: selected.reasoningEffort }, context.availableModels, !selection.model && !saved, options) };
     this.registry.validateFrozen(frozen, platform);
     return immutable(frozen);
   }

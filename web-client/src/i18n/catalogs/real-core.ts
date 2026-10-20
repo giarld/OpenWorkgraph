@@ -105,6 +105,8 @@ export const realCoreZhCN: Record<string, string> = {
   "Failed": "失败",
   "Files larger than 300 MB cannot be copied as resource nodes.": "文件超过 300 MB，不能复制为资源节点。",
   "Group": "分组",
+  "Merge groups": "合并分组",
+  "The selection contains grouped nodes. Merge groups?": "选中存在已分组的节点，是否合并分组？",
   "Group members are missing or overlapping.": "分组成员缺失或重叠",
   "Group members cannot be duplicated.": "分组成员不能重复。",
   "Groups are nested, overlapping, or missing members.": "分组嵌套、重叠或缺少成员。",

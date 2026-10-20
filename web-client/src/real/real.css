@@ -112,8 +112,10 @@
 .real-service-panel .runtime-back { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; flex-shrink: 0; background: transparent; }
 .runtime-subpage-heading h3 { margin: 0; font-size: 16px; }
 .real-service-panel h2 { font-size: 14px; }
-.real-service-panel .management-panel { background: transparent; padding: 0; min-width: 0; overflow: visible; max-height: none; }
-.real-service-panel .management-panel > header { position: sticky; top: 0; z-index: 1; padding: 1px 0 8px; background: var(--panel); }
+.service-panel-content:has(> .management-panel) { display: flex; flex-direction: column; overflow: hidden; }
+.real-service-panel .management-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; background: transparent; padding: 0; min-width: 0; overflow: hidden; max-height: none; }
+.real-service-panel .management-panel > header { flex-shrink: 0; padding: 1px 0 8px; background: transparent; }
+.real-service-panel .management-panel-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 @media (max-width: 1250px) {
   .real-service-panel { position: absolute; right: 0; top: 0; bottom: 0; z-index: 50; width: min(380px, 90vw); box-shadow: -8px 0 24px #0004; }
 }

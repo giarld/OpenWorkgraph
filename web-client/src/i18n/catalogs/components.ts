@@ -61,6 +61,7 @@ export const componentsZhCN: Record<string, string> = {
   "Copy / paste nodes or clipboard content": "复制 / 粘贴节点或剪贴板内容",
   "Save Work Graph edits now": "立即保存工作图编辑",
   "Group selected nodes": "将选中节点编组",
+  "Group or ungroup selected nodes": "分组 / 取消分组",
   "Ungroup the selected group": "解散选中的组",
   "Undo Work Graph edits": "撤销工作图编辑",
   "Redo Work Graph edits": "重做工作图编辑",

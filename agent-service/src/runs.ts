@@ -181,6 +181,7 @@ export class Runs {
       } else if (!snapshot.model?.model || (request.kind==='image_generation' && canonicalJson(((snapshot.imageRoute?.type==='codex'?snapshot.imageRoute.options:undefined)??null) as Json)!==canonicalJson(((route?.type==='codex'?route.options:undefined)??null) as Json))) throw new ServiceError('INPUT_BLOCKED','Invalid frozen Codex model/route');
       const graphHistory=new Graphs(this.db,this.serviceId);
       const historyBefore=graphHistory.history.capture(request);
+      if (request.inputDraft) context.baseVersion=graphHistory.persistRunInput(request,request.nodeId,request.inputDraft);
       if (request.preserveHistoricalOutputs && !holdExecution) {
         if (!this.dependencies.preserveOutputs) throw new ServiceError('INPUT_BLOCKED', 'Historical outputs must be prepared before submission');
         sync(this.dependencies.preserveOutputs(request, graphHistory));
@@ -472,13 +473,21 @@ export class Runs {
     });
   }
   /** A new service instance must not replay or retain ownership of old work. */
-  abandonOnRestart(epoch: string): Run[] {
+  abandonOnRestart(epoch: string, preserve?: (run: Run) => boolean): Run[] {
     if (!epoch) throw new ServiceError('INVALID_REQUEST', 'Recovery epoch required');
     return atomic(this.db, () => {
       const changed: Run[] = [];
       for (const run of this.list()) {
         if (isTerminalRunStatus(run.status)) continue;
         const runtime = this.runtime(run.id);
+        if (preserve?.(run) && !['accepted', 'queued', 'paused_restore', 'agent_completed', 'finalizing'].includes(run.status)) {
+          const details = { ...runtime.details, previousEpoch: runtime.epoch, recoveryAttemptId: runtime.details.recoveryAttemptId ?? runtime.epoch, recoveryStatus: run.status };
+          this.db.prepare('UPDATE run_runtime SET epoch=?,revision=revision+1,details=? WHERE run_id=?').run(epoch, canonicalJson(details), run.id);
+          this.expireInteractions(run.id);
+          if (run.status === 'reconciling') this.event(this.get(run.id), runtime.revision + 1);
+          else this.transition(run.id, this.runtime(run.id), 'reconciling', { uncertainty: 'Original native work must be reconciled after service restart' });
+          changed.push(this.get(run.id)); continue;
+        }
         const status: RunStatus = ['accepted', 'queued', 'paused_restore'].includes(run.status) ? 'cancelled' : 'interrupted';
         const revision = runtime.revision + 1;
         const details = {

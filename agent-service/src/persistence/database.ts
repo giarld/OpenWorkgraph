@@ -55,6 +55,13 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
 }
 export function openDatabase(path: string, migrations: readonly Migration[] = MIGRATIONS): DatabaseSync {
   const db = new DatabaseSync(path, { enableForeignKeyConstraints: true, timeout: 5000, allowExtension: false });
-  try { migrate(db, migrations); db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'); return db; }
+  try {
+    // New files need pointer maps for bounded online reclamation. Opening a
+    // legacy file from a second connection must never rebuild the live database.
+    if (!db.prepare('SELECT 1 FROM sqlite_master LIMIT 1').get()) db.exec('PRAGMA auto_vacuum=INCREMENTAL');
+    migrate(db, migrations);
+    db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;');
+    return db;
+  }
   catch (error) { db.close(); throw error; }
 }

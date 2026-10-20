@@ -1,3 +1,4 @@
+import { modelProviderGroup } from './model-groups.js';
 import { AGENT_PLUGIN_API_VERSION, SERVICE_VERSION } from '@openworkgraph/protocol';
 import type { AgentDescriptor, AgentAvailability, FrozenAgentSelection, Json, SandboxMode } from '@openworkgraph/protocol';
 import type { AgentAdapter, AgentAdapterDependencies, AgentExtensionContext, AgentPlugin, AgentQueryContext } from './contracts.js';
@@ -183,6 +184,7 @@ export function createCodexPlugin(options: CodexPluginOptions = {}): AgentPlugin
       attached.set(id, adapter); return adapter;
     },
     listModels: context => codexQuery(privateOptions, context, async rpc => { await connect(rpc); return listModels(rpc); }),
+    modelGroup: modelProviderGroup,
     async diagnose(context): Promise<AgentAvailability> {
       try { const runtimeVersion = await codexQuery(privateOptions, context, initialize); return { status: 'unknown', reason: null, message: '原生握手成功；尚未执行模型调用。', runtimeVersion, installation: 'installed' }; }
       catch (error) {

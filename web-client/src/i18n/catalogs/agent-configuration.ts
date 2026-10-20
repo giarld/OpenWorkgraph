@@ -1,6 +1,7 @@
 import { zhCN } from '../messages';
 
 Object.assign(zhCN, {
+  'OpenCode integration is incomplete. On the Workspace device, reinstall OpenWorkgraph with npm install -g openworkgraph --include=optional, then restart the Workspace and refresh the Agent catalog.': 'OpenCode 集成依赖未安装完整。请在工作空间设备执行 npm install -g openworkgraph --include=optional 重新安装万象画布，然后重启工作空间并刷新 Agent 目录。',
   'Unavailable': '不可用',
   'Unsaved Agent settings': 'Agent 设置尚未保存',
   'Agent settings have unsaved changes. Cancel to stay and save, or confirm to discard the changes and leave.': 'Agent 设置有未保存的更改。取消可留在此处保存；确认将放弃更改并离开。',

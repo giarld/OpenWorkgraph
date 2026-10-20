@@ -111,6 +111,31 @@ export function createGroupOperation(graph: GraphSnapshot, ids: string[], groupI
   resizeOperation(groupId, { x, y, width, height });
   return { type: 'node.create', node: { id: groupId, type: 'group', schemaVersion: 1, contentVersion: 1, content: { title: translate("Group") }, x, y, width, height, memberIds: [...ids], readOnly: false } };
 }
+/** Release source memberships before creating a flat group in the same transaction. */
+export function groupSelectionOperations(graph: GraphSnapshot, ids: string[], groupId: string): GraphOperation[] {
+  if (!ids.length || new Set(ids).size !== ids.length) throw Error(translate("Select distinct nodes."));
+  assertGeometryEditable(graph, ids, false);
+  const selected = new Set(ids);
+  const memberIds = [...new Set(ids.flatMap(id => {
+    const node = find(graph, id);
+    return node.type === 'group' ? node.memberIds ?? [] : [id];
+  }))];
+  if (memberIds.some(id => find(graph, id).type === 'group')) throw Error(translate("Nested groups are not supported."));
+  const members = new Set(memberIds);
+  const operations: GraphOperation[] = [];
+  const nodes = graph.nodes.flatMap(node => {
+    if (node.type !== 'group' || (!selected.has(node.id) && !node.memberIds?.some(id => members.has(id)))) return [node];
+    assertGeometryEditable(graph, [node.id], false);
+    const remaining = (node.memberIds ?? []).filter(id => !members.has(id));
+    if (!remaining.length) {
+      operations.push({ type: 'node.delete', nodeId: node.id });
+      return [];
+    }
+    operations.push({ type: 'group.members', groupId: node.id, memberIds: remaining });
+    return [{ ...node, memberIds: remaining }];
+  });
+  return [...operations, createGroupOperation({ ...graph, nodes }, memberIds, groupId)];
+}
 export function groupMembersOperation(graph: GraphSnapshot, groupId: string, memberIds: string[]): GraphOperation {
   if (!visualGroup(find(graph, groupId))) throw Error(translate("Select a supported group."));
   if (new Set(memberIds).size !== memberIds.length) throw Error(translate("Group members cannot be duplicated."));
@@ -119,6 +144,12 @@ export function groupMembersOperation(graph: GraphSnapshot, groupId: string, mem
     if (graph.nodes.some(n => n.id !== groupId && n.type === 'group' && n.memberIds?.includes(id))) throw Error(translate("The node already belongs to another group."));
   }
   return { type: 'group.members', groupId, memberIds: [...memberIds] };
+}
+/** A selected frame or a complete member selection can be ungrouped. */
+export function ungroupSelectionIds(graph: GraphSnapshot, ids: string[]): string[] {
+  const selected = new Set(ids);
+  return graph.nodes.filter(node => visualGroup(node) && (selected.has(node.id) ||
+    !!node.memberIds?.length && node.memberIds.every(id => selected.has(id)))).map(node => node.id);
 }
 export function ungroupOperations(graph: GraphSnapshot, ids: string[]): GraphOperation[] {
   if (!ids.length || ids.some(id => !visualGroup(find(graph, id)))) throw Error(translate("Select a group to ungroup."));

@@ -69,7 +69,7 @@ export class ExecutionChains {
     this.runs.repo.appendEvent({eventId:randomUUID(),type:'run.changed',projectId:run.projectId,graphId:run.graphId,entityId:id,revision:runtime.revision+1,occurredAt:new Date().toISOString(),payload:run as unknown as Json});
   }
   /** Prepare every missing run before entering the auth transaction. No partial batch on failure. */
-  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun) => Promise<(principal:string)=>Run>, preserveHistoricalOutputs = false, prepareHistory?: (nodeId: string, copies: Map<string, string>) => Promise<() => void>) {
+  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun) => Promise<(principal:string)=>Run>, preserveHistoricalOutputs = false, prepareHistory?: (nodeId: string, copies: Map<string, string>) => Promise<() => void>, expectedCommitExecutionRevision=plan.executionRevision) {
     const missing = plan.nodes.filter(n => selected.includes(n.id) && n.missingPrompt);
     if (missing.length) throw new ServiceError('INPUT_BLOCKED', '请先填写以下节点的提示词：' + missing.map(n => n.title).join('、'));
     const historyCopies: (() => void)[] = [];
@@ -100,7 +100,7 @@ export class ExecutionChains {
     }
     return (principal:string, target?:Run) => {
       const committedMembers = new Map(members);
-      if(this.graphs.snapshot(graph).executionRevision!==plan.executionRevision)throw new ServiceError('REVISION_CONFLICT','工作图已变化，请重新确认执行范围。');
+      if(this.graphs.snapshot(graph).executionRevision!==expectedCommitExecutionRevision)throw new ServiceError('REVISION_CONFLICT','工作图已变化，请重新确认执行范围。');
       if(target)committedMembers.set(plan.targetId,target.id);
       for(const [id,commit] of commits) if(!committedMembers.has(id))committedMembers.set(id,commit(principal).id);
       for(const id of committedMembers.values()){const run=this.runs.get(id);if(run.status!=='accepted'||!['manual','confirm'].includes(run.executionStart??''))throw new ServiceError('CONFLICT','任务已开始或已取消，请刷新。');}

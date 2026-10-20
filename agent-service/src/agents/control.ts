@@ -60,7 +60,7 @@ export class AgentControl {
     if (settingsGeneration && !configuration) throw new AgentError('runtime_unavailable');
     const captured = configuration?.query(backendId);
     const settings = captured ? { backendId, options: captured.options } : this.getSettings(backendId);
-    const request = { ...(signal ? { signal } : {}), ...(projectPath ? { projectPath } : {}) };
+    const request = { ...(captured ? { permissions: captured.permissions } : {}), ...(signal ? { signal } : {}), ...(projectPath ? { projectPath } : {}) };
     const result = await nativeSkillCatalog(this.services().registry.get(backendId), settings, request);
     if (captured && (configuration!.getBackend(backendId).revision !== captured.configRevision || configuration!.get().permissions.revision !== captured.permissionsRevision)) throw new ServiceError('REVISION_CONFLICT', '技能目录查询期间配置已变化，请刷新后重试。');
     // An opaque public identity must not contain a legacy absolute-path ID.
@@ -105,7 +105,7 @@ export class AgentControl {
     return { backendId, configRevision: settings.revision, schemaVersion: settings.schemaVersion };
   }
   validateSubmission(body: unknown, principal: string): SubmitRun {
-    if (!identity(principal) || !record(body, ['serviceId', 'projectId', 'graphId', 'nodeId', 'kind', 'idempotencyKey', 'expectedExecutionRevision', 'agent', 'preserveHistoricalOutputs'])
+    if (!identity(principal) || !record(body, ['serviceId', 'projectId', 'graphId', 'nodeId', 'kind', 'idempotencyKey', 'expectedExecutionRevision', 'agent', 'preserveHistoricalOutputs', 'inputDraft'])
       || ['serviceId', 'projectId', 'graphId', 'nodeId', 'idempotencyKey'].some(key => !identity(body[key]))
       || typeof body.kind !== 'string' || !['execution', 'text_generation', 'visualize_generation'].includes(body.kind)
       || !revision(body.expectedExecutionRevision) || !selection(body.agent)

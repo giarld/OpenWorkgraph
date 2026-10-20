@@ -10,7 +10,7 @@ type Row = Record<string, SQLInputValue>;
 interface Document { title: string; nodes: Row[]; edges: Row[]; groups: Row[]; members: Row[]; outputs: Row[] }
 interface Checkpoint { document: Document; execution: number; layout: number; run: number }
 const TTL = 24 * 60 * 60 * 1000;
-const MAX_VERSIONS = 51;
+const MAX_VERSIONS = 16;
 const MAX_BYTES = 64 * 1024 * 1024;
 const empty = (): GraphDocumentHistory => ({ cursor: null, canUndo: false, canRedo: false, expiresAt: null });
 

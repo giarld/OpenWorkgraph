@@ -13,7 +13,7 @@ import type { ApiResult } from './api.js';
 
 const invalid=(message: string): never => {throw new ServiceError('INVALID_REQUEST',message);};
 const notFound=(): never => {throw new ServiceError('NOT_FOUND','资源接口不存在。');};
-function string(value: unknown, max=512): string {if(typeof value!=='string' || !value.trim() || value.length>max || [...value].some(c=>c.charCodeAt(0)<32)) return invalid('需要有效且长度受限的字符串。');return value;}
+function string(value: unknown, max=512): string {if(typeof value!=='string' || !value.trim() || value.length>max || /[\x00-\x1f]/.test(value)) return invalid('需要有效且长度受限的字符串。');return value;}
 function id(value: unknown): string {const result=string(value,128);if(!/^[a-zA-Z0-9_-]+$/.test(result)) invalid('无效的标识符。');return result;}
 function integer(value: unknown, min=0, max=Number.MAX_SAFE_INTEGER): number {if(typeof value!=='number' || !Number.isSafeInteger(value) || value<min || value>max) return invalid('整数超出允许范围。');return value;}
 function version(value: string): number {if(!/^[1-9][0-9]*$/.test(value)) invalid('版本须为规范正整数。');return integer(Number(value),1);}
@@ -45,13 +45,13 @@ export class ResourceApi {
   const repo=new Repositories(this.resources.db);
   const cleanups: (()=>unknown)[]=[];
   const prepare=async(promise:Promise<PreparedBlob>):Promise<PreparedBlob>=>{const blob=await promise;cleanups.push(()=>this.resources.discardPrepared(blob));return blob;};
-  const mutation=async(required:string[],optional:string[],work:(input:Record<string,unknown>)=>Promise<()=>unknown>|(()=>unknown)):Promise<ApiResult>=>{
+  const mutation=async(required:string[],optional:string[],work:(input:Record<string,unknown>)=>Promise<()=>unknown>|(()=>unknown),options:{collectGarbage?:boolean}={}):Promise<ApiResult>=>{
    const input=fields(body,[...required,'idempotencyKey'],optional),key=string(input['idempotencyKey'],256),namespace=session.id+':'+path;
    const replay=()=>read(()=>{assertProjectWritable(this.resources.db,projectId);return repo.replay(namespace,key,input as Json);});
    const prior=replay();if(prior!==undefined) {await this.resources.drainFileDeletions();this.auth.assertActive(token,origin);return reply(prior);}
    try {
     const commit=await work(input);
-    const result=read(()=>repo.idempotent(namespace,key,input as Json,()=>{assertProjectWritable(this.resources.db,projectId);const value=commit();this.resources.collectGarbage();return this.wire(value);}));
+    const result=read(()=>repo.idempotent(namespace,key,input as Json,()=>{assertProjectWritable(this.resources.db,projectId);const value=commit();if(options.collectGarbage!==false)this.resources.collectGarbage();return this.wire(value);}));
     return reply(result);
    } catch(error) {
     const duplicate=replay();if(duplicate!==undefined) return reply(duplicate);throw error;
@@ -65,15 +65,16 @@ export class ResourceApi {
   if(section==='uploads') {
    const [uploadId,action]=tail;
    if(method==='GET' && tail.length===1) return reply(read(()=>this.resources.uploadStatus(scope,uploadId!)));
+   // Starting and appending uploads cannot release existing resource references.
    if(method==='POST' && tail.length===0) return mutation(['name','mime','bytes'],['sha256'],b=>{
     const name=string(b['name']),mime=string(b['mime'],128),bytes=integer(b['bytes']);const sha256=b['sha256']===undefined?undefined:string(b['sha256'],64);
     return ()=>this.resources.startUpload({...scope,name,mime,bytes,...(sha256===undefined?{}:{sha256})});
-   });
+   },{collectGarbage:false});
    if(method==='POST' && tail.length===2 && action==='chunks') return mutation(['data','offset'],[],async b=>{
     const encoded=string(b['data'],Math.ceil(4*1024*1024/3)*4),offset=integer(b['offset']);const bytes=Buffer.from(encoded,'base64');
     if(!bytes.length || bytes.toString('base64')!==encoded) invalid('分块须为规范 Base64。');
     const prepared=await this.resources.prepareAppend(scope,uploadId!,offset,bytes);cleanups.push(()=>this.resources.discardAppend(scope,prepared));return ()=>this.resources.commitAppend(scope,prepared);
-   });
+   },{collectGarbage:false});
    if(method==='POST' && tail.length===2 && action==='finish') {
     const mode=body?.['mode'];if(mode!=='new' && mode!=='update' && mode!=='canvas') invalid('无效的上传入口。');
     const required=mode==='canvas'?['mode','name','graphId']:mode==='update'?['mode','name','assetId','expectedVersion']:['mode','name'];

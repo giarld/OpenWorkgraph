@@ -41,7 +41,7 @@ export { createAuthoritativeLoader } from "./authoritative-loader";
 import { readProjectGraphPages } from "./graph-pages";
 import { groupLibraryGraphs } from './library-graphs';
 import { createWorkGraphArchive, readWorkGraphFile, workGraphArchiveFilename } from './workgraph-archive';
-import { ManagementPanel } from "./ManagementPanel";
+import { ManagementPanel, type ManagementPage } from "./ManagementPanel";
 import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePlacement } from "./ResourcesPanel";
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES } from '../../../packages/protocol/src/visualize-library';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
@@ -151,10 +151,10 @@ export function RealApp() {
     setRightPanel(current => (typeof value === 'function' ? value(current === 'management') : value) ? 'management' : current === 'management' ? null : current);
   const toggleWorkspaceManagement = () => setServicePanelOpen(open => !open);
   const [servicePage, setServicePage] = useState<"list" | "connect" | "projects">("list");
-  const [managementInitialPage, setManagementInitialPage] = useState<'projects' | 'add' | 'settings'>('projects');
+  const [managementPage, setManagementPage] = useState<ManagementPage>('projects');
   const [managementEntry, setManagementEntry] = useState(0);
   const openAddProject = () => {
-    setManagementInitialPage('add');
+    setManagementPage('add');
     setManagementEntry(entry => entry + 1);
     setServicePage('projects');
     setServicePanelOpen(true);
@@ -1679,14 +1679,14 @@ export function RealApp() {
                 aria-pressed={serviceId === c.serviceId}
                 onClick={() => {
                   if (serviceId === c.serviceId) {
-                    setManagementInitialPage('projects');
+                    setManagementPage('projects');
                     setServicePage(c.status === 'invalid' ? 'connect' : 'projects');
                     return;
                   }
                   navigate(() => {
                     setActiveService(c.serviceId); setTemporary(false);
                     setProjectId(''); setGraphId(''); setTab('canvas'); setFilter('active');
-                    setManagementInitialPage('projects');
+                    setManagementPage('projects');
                     setServicePage(c.status === 'invalid' ? 'connect' : 'projects');
                   });
                 }}
@@ -1746,12 +1746,13 @@ export function RealApp() {
           {servicePage === "projects" && connection && (
             <ManagementPanel
               agentStore={managementAgents}
-              initialPage={managementInitialPage}
+              page={managementPage}
+              onPageChange={setManagementPage}
               onBack={() => setServicePage("list")}
               runtimeAddress={connection.address}
               onRenameRuntime={() => setRuntimeRename({ serviceId: connection.serviceId, sessionId: connection.session.id, name: connection.runtimeName || '' })}
               readOnly={!online}
-              key={serviceId + ":" + connection.generation + ":" + managementInitialPage + ":" + managementEntry}
+              key={serviceId + ":" + connection.generation + ":" + managementEntry}
               request={request}
               projectId={project?.projectId}
               graphId={localMode ? undefined : graph?.graphId}

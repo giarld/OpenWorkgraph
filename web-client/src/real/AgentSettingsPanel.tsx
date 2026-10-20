@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, Check, ChevronRight, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
 import type { AgentBackendConfiguration, AgentPlatform, AgentConfigurationUpdate } from '../../../packages/protocol/src/agents';
 import { agentModelKey, initialEffort, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
 import { useI18n } from '../i18n/I18nProvider';
@@ -16,11 +16,12 @@ const installationGuides: Record<string, string> = {
 export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady, onBusyChange }: {
   store: WorkspaceAgentStore; readOnly?: boolean; onChanged?: () => void; onReady?: () => void; onBusyChange?: (busy: boolean) => void;
 }) {
-  const { language } = useI18n();
+  const { language, t } = useI18n();
   const text = (zh: string, en: string) => language === 'zh-CN' ? zh : en;
   const state = useWorkspaceAgents(store);
   const [selected, setSelected] = useState('');
   const [sortMode, setSortMode] = useState(false);
+  const [expandedProviders, setExpandedProviders] = useState<ReadonlySet<string>>(() => new Set());
   const [editing, setEditing] = useState<{ backendId: string; settings: AgentBackendConfiguration; value: BackendConfigurationFields }>();
   const [order, setOrder] = useState<string[]>();
   const [defaultSelection, setDefaultSelection] = useState<{ backendId: string; model: { model: string; reasoningEffort: string | null } }>();
@@ -48,6 +49,9 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   useEffect(() => {
     if (onReady && state.mode === 'agents') for (const item of state.descriptors) void store.checkInstallation(item.id);
   }, [store, !!onReady, state.mode, state.descriptors]);
+  useEffect(() => {
+    if (backend && resource?.modelsError) void store.checkInstallation(backend.id);
+  }, [store, backend?.id, resource?.modelsError]);
   useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => { if (!selected && backend) setSelected(backend.id); }, [selected, backend?.id]);
   useEffect(() => { setEditing(undefined); }, [backend?.id, settings]);
@@ -71,7 +75,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   const saveBackend = async () => {
     if (!backend || !fields || !settings) return;
     const update: AgentConfigurationUpdate = { section: 'backend', backendId: backend.id, expectedRevision: settings.revision, schemaVersion: settings.schemaVersion,
-      enabled: fields.enabled, options: fields.options, models: fields.models };
+      enabled: fields.enabled, options: fields.options, models: fields.models, source: 'settings' };
     await store.saveConfiguration(update);
     setEditing(undefined);
   };
@@ -80,6 +84,22 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     const next = [...(order ?? agents.map(item => item.id))], index = next.indexOf(id), target = index + delta;
     if (index < 0 || target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target], next[index]]; setOrder(next);
+  };
+  const providerGroups = new Map<string | null, BackendConfigurationFields['models']>();
+  if (fields) for (const model of fields.models) {
+    const provider = resource?.configuredModels?.find(item => item.id === model.id)?.group
+      ?? resource?.models?.find(item => item.id === model.id)?.group ?? null;
+    const group = providerGroups.get(provider) ?? [];
+    group.push(model); providerGroups.set(provider, group);
+  }
+  const renderModel = (model: BackendConfigurationFields['models'][number]) => {
+    if (!backend || !fields || !settings) return null;
+    const absent = resource?.models && !resource.models.some(item => item.id === model.id) && !resource.modelsError;
+    const manual = absent && backend.models.allowCustom && !resource?.knownModelIds?.includes(model.id);
+    return <div className="agent-model-row" key={model.id}>
+      <label className="management-checkbox"><input type="checkbox" aria-label={model.id} checked={model.visible} onChange={event => update({ models: fields.models.map(item => item.id === model.id ? { ...item, visible: event.target.checked } : item) })}/><span>{model.id}{!settings.models.some(saved => saved.id === model.id) && text('（尚未保存）', ' (unsaved)')}{absent && (manual ? text('（手动 ID）', ' (custom ID)') : text('（已下架）', ' (unavailable)'))}</span></label>
+      {manual && <button type="button" aria-label={text('删除模型 ', 'Delete model ') + model.id} onClick={() => update({ models: fields.models.filter(item => item.id !== model.id) })}><Trash2 size={16} aria-hidden="true"/>{text('删除', 'Delete')}</button>}
+    </div>;
   };
   if (state.mode === 'legacy') return null;
   return <section className="management-section agent-settings" aria-label={text('Agent 设置', 'Agent settings')}>
@@ -115,7 +135,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
         }}><button type="button" aria-pressed={backend?.id === id} onClick={() => setSelected(id)}><AgentMark descriptor={item}/><span className="agent-backend-name">{item.name}</span>{configured && <span className="agent-configured"><Check size={16} aria-hidden="true"/>{text('已配置', 'Configured')}</span>}{state.resources[id]?.settings?.enabled === false && <span>{text('已停用', 'Disabled')}</span>}</button>
           <button type="button" aria-label={text('上移 ', 'Move up ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === 0} onClick={() => move(id, -1)}><ArrowUp size={16}/></button>
           <button type="button" aria-label={text('下移 ', 'Move down ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === list.length - 1} onClick={() => move(id, 1)}><ArrowDown size={16}/></button>
-          {onReady && state.resources[id]?.installation === 'missing' && <div className="agent-installation-help">
+          {onReady && state.resources[id]?.installation === 'missing' && installationGuides[id] && <div className="agent-installation-help">
             <span>{text('工作空间未检测到安装', 'Installation not found in this Workspace')}</span>
             {installationGuides[id] && <a href={installationGuides[id]} target="_blank" rel="noopener noreferrer">{text('安装 ', 'Install ') + item.name}<ExternalLink size={14} aria-hidden="true"/></a>}
           </div>}
@@ -125,21 +145,39 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     </div>
     {backend && <>
       {backendUnsupported ? <p role="alert">{text('执行器不支持此操作。', 'The executor does not support this operation.')}<br/>{unsupportedReason}</p>
-        : (resource?.settingsError || resource?.modelsError) && <p role="alert">{resource.settingsError ?? resource.modelsError}</p>}
+        : (resource?.settingsError || resource?.modelsError) && <p role="alert">{resource.settingsError ?? (resource.installation === 'missing' && resource.installationMessage ? t(resource.installationMessage) : resource.modelsError)}</p>}
       {!backendUnsupported && !settings && !resource?.settingsError && <p role="status">{text('正在加载插件配置…', 'Loading plugin settings…')}</p>}
       {!backendUnsupported && fields && settings && <>
-        <label className="management-checkbox"><input type="checkbox" disabled={disabled} checked={fields.enabled} onChange={event => update({ enabled: event.target.checked })}/><span>{text('启用 ', 'Enable ') + backend.name}</span></label>
+        <label className="management-checkbox agent-backend-toggle"><input type="checkbox" disabled={disabled} checked={fields.enabled} onChange={event => update({ enabled: event.target.checked })}/><span>{text('启用 ', 'Enable ') + backend.name}</span></label>
+        {backend.configuration.fields.map(field => {
+          if (/(permission|sandbox)/i.test(field.name) || field.hidden) return null;
+          const value = fields.options[field.name] ?? field.default;
+          const label = field.name === backend.models.variantOption ? text('模型变体', 'Model variant') : field.label;
+          const suggestions = field.name === backend.models.variantOption ? [...new Set(resource?.models?.flatMap(model => model.variants ?? []) ?? [])] : [];
+          const listId = 'agent-option-' + backend.id + '-' + field.name;
+          return <label key={field.name}>{label}{field.type === 'enum'
+            ? <select aria-label={label} disabled={disabled} value={String(value ?? '')} onChange={event => update({ options: { ...fields.options, [field.name]: event.target.value } })}>{(field.values ?? []).map(option => <option key={option}>{option}</option>)}</select>
+            : field.type === 'boolean' ? <input type="checkbox" aria-label={label} disabled={disabled} checked={value === true} onChange={event => update({ options: { ...fields.options, [field.name]: event.target.checked } })}/>
+            : <input type={field.type === 'number' ? 'number' : 'text'} aria-label={label} disabled={disabled} value={String(value ?? '')} maxLength={field.type === 'text' ? field.maxLength : undefined} list={suggestions.length ? listId : undefined} onChange={event => update({ options: { ...fields.options, [field.name]: field.type === 'number' ? Number(event.target.value) : event.target.value } })}/>}
+            {suggestions.length > 0 && <datalist id={listId}>{suggestions.map(option => <option key={option} value={option}/>)}</datalist>}
+          </label>;
+        })}
         <fieldset className="agent-model-settings" disabled={disabled || !configurationSupported}><legend>{text('模型可见性', 'Model visibility')}</legend>
           {backend.models.allowCustom && <label>{text('手动模型 ID', 'Custom model ID')}<input aria-label={text('手动模型 ID', 'Custom model ID')} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); const id = event.currentTarget.value.trim(); if (id && !fields.models.some(model => model.id === id)) update({ models: [...fields.models, { id, visible: true }] }); event.currentTarget.value = ''; } }}/><span>{text('按 Enter 添加', 'Press Enter to add')}</span></label>}
 
           <div className="management-actions"><button type="button" onClick={() => update({ models: fields.models.map(model => ({ ...model, visible: true })) })}>{text('全部显示', 'Show all')}</button><button type="button" onClick={() => update({ models: fields.models.map(model => ({ ...model, visible: false })) })}>{text('全部隐藏', 'Hide all')}</button></div>
-          <div className="agent-model-list">{fields.models.map(model => {
-            const absent = resource?.models && !resource.models.some(item => item.id === model.id) && !resource.modelsError;
-            const manual = absent && backend.models.allowCustom && !resource?.knownModelIds?.includes(model.id);
-            return <div className="agent-model-row" key={model.id}>
-              <label className="management-checkbox"><input type="checkbox" aria-label={model.id} checked={model.visible} onChange={event => update({ models: fields.models.map(item => item.id === model.id ? { ...item, visible: event.target.checked } : item) })}/><span>{model.id}{!settings.models.some(saved => saved.id === model.id) && text('（尚未保存）', ' (unsaved)')}{absent && (manual ? text('（手动 ID）', ' (custom ID)') : text('（已下架）', ' (unavailable)'))}</span></label>
-              {manual && <button type="button" aria-label={text('删除模型 ', 'Delete model ') + model.id} onClick={() => update({ models: fields.models.filter(item => item.id !== model.id) })}><Trash2 size={16} aria-hidden="true"/>{text('删除', 'Delete')}</button>}
-            </div>;
+          <div className="agent-model-providers">{[...providerGroups].sort(([a], [b]) => a === b ? 0 : a === null ? 1 : b === null ? -1 : a.localeCompare(b)).map(([provider, models]) => {
+            const key = JSON.stringify([backend.id, provider]), expanded = expandedProviders.has(key);
+            return <details className="agent-model-provider" key={key} open={expanded} onToggle={event => {
+              const open = event.currentTarget.open;
+              setExpandedProviders(current => {
+                if (current.has(key) === open) return current;
+                const next = new Set(current); if (open) next.add(key); else next.delete(key); return next;
+              });
+            }}>
+              <summary><ChevronRight size={16} aria-hidden="true"/><span>{provider ?? text('原生', 'Native')}</span></summary>
+              {expanded && <div className="agent-model-list">{models.map(renderModel)}</div>}
+            </details>;
           })}</div>
           <button type="button" onClick={() => void save(async () => {
             await saveBackend();

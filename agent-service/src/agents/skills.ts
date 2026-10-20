@@ -3,9 +3,10 @@ import type { FrozenAgentSelection, AgentPlatform } from '@openworkgraph/protoco
 import type { AgentPlugin, AgentQueryContext } from './contracts.js';
 import { AgentError, agentError } from './errors.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText, validPlatform } from './configuration.js';
+import { validateProjectPermissions } from './workspace-configuration-validation.js';
 
 export interface NativeSkillCatalog { backendId: string; configuredSkills: boolean; dynamicSkillCommands: boolean; skills: { skillId: string; name: string; description: string }[] }
-export interface NativeSkillCatalogOptions { timeoutMs?: number; cleanupTimeoutMs?: number; signal?: AbortSignal; platform?: AgentPlatform; projectPath?: string }
+export interface NativeSkillCatalogOptions { timeoutMs?: number; cleanupTimeoutMs?: number; signal?: AbortSignal; platform?: AgentPlatform; projectPath?: string; permissions?: AgentQueryContext['permissions'] }
 function boundedMs(value: number | undefined, fallback: number, maximum: number): number {
   const selected = value ?? fallback;
   if (!Number.isSafeInteger(selected) || selected < 1 || selected > maximum) throw new AgentError('invalid_configuration');
@@ -17,7 +18,9 @@ function abortError(): DOMException { return new DOMException('Aborted', 'AbortE
  * resources. Every registered hook gets one bounded execution on all outcomes. */
 export async function nativeSkillCatalog(plugin: AgentPlugin, frozen: Pick<FrozenAgentSelection, 'backendId' | 'options'>, timeout: number | NativeSkillCatalogOptions = 10_000): Promise<NativeSkillCatalog> {
   const request = typeof timeout === 'number' ? { timeoutMs: timeout } : timeout;
-  if (!isPlainRecord(request as unknown) || !exactKeys(request as unknown as Record<string, unknown>, ['timeoutMs', 'cleanupTimeoutMs', 'signal', 'platform', 'projectPath']) || request.signal !== undefined && !(request.signal instanceof AbortSignal) || request.projectPath !== undefined && (typeof request.projectPath !== 'string' || !request.projectPath)) throw new AgentError('invalid_configuration');
+  if (!isPlainRecord(request as unknown) || !exactKeys(request as unknown as Record<string, unknown>, ['timeoutMs', 'cleanupTimeoutMs', 'signal', 'platform', 'projectPath', 'permissions']) || request.signal !== undefined && !(request.signal instanceof AbortSignal) || request.projectPath !== undefined && (typeof request.projectPath !== 'string' || !request.projectPath)) throw new AgentError('invalid_configuration');
+  if (request.permissions !== undefined) validateProjectPermissions(request.permissions);
+  const permissions = request.permissions === undefined ? undefined : Object.freeze({ ...request.permissions });
   // Keep the outer cleanup budget above the native stdio drain's 3s deadline.
   const timeoutMs = boundedMs(request.timeoutMs, 10_000, 120_000), cleanupMs = boundedMs(request.cleanupTimeoutMs, 5_000, 30_000);
   const platform = request.platform ?? process.platform as AgentPlatform;
@@ -38,7 +41,7 @@ export async function nativeSkillCatalog(plugin: AgentPlugin, frozen: Pick<Froze
     try { await Promise.race([Promise.resolve().then(hook), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentError('timeout')), cleanupMs); })]); }
     finally { if (timer) clearTimeout(timer); }
   };
-  const context: AgentQueryContext = Object.freeze({ platform, options, ...(request.projectPath ? { projectPath: request.projectPath } : {}), signal: controller.signal, deferCleanup: (hook: () => void | Promise<void>) => {
+  const context: AgentQueryContext = Object.freeze({ platform, options, ...(permissions ? { permissions } : {}), ...(request.projectPath ? { projectPath: request.projectPath } : {}), signal: controller.signal, deferCleanup: (hook: () => void | Promise<void>) => {
     if (typeof hook !== 'function' || ++hookCount > 32) throw new AgentError('protocol_error');
     if (cleaning) void cleanup(hook).catch(() => {}); else hooks.push(hook);
   } });

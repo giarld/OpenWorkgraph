@@ -4,7 +4,7 @@ import { ModelDefaultsStore } from '../backend/models.js';
 import { ExecutionSettingsStore } from '../execution-settings.js';
 import { ServiceError } from '../errors.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText } from './configuration.js';
-import { validateAgentModels } from './discovery.js';
+import { validateAgentModels, assertModelVariant } from './discovery.js';
 import { AgentError } from './errors.js';
 import { AgentRegistry } from './registry.js';
 
@@ -85,7 +85,7 @@ export class AgentSettingsStore {
       // directory. Every explicit non-null selection, even the same value,
       // still validates catalog membership and the plugin's effort policy.
       const model = !Object.hasOwn(patch, 'model') ? current.public.model
-        : patch.model === null ? null : this.freezeModel(backendId, patch.model!, availableModels);
+        : patch.model === null ? null : this.freezeModel(backendId, patch.model!, availableModels, options);
       const binding = Object.hasOwn(this.bindings, backendId) ? this.bindings[backendId] : undefined;
       binding?.write(options, model, availableModels);
       const next: Persisted = { revision: current.local.revision + 1, enabled: patch.enabled ?? current.public.enabled, schemaVersion: descriptor.configuration.version, options: Object.fromEntries(Object.entries(options).filter(([name]) => !binding?.optionNames.includes(name))), model: binding ? null : model };
@@ -117,14 +117,15 @@ export class AgentSettingsStore {
       if (result.changes !== 1) conflict(); return next;
     });
   }
-  private freezeModel(backendId: string, selected: ModelSelection, availableModels: readonly AgentModelOption[]): ModelSelection {
+  private freezeModel(backendId: string, selected: ModelSelection, availableModels: readonly AgentModelOption[], options: Readonly<Record<string, AgentOptionValue>>): ModelSelection {
     if (!modelShape(selected)) throw new AgentError('model_unavailable');
     const policy = this.registry.get(backendId).descriptor.models;
-    const models = validateAgentModels(availableModels, policy.effort);
+    const models = validateAgentModels(availableModels, policy.effort, !!policy.variantOption);
     const known = models.find(model => model.id === selected.model);
     if (!known && !policy.allowCustom) throw new AgentError('model_unavailable');
     const effort = selected.reasoningEffort ?? known?.defaultReasoningEffort ?? null;
     if ((!policy.effort && effort !== null) || (effort !== null && (!known || !known.reasoningEfforts.includes(effort)))) throw new AgentError('model_unavailable');
+    assertModelVariant(this.registry.get(backendId).descriptor, options, selected.model, models, effort);
     return { model: selected.model, reasoningEffort: effort };
   }
   freeze(selection: AgentSelection | undefined, context: AgentFreezeContext | readonly AgentModelOption[], platform?: AgentPlatform): FrozenAgentSelection {
@@ -142,7 +143,7 @@ export class AgentSettingsStore {
     const selected = selection?.model ?? current.model; if (selected === null) throw new AgentError('model_unavailable');
     const runtimeVersion = preparation.runtimeVersion ?? null;
     if (runtimeVersion !== null && !/^[0-9A-Za-z.+_-]{1,128}$/.test(runtimeVersion)) throw new AgentError('protocol_error');
-    return immutableFrozen({ backendId, apiVersion: plugin.descriptor.apiVersion, schemaVersion: plugin.descriptor.configuration.version, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion, configRevision: current.revision, options, model: this.freezeModel(backendId, selected, preparation.availableModels) });
+    return immutableFrozen({ backendId, apiVersion: plugin.descriptor.apiVersion, schemaVersion: plugin.descriptor.configuration.version, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion, configRevision: current.revision, options, model: this.freezeModel(backendId, selected, preparation.availableModels, options) });
   }
   /** Use only for an independent new submission, in the accepting transaction. */
   assertCurrent(frozen: FrozenAgentSelection, expectedDefaultRevision?: number, platform: AgentPlatform = process.platform as AgentPlatform): void {

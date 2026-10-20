@@ -25,7 +25,7 @@ export function validateAgentDescriptor(value: unknown): asserts value is AgentD
   validateConfigurationSchema(value.configuration);
   const caps = value.capabilities; const models = value.models;
   if (!isPlainRecord(caps) || !exactKeys(caps, ['kinds', 'inputKinds', 'platforms', ...booleanCapabilities]) || !stringList(caps.kinds, kinds, true) || !stringList(caps.inputKinds, inputKinds) || booleanCapabilities.some(key => typeof caps[key] !== 'boolean') || (caps.platforms !== undefined && (!Array.isArray(caps.platforms) || caps.platforms.length === 0 || caps.platforms.length > 3 || !caps.platforms.every(validPlatform) || new Set(caps.platforms).size !== caps.platforms.length))) throw new AgentError('protocol_error');
-  if (!isPlainRecord(models) || !exactKeys(models, ['type', 'allowCustom', 'effort']) || !['dynamic', 'suggested', 'manual'].includes(String(models.type)) || typeof models.allowCustom !== 'boolean' || typeof models.effort !== 'boolean' || (models.type === 'manual' && !models.allowCustom)) throw new AgentError('protocol_error');
+  if (!isPlainRecord(models) || !exactKeys(models, ['type', 'allowCustom', 'effort', 'variantOption']) || !['dynamic', 'suggested', 'manual'].includes(String(models.type)) || typeof models.allowCustom !== 'boolean' || typeof models.effort !== 'boolean' || (models.type === 'manual' && !models.allowCustom) || models.variantOption !== undefined && (typeof models.variantOption !== 'string' || !value.configuration.fields.some(field => field.name === models.variantOption && field.type === 'text'))) throw new AgentError('protocol_error');
 }
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); }
@@ -48,11 +48,17 @@ export function evaluateAgentTask(plugin: AgentPlugin, requirements: AgentTaskRe
 export class AgentRegistry {
   private readonly plugins = new Map<string, AgentPlugin>();
   register(plugin: AgentPlugin): void {
-    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions', 'projectPermissions'])) throw new AgentError('protocol_error');
+    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions', 'projectPermissions', 'modelGroup', 'normalizeSettings'])) throw new AgentError('protocol_error');
     validateAgentDescriptor(plugin.descriptor);
     if (this.plugins.has(plugin.descriptor.id)) throw new AgentError('protocol_error', '执行器 ID 已注册。');
-    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask', 'projectPermissions'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
-    if (plugin.extensions !== undefined && (!isPlainRecord(plugin.extensions as unknown) || !exactKeys(plugin.extensions as unknown as Record<string, unknown>, Object.keys(extensionMethods)))) throw new AgentError('protocol_error');
+    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask', 'projectPermissions', 'modelGroup', 'normalizeSettings'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
+    if (plugin.extensions !== undefined && (!isPlainRecord(plugin.extensions as unknown) || !exactKeys(plugin.extensions as unknown as Record<string, unknown>, [...Object.keys(extensionMethods), 'nativeCatalog', 'restartRecovery', 'runOperations']))) throw new AgentError('protocol_error');
+    const catalog = plugin.extensions?.nativeCatalog;
+    if (catalog !== undefined && (!isPlainRecord(catalog) || !exactKeys(catalog, ['version', 'list']) || catalog.version !== 1 || typeof catalog.list !== 'function')) throw new AgentError('protocol_error');
+    const restart = plugin.extensions?.restartRecovery;
+    if (restart !== undefined && (!isPlainRecord(restart) || !exactKeys(restart, ['version', 'reconcile', 'operation']) || restart.version !== 1 || typeof restart.reconcile !== 'function' || restart.operation !== undefined && typeof restart.operation !== 'function')) throw new AgentError('protocol_error');
+    const operations = plugin.extensions?.runOperations;
+    if (operations !== undefined && (!isPlainRecord(operations) || !exactKeys(operations, ['version', 'execute']) || operations.version !== 1 || typeof operations.execute !== 'function')) throw new AgentError('protocol_error');
     for (const [capability, method] of Object.entries(extensionMethods)) {
       const extension = (plugin.extensions as unknown as Record<string, unknown> | undefined)?.[capability];
       const declared = plugin.descriptor.capabilities[capability as keyof typeof extensionMethods];
@@ -63,6 +69,8 @@ export class AgentRegistry {
     const copy: AgentPlugin = { descriptor: deepFreeze(structuredClone(plugin.descriptor)), createAdapter: plugin.createAdapter.bind(plugin) };
     if (plugin.projectPermissions) copy.projectPermissions = plugin.projectPermissions.bind(plugin);
     if (plugin.listModels) copy.listModels = plugin.listModels.bind(plugin);
+    if (plugin.modelGroup) copy.modelGroup = plugin.modelGroup.bind(plugin);
+    if (plugin.normalizeSettings) copy.normalizeSettings = plugin.normalizeSettings.bind(plugin);
     if (plugin.diagnose) copy.diagnose = plugin.diagnose.bind(plugin);
     if (plugin.evaluateTask) copy.evaluateTask = plugin.evaluateTask.bind(plugin);
     if (plugin.extensions) copy.extensions = deepFreeze(Object.fromEntries(Object.entries(plugin.extensions).map(([key, extension]) => [key, { ...extension }]))) as AgentPlugin['extensions'] & {};
@@ -110,7 +118,7 @@ export class AgentRegistry {
   }
   assertFrozen(frozen: FrozenAgentSelection, requirements: AgentTaskRequirements): void {
     this.validateFrozen(frozen, requirements.platform);
-    const availability = this.evaluate(frozen.backendId, { ...requirements, options: frozen.options });
+    const availability = this.evaluate(frozen.backendId, { ...requirements, options: frozen.options, model: frozen.model });
     if (availability.status !== 'available') throw new AgentError(availability.reason ?? 'runtime_unavailable');
   }
 }

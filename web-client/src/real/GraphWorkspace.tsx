@@ -1,3 +1,4 @@
+import { mergeRunInput } from '../../../packages/protocol/src/run-input';
 import { agentModelKey, agentModelChoices, captureAgentSelection, initialEffort, nativeSkillConflict, nodeAgentModelPreference, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
 import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import type { ModelSelection } from '../../../packages/protocol/src/index';
@@ -8,6 +9,7 @@ import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandalone
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
 import { NodeTitleInput } from '../components/NodeTitleInput';
+import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
 import { MarkdownPreview, MarkdownPreviewProvider } from './MarkdownPreview';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
@@ -72,7 +74,7 @@ import { RealPluginView } from "./plugin-views";
 import {
   assertLayoutEditable,
   assertGeometryEditable,
-  createGroupOperation,
+  groupSelectionOperations,
   defaultNodeSize,
   groupMembersOperation,
   moveWithMembershipOperations,
@@ -81,6 +83,7 @@ import {
   resizeWithMembershipOperations,
   textCopyContent,
   ungroupOperations,
+  ungroupSelectionIds,
 } from "./graph-layout";
 import { GraphHistory } from "./graph-history";
 import { outputPlacement } from "./output-placement";
@@ -321,6 +324,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const markdownLinkRequest = useRef(0);
   const [externalLink, setExternalLink] = useState<string>();
   const [confirmRunNodeId, setConfirmRunNodeId] = useState<string>();
+  const [confirmGroupIds, setConfirmGroupIds] = useState<string[]>();
   const [confirmUndoRunIds, setConfirmUndoRunIds] = useState<string[]>();
   const [stoppingUndoRuns, setStoppingUndoRuns] = useState(false);
   const undoRunDialog = useRef<HTMLElement>(null);
@@ -727,7 +731,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const defaultNodeTitle = (type: string) => type === 'execution' ? t('Execution task') : type === 'group' ? t('Group') : t('New {type}', { type: t(getNodeDefinition(type).title) });
   const toWorkNode = (n: GraphSnapshot["nodes"][number]): WorkNode => {
     const d = state.drafts.find((d) => d.nodeId === n.id);
-    const c = object(d?.content ?? n.content);
+    const c = mergeRunInput(d?.content ?? n.content,state.runInputs[n.id]?.fields);
     return {
       id: n.id,
       nodeId: n.id,
@@ -771,11 +775,11 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if(node?.type!=='image'||isProjectFileReference(node.content)||!props.online){setImagePreview(null);return;}
     let live=true;
     setImagePreview(null);
-    void props.request<{resources:{kind:string;resource?:unknown}[];issues:{reason:string}[]}>(graphPath(g.projectId,g.graphId)+'/input-preview',{nodeId:node.id,excludeFiles:object(object(node.content).imageRoute).type==='api'},'POST').then(value=>{
+    void props.request<{resources:{kind:string;resource?:unknown}[];issues:{reason:string}[]}>(graphPath(g.projectId,g.graphId)+'/input-preview',{nodeId:node.id,excludeFiles:object(editor.nodeContent(node.id).imageRoute).type==='api'},'POST').then(value=>{
       if(live)setImagePreview({nodeId:node.id,hasImage:value.resources.some(item=>item.kind==='image'&&!!item.resource),issues:value.issues.map(item=>item.reason)});
     }).catch(()=>{if(live)setImagePreview({nodeId:node.id,hasImage:false,issues:[t('Failed to read frozen reference images. Refresh the Work Graph.')]});});
     return ()=>{live=false;};
-  },[node?.id,node?.type,node?.contentVersion,g.executionRevision,g.projectId,g.graphId,props.online,props.request]);
+  },[node?.id,node?.type,node?.contentVersion,node ? object(editor.nodeContent(node.id).imageRoute).type : undefined,g.executionRevision,g.projectId,g.graphId,props.online,props.request]);
   const graphRuns = useMemo(
     () => props.runs.filter(r => r.serviceId === g.serviceId && r.projectId === g.projectId && r.graphId === g.graphId),
     [props.runs, g.serviceId, g.projectId, g.graphId],
@@ -850,6 +854,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const legacySize = legacyFileSizes[wire.id];
     return [wire.id, JSON.stringify([
       wire.contentVersion,
+      state.runInputs[wire.id]?.id,
       wire.type === "visualize" ? [referenceId, props.theme, props.online] : null,
       readOnly,
       wire.readOnly,
@@ -862,7 +867,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       runProgress?.error,
       run ? submittedPrompts[run.id] : undefined,
     ])] as const;
-  })), [g.nodes, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
+  })), [g.nodes, state.runInputs, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
   const snapshotRun = node ? latestNodeRuns.get(node.id) : undefined;
   // Submission responses arrive before the next Workspace snapshot. Keep their
   // details visible while the execution editor closes, then follow server state.
@@ -883,9 +888,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     openRunCallback.current?.(visible ? selectedRun : undefined, visible);
   }, [g.serviceId, g.projectId, g.graphId, node?.id, runnableNodeSelected, editorVisible, runNeedsAttention,
     selectedRun?.id, selectedRun?.status, selectedRun?.hasPendingGenerationCandidate, selectionRevision]);
-  const inputChanged = useInputChanges(props.request, selectedRun, props.online, g.executionRevision);
+  const serviceInputChanged = useInputChanges(props.request, selectedRun, props.online, g.executionRevision);
   const draft = state.drafts.find((d) => d.nodeId === node?.id);
-  const content = object(draft?.content ?? node?.content ?? {});
+  const content = node ? editor.nodeContent(node.id) : {};
+  const localPrompt = node ? state.runInputs[node.id]?.fields.prompt : undefined;
+  const submittedInput = selectedRun ? submittedInputs[selectedRun.id] : undefined;
+  const inputChanged = serviceInputChanged || typeof localPrompt === 'string' && !!submittedInput && localPrompt !== submittedInput.prompt;
   const savedRoute=object(content.imageRoute ?? null);
   const savedImageOptions=object(savedRoute.options ?? null);
   const imageOptions:ImageGenerationOptions={
@@ -916,7 +924,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       props.onError(e);
     }
   };
-  const saveImageRoute=(route:ImageRoute)=>node&&act(()=>editor.edit(node.id,{...content,imageRoute:route as unknown as Json}));
+  const saveImageRoute=(route:ImageRoute)=>node&&act(()=>editor.editRunInput(node.id,{...content,imageRoute:route as unknown as Json}));
   const previewModeProps = (wire: GraphSnapshot['nodes'][number]) => {
     const effective = object(state.drafts.find(draft => draft.nodeId === wire.id)?.content ?? wire.content);
     return {
@@ -1160,22 +1168,26 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     }
   };
   const canDelete = (ids: string[]) => { try { guardDelete(ids); return true; } catch { return false; } };
-  const groupSelection = async () => {
-    guardGeometry(selected);
+  const groupSelection = async (ids = selected, confirmed = false) => {
+    guardGeometry(ids);
     const id = randomId();
-    await command([
-      createGroupOperation(editor.getSnapshot().graph, selected, id),
-    ]);
+    const operations = groupSelectionOperations(editor.getSnapshot().graph, ids, id);
+    if (!confirmed && operations.length > 1) {
+      setConfirmGroupIds([...ids]);
+      return;
+    }
+    await command(operations);
     selectNodes([id]);
   };
   const ungroupSelection = async () => {
-    guardGeometry(selected);
     const current = editor.getSnapshot().graph;
+    const ids = ungroupSelectionIds(current, selected);
+    guardGeometry(ids);
     const members = current.nodes
-      .filter((n) => selected.includes(n.id))
+      .filter((n) => ids.includes(n.id))
       .flatMap((n) => n.memberIds ?? []);
-    await command(ungroupOperations(current, selected));
-    setSelected([...new Set(members)]);
+    await command(ungroupOperations(current, ids));
+    setSelected([...new Set([...selected.filter(id => !ids.includes(id)), ...members])]);
   };
   const selectedGroups = g.nodes.filter(
     (n) =>
@@ -1223,13 +1235,15 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   let canGroup = !!selected.length && canGeometry(selected);
   if (canGroup) {
     try {
-      createGroupOperation(g, selected, "validation-only");
+      groupSelectionOperations(g, selected, "validation-only");
     } catch {
       canGroup = false;
     }
   }
-  const ungroupMode = !!selected.length && selectedGroups.length === selected.length;
-  const canUngroup = ungroupMode && canGeometry(selected);
+  const ungroupIds = ungroupSelectionIds(g, selected);
+  const ungroupMembers = new Set(g.nodes.filter(n => ungroupIds.includes(n.id)).flatMap(n => n.memberIds ?? []));
+  const ungroupMode = !!ungroupIds.length && selected.every(id => ungroupIds.includes(id) || ungroupMembers.has(id));
+  const canUngroup = !!ungroupIds.length && canGeometry(ungroupIds);
   let canCopyText = false;
   if (node && node.type !== 'execution' && !locked(node.id)) {
     try {
@@ -1611,13 +1625,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const runDisabled = promptDisabled || running || (node?.type==='image' ? Boolean(imageBlock) || (selectedRoute.type==='codex' && !props.executionAvailable) : !String(content.prompt ?? "").trim() || !agentExecutionAvailable);
   const setAgentDraft = (backendId: string, selectedModel: ModelSelection) => {
     if (!props.agentStore || !node) return;
-    act(() => editor.edit(node.id, { ...content, agentModelOverride: { backendId, model: { ...selectedModel } } }));
+    act(() => editor.editRunInput(node.id, { ...content, agentModelOverride: { backendId, model: { ...selectedModel } } }));
   };
   const selectedAgentModel = explicitAgent?.model ?? pendingAgent?.model;
   const agentModels = agents.resources[pendingAgent?.backendId ?? '']?.models;
   const agentModelControl = node?.type !== 'image' && agents.mode !== 'legacy' && <>
     <select aria-label={t('Run model')} disabled={promptDisabled || agents.mode !== 'agents'} value={agentDraft ? agentModelKey(agentDraft.backendId, agentDraft.model.model) : ''} onChange={event => {
-      if (!event.target.value) { if (node) act(() => editor.edit(node.id, { ...content, agentModelOverride: null })); return; }
+      if (!event.target.value) { if (node) act(() => editor.editRunInput(node.id, { ...content, agentModelOverride: null })); return; }
       const [backendId, modelId] = JSON.parse(event.target.value) as [string, string];
       const selected = agents.resources[backendId]?.models?.find(item => item.id === modelId);
       if (selected || agents.descriptors.find(item => item.id === backendId)?.models.allowCustom) setAgentDraft(backendId, { model: modelId, reasoningEffort: selected ? initialEffort(selected) : null });
@@ -1626,7 +1640,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       {orderedAgents(agents).map(backend => <optgroup key={backend.id} label={backend.name}>{agentModelChoices(agents, backend.id, agentDraft?.backendId === backend.id ? agentDraft.model.model : undefined).map(item => <option key={item.id} value={agentModelKey(backend.id, item.id)} disabled={agents.resources[backend.id]?.settings?.enabled === false || item.unavailable}>{backend.name} · {item.id}{item.manual ? agentText('（手动 ID）', ' (custom ID)') : item.unavailable ? agentText('（不可用）', ' (unavailable)') : item.hidden ? agentText('（隐藏）', ' (hidden)') : ''}</option>)}</optgroup>)}
       {agentDraft && !agentModelChoices(agents, agentDraft.backendId, agentDraft.model.model).some(item => item.id === agentDraft.model.model) && <option value={agentModelKey(agentDraft.backendId, agentDraft.model.model)}>{agentDraft.backendId} · {agentDraft.model.model} ({t('Unavailable')})</option>}
     </select>
-    {legacyModel && pendingAgent?.backendId !== 'codex' && <button type="button" disabled={promptDisabled} onClick={() => act(() => editor.edit(node!.id, { ...content, modelOverride: null }))}>{agentText('清除旧 Codex 模型覆盖', 'Clear legacy Codex model override')}</button>}
+    {legacyModel && pendingAgent?.backendId !== 'codex' && <button type="button" disabled={promptDisabled} onClick={() => act(() => editor.editRunInput(node!.id, { ...content, modelOverride: null }))}>{agentText('清除旧 Codex 模型覆盖', 'Clear legacy Codex model override')}</button>}
   </>;
   const unavailableReason = !props.online ? t('The Workspace is disconnected or synchronizing. Connect and try again.')
     : node?.type==='image' ? imageBlock ?? (selectedRoute.type==='codex' && !props.executionAvailable ? props.executionReason ?? t('Codex execution is unavailable.') : undefined)
@@ -1669,7 +1683,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const reasoningControl = node && node.type !== 'image' && agents.mode !== 'legacy' ? <select aria-label={t('Reasoning effort')} disabled={promptDisabled || !pendingAgent} value={selectedAgentModel?.reasoningEffort ?? ''} onChange={event => { if (pendingAgent && selectedAgentModel) setAgentDraft(pendingAgent.backendId, { ...selectedAgentModel, reasoningEffort: event.target.value || null }); }}><option value="">{locale.startsWith('zh') ? '使用原生默认' : 'Use native default'}</option>{agentModels?.find(item => item.id === selectedAgentModel?.model)?.reasoningEfforts.map(value => <option key={value}>{value}</option>)}</select> : node && (<select aria-label={t('Reasoning effort')} value={effort} disabled={promptDisabled} onChange={e => {
                   const chosenModel = model || models?.selection?.model;
                   if (!chosenModel) return;
-                  setModel(chosenModel); setEffort(e.target.value); act(() => editor.edit(node.id, { ...content, modelOverride: { model: chosenModel, reasoningEffort: e.target.value || null } }));
+                  setModel(chosenModel); setEffort(e.target.value); act(() => editor.editRunInput(node.id, { ...content, modelOverride: { model: chosenModel, reasoningEffort: e.target.value || null } }));
                 }}><option value="">{inheritedReasoningLabel}</option>{reasoningModel?.reasoningEfforts.map(e => <option key={e}>{e}</option>)}{effort && !reasoningModel?.reasoningEfforts.includes(effort) && <option value={effort}>{t('{effort} (currently unavailable)', {effort})}</option>}</select>);
   const chooseImageScale = (scale:(typeof IMAGE_SCALES)[number]) => {
     if(selectedRoute.type==='api' && selectedImageModel && !customImageSizeAllowed){
@@ -1957,6 +1971,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }) : <p className="muted">{t('No recently opened Work Graphs')}</p>}
         </nav>}
       </>}
+      {confirmGroupIds && <ConfirmationDialog
+        title={t('Merge groups')}
+        text={t('The selection contains grouped nodes. Merge groups?')}
+        disabled={readOnly || !canGeometry(confirmGroupIds)}
+        onCancel={() => setConfirmGroupIds(undefined)}
+        onConfirm={() => { const ids = confirmGroupIds; setConfirmGroupIds(undefined); act(() => groupSelection(ids, true)); }}
+      />}
       {confirmRunNodeId && node?.id === confirmRunNodeId && <RunResubmitDialog
         title={String(content.title ?? '')}
         action={node.type === 'execution' ? t('Run') : t('Generate')}
@@ -2086,7 +2107,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         }}
         onKeyDownCapture={(e) => {
           if (primaryModifier(e) && e.key.toLowerCase() === 'v' && e.repeat && clipboardTarget(e.target)) { e.preventDefault(); e.stopPropagation(); return; }
-          if (!primaryModifier(e) || e.key.toLowerCase() !== "g") return;
+          if (!primaryModifier(e) || e.key.toLowerCase() !== "g" || e.altKey || e.nativeEvent.isComposing) return;
           const target = e.target as HTMLElement;
           if (
             !target.closest(".owg-canvas") ||
@@ -2097,7 +2118,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             return;
           e.preventDefault();
           e.stopPropagation();
-          act(e.shiftKey ? ungroupSelection : groupSelection);
+          if (e.repeat) return;
+          const ungroup = e.shiftKey || ungroupMode;
+          if (ungroup ? !canUngroup : !canGroup) return;
+          act(ungroup ? ungroupSelection : groupSelection);
         }}
       >
         <Canvas
@@ -2295,7 +2319,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           renderPanel={panelNode => node && panelNode.id === node.id && editorVisible ? (
             <PromptEditor key={node.id} inputChanged={inputChanged} value={String(content.prompt ?? "")} disabled={promptDisabled} runDisabled={runDisabled}
               references={g.edges.filter(edge => edge.kind === "reference" && edge.targetId === node.id).map(edge => ({ id: edge.sourceId, title: work.nodes.find(n => n.id === edge.sourceId)?.title || "Reference node" }))}
-              onOpenReference={setReferenceId} onClose={dismissNodeEditor} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
+              onOpenReference={setReferenceId} onClose={dismissNodeEditor} onRun={() => act(runNode)} onChange={(value, references) => { if (node) act(() => { guardLayout([node.id]); const current = editor.nodeContent(node.id); editor.editRunInput(node.id, { ...current, prompt: value, ...(node.type === "execution" ? { features: syncBuiltinFeatureMentions(String(current.prompt ?? ""), value, ((Array.isArray(current.features) ? current.features : []) as unknown[]).filter(isVisualizeFeatureSelection)) as unknown as Json } : {}), skillReferences: (references ?? syncSkillReferences(String(current.prompt ?? ""), value, (Array.isArray(current.skillReferences) ? current.skillReferences : []) as unknown as SkillReference[])) as unknown as Json }); }); }}
               mentionEnabled={props.online && props.projectActive}
               onSkillConflictsChange={reasons => setSkillConflictState(current => current?.key === agentDraftKey + ':' + pendingAgent?.backendId && current.owner === props.agentStore && JSON.stringify(current.reasons) === JSON.stringify(reasons) ? current : { key: agentDraftKey + ':' + pendingAgent?.backendId, owner: props.agentStore, reasons })}
               skillBackendId={node.type !== "image" && agents.mode === "agents" ? pendingAgent?.backendId : undefined}
@@ -2306,7 +2330,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               skillEnabled={node.type !== "image" || selectedRoute.type === "codex"}
               skillReferences={(Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[]}
               features={((Array.isArray(content.features) ? content.features : []) as unknown[]).filter(isVisualizeFeatureSelection)}
-              onFeaturesChange={node.type === 'execution' ? features => act(() => { guardLayout([node.id]); const latest = editor.getSnapshot(); const current = object(latest.drafts.find(d => d.nodeId === node.id)?.content ?? latest.graph.nodes.find(n => n.id === node.id)?.content ?? {}); editor.edit(node.id, { ...current, features: features as unknown as Json }); }) : undefined}
+              onFeaturesChange={node.type === 'execution' ? features => act(() => { guardLayout([node.id]); const current = editor.nodeContent(node.id); editor.editRunInput(node.id, { ...current, features: features as unknown as Json }); }) : undefined}
               mentionRequest={props.serviceRequest ?? props.request}
               mentionProjectId={g.projectId}
               onOpenProjectFile={item => item.kind === 'directory' ? props.onOpenProjectDirectory?.(item.relativePath) : setPromptProjectFile({ path:item.relativePath, name:item.name })}
@@ -2328,7 +2352,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 </>}
                 {showModelControls && node.type !== 'image' && agentModelControl}
                 {showModelControls && (node.type==='image' ? selectedRoute.type==='codex' : agents.mode==='legacy') && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
-                  setModel(e.target.value); setEffort(""); act(() => editor.edit(node.id, { ...content, modelOverride: e.target.value ? { model: e.target.value, reasoningEffort: null } : null }));
+                  setModel(e.target.value); setEffort(""); act(() => editor.editRunInput(node.id, { ...content, modelOverride: e.target.value ? { model: e.target.value, reasoningEffort: null } : null }));
                 }}><option value="">{models?.selection?.model ?? t('Workspace default')}</option>{models?.available.map(m => <option key={m.id}>{m.id}</option>)}{model && !models?.available.some(m => m.id === model) && <option value={model}>{t('{model} (currently unavailable)', {model})}</option>}</select>
                 {node.type !== 'image' && reasoningControl}</>}
                 {node.type !== 'image' && agents.mode !== 'legacy' && reasoningControl}

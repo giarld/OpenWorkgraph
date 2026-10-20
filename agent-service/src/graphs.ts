@@ -2,7 +2,7 @@ import { GraphDocumentVersions } from './graph-document-history.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DeleteGraph, Edge, GraphCommand, GraphScope, GraphSnapshot, Json, Node, NodeSignalCause } from '@openworkgraph/protocol';
-import { WORKGRAPH_UPLOAD_MAX_BYTES, TERMINAL_RUN_STATUSES, executionOrder, limitNodeContentTitle, limitNodeTitleOperations } from '@openworkgraph/protocol';
+import { mergeRunInput, parseRunInput, type RunInput, WORKGRAPH_UPLOAD_MAX_BYTES, TERMINAL_RUN_STATUSES, executionOrder, limitNodeContentTitle, limitNodeTitleOperations } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
@@ -311,6 +311,33 @@ export class Graphs {
       if(stored.page&&canonicalJson(previous.page?.resource??null)!==canonicalJson(stored.content.page!.resource as unknown as Json))validateVisualizeProjectAssetAccess(this.db,resourceScope,visualizePageAssetData(stored.page));
       validateVisualizeTransition(visualizeChecked(()=>validateVisualizeNodeContent(previous)),stored.content,stored.page);
     }
+  }
+  /** Validate a narrow input patch without persisting preflight edits. */
+  runInputContent(scope:GraphScope,nodeId:string,input:unknown):Record<string,Json> {
+    let fields:RunInput;
+    try { fields=parseRunInput(input); } catch(error) { throw new ServiceError('INVALID_REQUEST',error instanceof Error?error.message:'Invalid run input'); }
+    this.writable(scope);
+    const node=this.node(scope,nodeId);
+    if(node['read_only'] || !['text','image','execution','visualize'].includes(String(node['type'])))throw new ServiceError('NODE_LOCKED','Run input target is not editable');
+    this.assertNodeEditable(nodeId);
+    const previous=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(nodeId,Number(node['current_version']))!['content'])) as Json;
+    const content=mergeRunInput(previous,fields);
+    boundedContent(content);this.validateContent(node,content);
+    return content;
+  }
+  /** The Run acceptance transaction owns this write and its history checkpoint. */
+  persistRunInput(scope:GraphScope,nodeId:string,input:RunInput):number {
+    if(!this.db.isTransaction)throw Error('Run inputs require the submission transaction');
+    const content=this.runInputContent(scope,nodeId,input),node=this.node(scope,nodeId);
+    const previous=String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(nodeId,Number(node['current_version']))!['content']);
+    if(canonicalJson(JSON.parse(previous) as Json)===canonicalJson(content))return Number(node['current_version']);
+    const version=Number(node['current_version'])+1;
+    this.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,?,?)').run(nodeId,version,canonicalJson(content));
+    this.db.prepare('UPDATE nodes SET current_version=? WHERE id=?').run(version,nodeId);
+    this.retainResources(scope,nodeId,version,content);
+    this.db.prepare('UPDATE graphs SET execution_revision=execution_revision+1 WHERE id=?').run(scope.graphId);
+    this.event(scope);
+    return version;
   }
   private node(scope:GraphScope,id:string):Record<string,unknown>{const row=this.db.prepare('SELECT * FROM nodes WHERE id=? AND graph_id=? AND deleted=0').get(id,scope.graphId);if(!row)throw new ServiceError('NOT_FOUND','节点不存在。');return row;}
   private group(scope:GraphScope,id:string):Record<string,unknown>{

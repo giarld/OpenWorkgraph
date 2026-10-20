@@ -9,10 +9,14 @@ import { createWorkGraphArchive, readWorkGraphFile } from './workgraph-archive';
 import { useI18n } from '../i18n/I18nProvider';
 import './ManagementPanel.css';
 
+export type ManagementPage = 'projects' | 'add' | 'settings';
+
 export interface ManagementPanelProps {
   agentStore?: WorkspaceAgentStore;
   onBack?: () => void;
-  initialPage?: 'projects' | 'add' | 'settings';
+  initialPage?: ManagementPage;
+  page?: ManagementPage;
+  onPageChange?: (page: ManagementPage) => void;
   runtimeAddress?: string;
   onRenameRuntime?: () => void;
   /** Authenticated transport. BLOB means HTTP GET decoded as Blob. */
@@ -89,7 +93,14 @@ function saveFile(blob: Blob, filename: string) {
 export function ManagementPanel(props: ManagementPanelProps) {
   const { t } = useI18n();
   const { projectId, graphId } = props;
-  const [page, setPage] = useState<'projects' | 'add' | 'settings'>(props.initialPage ?? 'projects');
+  const [localPage, setLocalPage] = useState<ManagementPage>(props.initialPage ?? 'projects');
+  const page = props.page ?? localPage;
+  const setPage = (next: ManagementPage) => {
+    setLocalPage(next);
+    props.onPageChange?.(next);
+  };
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { bodyRef.current?.scrollTo(0, 0); }, [page]);
   const [manualOpen, setManualOpen] = useState(false);
   const manualDialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { if (manualOpen) manualDialog.current?.showModal(); else manualDialog.current?.close(); }, [manualOpen]);
@@ -231,6 +242,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
       {props.runtimeAddress && <code>{props.runtimeAddress}</code>}
       <p>{page === 'add' ? t('Choose an existing project or add a directory manually.') : page === 'settings' ? t('Expand settings as needed to manage Workspace capabilities and data.') : t('Manage projects and work content for this Workspace.')}</p>
     </header>
+    <div className="management-panel-body" ref={bodyRef}>
     <div aria-live="polite">{busy && <p role="status">{t('{action}…', { action: busy })}</p>}{notice && <p role="status">{notice}</p>}{failure && !manualOpen && <p role="alert">{failure}</p>}</div>
     {props.readOnly && <p role="status">{t('Read-only: registration, changes, revocation, creation, and import are disabled. Refresh, viewing, and downloads remain available.')}</p>}
     {revoked && <p role="status">{t('The current browser session was revoked. Pair again to use management features.')}</p>}
@@ -453,6 +465,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
       </li>)}</ul>
     </>)}
     </fieldset>
+    </div>
   </div>;
 }
 export default ManagementPanel;

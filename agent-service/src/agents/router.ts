@@ -18,6 +18,7 @@ interface AttachedAgent {
   adapter?: AgentAdapter; bridge?: RuntimeBackend; started: boolean; sideEffects: boolean;
   starting: boolean; startSettled: boolean; work: Set<Promise<unknown>>;
   last?: RuntimeSnapshot; pending: number; callbackBytes: number; callbacks: Promise<void>; callbackError?: AgentError;
+  extensionContext?: import('./contracts.js').AgentExtensionContext;
   secrets: Record<string, string>; secretValues: Set<string>;
   failureVersion: number; reported: Set<string>; released: boolean; disposed: boolean;
   releaseWork?: Promise<void>; disposeWork?: Promise<void>; cleaning?: Promise<void>;
@@ -41,6 +42,7 @@ function agentError(error: unknown, fallback: AgentFailureReason = 'protocol_err
 /** Static host composition. Attachment/control always use the original instance. */
 export class AgentRouter implements SchedulerBackend {
   private readonly attached = new Map<string, AttachedAgent>();
+  private readonly restartWork = new Map<string, Promise<'drained' | 'unknown'>>();
   private readonly options: Required<AgentRouterOptions>;
   constructor(readonly runs: Runs, readonly directories: DataDirectories, private readonly plugin: (id: string) => AgentPlugin, private readonly assertFrozen: (snapshot: InputSnapshot, kind: Run['status'] | string) => void, private readonly legacy: SchedulerBackend, private readonly probe: ProjectProbe, private readonly skills: SkillSessions, options: AgentRouterOptions = {}, private readonly compatibility?: (run: Run, snapshot: InputSnapshot) => AgentExecutionSelection, private readonly visualizePreviews?: VisualizePreviews) {
     this.options = { timeoutMs: options.timeoutMs ?? 30000, abortGraceMs: options.abortGraceMs ?? 1000, pollMs: options.pollMs ?? 25, callbackLimit: options.callbackLimit ?? 256 };
@@ -182,12 +184,13 @@ export class AgentRouter implements SchedulerBackend {
           // launch. Recheck the actual complete input before any native dispatch.
           if (input.model.model !== entry.selection.model.model || input.model.reasoningEffort !== entry.selection.model.reasoningEffort) throw new AgentError('invalid_configuration');
           const resources = input.resources ?? snapshot.resources, projectFiles = input.projectFiles ?? snapshot.projectFiles ?? [];
-          const availability = evaluateAgentTask(plugin, { kind: input.kind, platform: process.platform as AgentPlatform, options: entry.selection.options, inputKinds: [...new Set([...resources.map(resource => resource.kind), ...projectFiles.map(file => file.kind)])], resources, projectFiles, visualize: input.kind === 'execution' && !!input.features?.length });
+          const availability = evaluateAgentTask(plugin, { kind: input.kind, platform: process.platform as AgentPlatform, options: entry.selection.options, model: entry.selection.model, inputKinds: [...new Set([...resources.map(resource => resource.kind), ...projectFiles.map(file => file.kind)])], resources, projectFiles, skills: input.skills ?? [], visualize: input.kind === 'execution' && !!input.features?.length });
           if (availability.status !== 'available') throw new AgentError(availability.reason ?? 'runtime_unavailable');
           // No current registry/settings lookup after attachment: the accepted selection is final.
           const nativeCallbacks = this.callbacks(run.id, entry, callbacks);
           const frozenInput = immutable(structuredClone({ ...input, agent: entry.selection, attemptId: context.epoch }));
           const extensionContext = { runId: run.id, attemptId: context.epoch, signal: entry.controller.signal, context: frozenInput, callbacks: nativeCallbacks };
+          entry.extensionContext = extensionContext;
           for (const prepare of [plugin.extensions?.configuredSkills?.prepare.bind(plugin.extensions.configuredSkills), plugin.extensions?.historyTools?.install.bind(plugin.extensions.historyTools)]) {
             if (prepare) await this.bounded(entry, this.track(entry, () => prepare(extensionContext)), true);
             this.preparing(run.id, entry);
@@ -236,7 +239,8 @@ export class AgentRouter implements SchedulerBackend {
   async cancel(run: Run, context: BackendContext): Promise<'confirmed' | 'unknown'> {
     if (!this.runs.snapshot(run.id).agent && !this.compatibility) return this.legacy.cancel(run, context);
     const entry = this.attached.get(run.id);
-    if (!entry || entry.attemptId !== context.epoch || !this.owned(run.id, entry)) return 'unknown';
+    if (!entry) return await this.recoverOriginal(run, context) === 'drained' ? 'confirmed' : 'unknown';
+    if (entry.attemptId !== context.epoch || !this.owned(run.id, entry)) return 'unknown';
     entry.controller.abort(new AgentError('outcome_unknown'));
     if (entry.starting || entry.work.size && !entry.started) return 'unknown';
     if (!entry.started && !entry.sideEffects) return 'confirmed';
@@ -252,10 +256,46 @@ export class AgentRouter implements SchedulerBackend {
   async reconcile(run: Run, context: BackendContext): Promise<ReconcileResult> {
     if (!this.runs.snapshot(run.id).agent && !this.compatibility) return this.legacy.reconcile ? this.legacy.reconcile(run, context) : 'unknown';
     const entry = this.attached.get(run.id);
-    if (!entry || entry.attemptId !== context.epoch || !this.owned(run.id, entry)) return 'unknown';
+    if (!entry) return await this.recoverOriginal(run, context) === 'drained' ? 'interrupted' : 'unknown';
+    if (entry.attemptId !== context.epoch || !this.owned(run.id, entry)) return 'unknown';
     if (entry.starting || entry.work.size && !entry.started) return 'unknown';
     if (!entry.started && !entry.sideEffects) return 'interrupted';
     return entry.bridge ? entry.bridge.reconcile(run, context) : 'unknown';
+  }
+  private async recoverOriginal(run: Run, context: BackendContext): Promise<'drained' | 'unknown'> {
+    const token = this.runs.runtime(run.id), selection = this.runs.snapshot(run.id).agent;
+    const attemptId = token.details.recoveryAttemptId ?? token.details.previousEpoch;
+    if (!selection || token.epoch !== context.epoch || typeof attemptId !== 'string' || !attemptId) return 'unknown';
+    const previous = this.restartWork.get(run.id); if (previous) return previous;
+    const work = (async () => {
+      try {
+        const extension = this.plugin(selection.backendId).extensions?.restartRecovery;
+        if (!extension) return 'unknown' as const;
+        const result = await extension.reconcile({ runId: run.id, attemptId, serviceRoot: this.directories.root, projectPath: String(token.details.canonicalPath), selection: immutable(structuredClone(selection)), signal: AbortSignal.timeout(this.options.timeoutMs) });
+        return this.runs.runtime(run.id).epoch === context.epoch && result === 'drained' ? 'drained' as const : 'unknown' as const;
+      } catch { return 'unknown' as const; }
+    })();
+    this.restartWork.set(run.id, work);
+    try { return await work; } finally { if (this.restartWork.get(run.id) === work) this.restartWork.delete(run.id); }
+  }
+  async operation(id: string, attemptId: string, request: Json): Promise<Json> {
+    const entry = this.attached.get(id);
+    if (!entry) {
+      const run = this.runs.get(id), token = this.runs.runtime(id), selection = this.runs.snapshot(id).agent;
+      const original = token.details.recoveryAttemptId ?? token.details.previousEpoch;
+      if (token.epoch !== attemptId || !['reconciling', 'cancelling'].includes(run.status) || !selection || typeof original !== 'string') throw new AgentError('outcome_unknown');
+      const extension = this.plugin(selection.backendId).extensions?.restartRecovery;
+      if (!extension?.operation) throw new AgentError('capability_unsupported');
+      const result = await extension.operation({ runId: id, attemptId: original, serviceRoot: this.directories.root, projectPath: String(token.details.canonicalPath), selection: immutable(structuredClone(selection)), signal: AbortSignal.timeout(this.options.timeoutMs) }, structuredClone(request));
+      if (this.runs.runtime(id).epoch !== attemptId || isTerminalRunStatus(this.runs.get(id).status)) throw new AgentError('outcome_unknown');
+      return result;
+    }
+    if (!entry || entry.attemptId !== attemptId || !entry.extensionContext || !entry.startSettled || !this.accepting(id, entry) || entry.controller.signal.aborted || terminal(entry.last)) throw new AgentError('outcome_unknown');
+    const extension = this.plugin(entry.backendId).extensions?.runOperations;
+    if (!extension) throw new AgentError('capability_unsupported');
+    const result = await this.bounded(entry, this.track(entry, () => extension.execute(entry.extensionContext!, structuredClone(request))));
+    if (!this.owned(id, entry) || entry.disposed) throw new AgentError('outcome_unknown');
+    return JSON.parse(redactSkillValues(JSON.stringify(result), entry.secrets)) as Json;
   }
   private async cleanup(id: string, entry: AttachedAgent): Promise<void> {
     if (!this.owned(id, entry) || !isTerminalRunStatus(this.runs.get(id).status) || entry.starting || entry.work.size || entry.pending || entry.callbackError || (entry.started || entry.sideEffects) && !terminal(entry.last)) return;
