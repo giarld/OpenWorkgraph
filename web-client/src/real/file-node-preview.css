@@ -1,0 +1,19 @@
+.ow-file-node-preview { --text: var(--canvas-text); --muted: var(--canvas-muted); --panel: var(--canvas-panel); --stroke: var(--canvas-border); position: relative; isolation: isolate; display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; color: var(--text); }
+.ow-file-node-preview .ow-file-preview-mode { position: absolute; top: 8px; right: 8px; z-index: 2; display: inline-flex; align-items: center; justify-content: center; gap: 0; width: auto; max-width: min(160px, calc(100% - 16px)); min-height: 28px; margin: 0; padding: 4px 7.5px; border: 0; border-radius: 999px; outline: none; box-shadow: none; background: color-mix(in srgb, var(--panel) 70%, transparent); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; transition: background-color 180ms ease; }
+.ow-file-preview-mode::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; pointer-events: none; transition: opacity 180ms ease; }
+.ow-file-preview-mode > svg { opacity: .8; transition: opacity 180ms ease; }
+.ow-file-node-preview .ow-file-preview-mode:is(:hover, :focus-visible, [aria-expanded="true"]) { background-color: transparent; }
+.ow-file-preview-mode:is(:hover, :focus-visible, [aria-expanded="true"])::before, .ow-file-preview-mode:is(:hover, :focus-visible, [aria-expanded="true"]) > span, .ow-file-preview-mode:is(:hover, :focus-visible, [aria-expanded="true"]) > svg { opacity: 1; }
+.ow-file-node-preview .ow-file-preview-mode:focus-visible { outline: none; box-shadow: none; }
+.ow-file-preview-mode > span { min-width: 0; max-width: 0; margin-right: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0; transition: max-width 180ms ease, margin-right 180ms ease, opacity 180ms ease; }
+.ow-file-preview-mode:is(:hover, :focus-visible, [aria-expanded="true"]) > span { max-width: 120px; margin-right: 6px; }
+.ow-file-preview-mode > svg { flex-shrink: 0; pointer-events: none; }
+.ow-file-preview-mode-menu { position: fixed; inset: auto; width: max-content; min-width: 132px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); margin: 0; padding: 4px; overflow: auto; border: 0; border-radius: 12px; outline: none; box-shadow: var(--shadow); color: var(--text); font-size: 12px; }
+.ow-file-preview-mode-menu > button { display: flex; align-items: center; justify-content: space-between; gap: 20px; width: 100%; min-height: 30px; margin: 0; padding: 6px 10px; border: 0; border-radius: 8px; outline: none; box-shadow: none; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ow-file-preview-mode-menu > button:hover, .ow-file-preview-mode-menu > button:focus { background: color-mix(in srgb, var(--text) 10%, transparent); }
+.ow-file-node-preview .ow-file-preview-mode-menu > button:focus-visible { outline: none; box-shadow: none; }
+.ow-file-node-preview > .ow-file-node, .ow-file-node-preview > .ow-preview-node { flex: 1; height: auto; min-height: 0; }
+.ow-file-node-preview > .ow-preview-node .ow-preview-controls { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .ow-file-node-preview .ow-file-preview-mode, .ow-file-preview-mode::before, .ow-file-preview-mode > span, .ow-file-preview-mode > svg { transition: none; }
+}

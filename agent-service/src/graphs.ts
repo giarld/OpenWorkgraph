@@ -1,3 +1,4 @@
+import { isNodeBorderColor } from '@openworkgraph/protocol';
 import { GraphDocumentVersions } from './graph-document-history.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -63,7 +64,7 @@ export class Graphs {
       const name=outputNames.get(String(row['id']));
       // Presentation fallback for immutable legacy versions, including hidden outputs.
       if(row['read_only']&&name&&content&&typeof content==='object'&&!Array.isArray(content)&&(typeof content['title']!=='string'||!content['title'].trim()))content={...content,title:name};
-      return {id:String(row['id']),type:String(row['type']),schemaVersion:Number(row['schema_version']),contentVersion:Number(row['current_version']),content,x:Number(row['x']),y:Number(row['y']),...(row['width']===null?{}:{width:Number(row['width'])}),...(row['height']===null?{}:{height:Number(row['height'])}),...(groups.has(String(row['id']))?{memberIds:members.get(String(row['id']))??[]}:{}),readOnly:Boolean(row['read_only'])};
+      return {id:String(row['id']),type:String(row['type']),schemaVersion:Number(row['schema_version']),contentVersion:Number(row['current_version']),content,x:Number(row['x']),y:Number(row['y']),...(row['width']===null?{}:{width:Number(row['width'])}),...(row['height']===null?{}:{height:Number(row['height'])}),...(row['border_color']==null?{}:{borderColor:String(row['border_color'])}),...(groups.has(String(row['id']))?{memberIds:members.get(String(row['id']))??[]}:{}),readOnly:Boolean(row['read_only'])};
     };
     const nodes=rows.map(asNode);
     const hiddenExecutionOutputs=this.db.prepare('SELECT n.*,v.content,o.execution_node_id FROM execution_outputs o JOIN nodes n ON n.id=o.node_id JOIN nodes owner ON owner.id=o.execution_node_id JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.graph_id=? AND n.deleted=1 AND owner.deleted=0 ORDER BY n.created_at,n.creation_order').all(scope.graphId).map(row=>({executionNodeId:String(row['execution_node_id']),node:asNode(row)}));
@@ -435,6 +436,7 @@ export class Graphs {
     node={...node,content:limitNodeContentTitle(node.content)};
     identifier(node.id);if(typeof node.type!=='string'||!node.type||node.type.length>128||!Number.isSafeInteger(node.schemaVersion)||node.schemaVersion<1||node.contentVersion!==1)throw new ServiceError('INVALID_REQUEST','节点类型或版本无效。');
     if(node.readOnly&&!trusted)throw new ServiceError('INVALID_REQUEST','客户端不能伪造服务只读产出。');position(node.x);position(node.y);boundedContent(node.content);
+    if(node.borderColor!==undefined&&!isNodeBorderColor(node.borderColor))throw new ServiceError('INVALID_REQUEST','Invalid node border color.');
     if(node.width!==undefined)nodeDimension(node.width);if(node.height!==undefined)nodeDimension(node.height);
     if(node.type!=='group'&&node.memberIds!==undefined)throw new ServiceError('INVALID_REQUEST','仅分组可携带 memberIds。');
     if(this.db.prepare('SELECT 1 FROM nodes WHERE id=?').get(node.id))throw new ServiceError('CONFLICT','节点标识已存在。');
@@ -456,7 +458,7 @@ export class Graphs {
     }
     const reason=node.readOnly?'original':!known?'missing_plugin':'none';
     this.db.prepare('INSERT INTO nodes(id,graph_id,type,schema_version,current_version,x,y,read_only,read_only_reason,created_at,creation_order) VALUES(?,?,?,?,1,?,?,?,?,?,(SELECT COALESCE(MAX(creation_order),0)+1 FROM nodes))').run(node.id,scope.graphId,node.type,node.schemaVersion,node.x,node.y,Number(node.readOnly||!known),reason,Date.now());
-    this.db.prepare('UPDATE nodes SET width=?,height=? WHERE id=?').run(node.width??null,node.height??null,node.id);
+    this.db.prepare('UPDATE nodes SET width=?,height=?,border_color=? WHERE id=?').run(node.width??null,node.height??null,node.borderColor??null,node.id);
     this.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,1,?)').run(node.id,canonicalJson(node.content));this.retainResources(scope,node.id,1,node.content);
     if(node.type==='group'){
       const name=(node.content as Record<string,Json>)['title']??'分组';title(name,true);
@@ -520,7 +522,7 @@ export class Graphs {
       const types=new Map<string,string>();
       for(const op of command.operations)if(op.type==='node.create')types.set(op.node.id,op.node.type);
       for(const op of command.operations)if(op.type==='node.delete'&&!types.has(op.nodeId))types.set(op.nodeId,String(this.node(command,op.nodeId)['type']));
-      const layoutOnly=(op:GraphCommand['operations'][number]):boolean=>['layout.move','layout.resize','group.members','group.rename','graph.rename'].includes(op.type)||(op.type==='node.create'&&op.node.type==='group')||(op.type==='node.delete'&&types.get(op.nodeId)==='group');
+      const layoutOnly=(op:GraphCommand['operations'][number]):boolean=>['layout.move','layout.resize','layout.appearance','group.members','group.rename','graph.rename'].includes(op.type)||(op.type==='node.create'&&op.node.type==='group')||(op.type==='node.delete'&&types.get(op.nodeId)==='group');
       const execution=command.operations.some(op=>!layoutOnly(op));
       const layout=command.operations.some(op=>layoutOnly(op)||op.type==='node.create'||op.type==='node.delete'||op.type==='execution.output.restore');
       if((execution&&graph['execution_revision']!==command.expectedExecutionRevision)||(layout&&graph['layout_revision']!==command.expectedLayoutRevision))throw new ServiceError('REVISION_CONFLICT','工作图版本已变化，请读取最新快照。');
@@ -573,6 +575,7 @@ export class Graphs {
         }
         case 'edge.delete':{const edge=this.db.prepare('SELECT * FROM edges WHERE id=? AND graph_id=?').get(op.edgeId,command.graphId);if(!edge)throw new ServiceError('NOT_FOUND','连线不存在。');if(edge['kind']==='delivery'&&!deleting.has(String(edge['target_id'])))throw new ServiceError('INVALID_EDGE','任务到输出产物的连线只能随产物隐藏或删除。');this.assertNodeEditable(String(edge['target_id']));this.db.prepare('DELETE FROM edges WHERE id=?').run(op.edgeId);break;}
         case 'layout.move':this.move(command,op.positions);break;
+        case 'layout.appearance':{if(op.borderColor!==null&&!isNodeBorderColor(op.borderColor))throw new ServiceError('INVALID_REQUEST','Invalid node border color.');this.node(command,op.nodeId);this.db.prepare('UPDATE nodes SET border_color=? WHERE id=?').run(op.borderColor,op.nodeId);break;}
         case 'layout.resize':this.resize(command,op.sizes);break;
         case 'group.members':this.setGroupMembers(command,op.groupId,op.memberIds);break;
         case 'group.rename':title(op.title,true);this.group(command,op.groupId);this.db.prepare('UPDATE graph_groups SET title=? WHERE id=? AND graph_id=? AND run_id IS NULL').run(op.title,op.groupId,command.graphId);break;

@@ -41,7 +41,9 @@ node "<SKILL_DIR>/scripts/owgv.mjs" unpack "<输入目录>/existing.owgv" "<新�
 - 默认使用宿主语义控件与 `visualize-*` 类，CSS 仅补业务布局、图表或媒体。明确要求自定义风格时才另行设计；“美观/现代”不等于自定义风格。兼容浅深主题、键盘与窄节点。
 - 呈现工具本身的操作方式，不重复宿主标题、工作图导航、刷新/展开功能，不附加配置摘要、装饰指标或常驻“已就绪/已保存”标签。
 - 不在 HTML/form/state 内嵌媒体 Base64 或 data URL，使用声明依赖和稳定 marker。资源来自实际文件字节；CDN 是网络依赖，不能承诺离线可用。
-- 页面运行于受限 iframe，不使用 Node.js、文件系统、任意业务 API、WebSocket、Worker、外部 iframe 或本地存储替代宿主持久化。
+- 页面运行于受限 iframe；网络请求（fetch/XHR/WebSocket/EventSource）默认允许，用户可在页面信息中关闭。外部脚本、样式、图片、媒体和字体作为隐含权限默认允许，不提供独立开关。遵守浏览器 CORS 与混合内容限制，处理拒绝和网络失败，不丢失已保存值。下载、剪贴板、全屏等浏览器能力由页面信息中的权限与浏览器共同限制。不得使用 Node.js、文件系统、Worker、外部 iframe 或本地存储替代宿主持久化。
+- 工作图节点内摄像头/麦克风通过 `visualizeMedia.getUserMedia({audio,video})` 宿主通道取得真实 MediaStream，仍保持来源隔离；支持桌面 Chrome/Edge 的预览、静音和停止。须在用户操作时申请且处理浏览器拒绝；页面暂停或权限撤销会结束采集。生成测试页/资产预览没有此通道，先检测 `window.visualizeMedia`；接口和限制见 [page-sdk.md](references/page-sdk.md)。
+- 纯录音使用 `{audio:true,video:false}`；当前宿主媒体客户端内部维护静音播放以驱动接收音频解码，页面可直接将流交给 MediaRecorder/WebAudio。录音与 MP3 编码、停止时收齐最终数据及有声产物验证见 [page-sdk.md 的纯音频录制](references/page-sdk.md#纯音频录制)。不要仅凭计时器或 live 轨道判定录音成功，也不要把零字节直接归因于麦克风故障。
 
 ## 校验与交付
 

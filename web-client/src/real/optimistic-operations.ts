@@ -38,6 +38,11 @@ export function projectOperations(source: GraphSnapshot, operations: GraphOperat
         for (const [id, position] of moves) { const n = node(id); if (n) Object.assign(n, position); }
         break;
       }
+      case 'layout.appearance': {
+        const n = node(op.nodeId);
+        if (n) { if (op.borderColor === null) delete n.borderColor; else n.borderColor = op.borderColor; }
+        break;
+      }
       case 'layout.resize':
         for (const size of op.sizes) {
           const n = node(size.nodeId);

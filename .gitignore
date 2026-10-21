@@ -65,6 +65,7 @@ web_modules/
 # Generated from root documentation by agent-service prepack.
 /agent-service/README.md
 /agent-service/README.en.md
+/agent-service/README.zh-CN.md
 /agent-service/assets/readme/
 
 # Yarn Integrity file

@@ -17,7 +17,8 @@ async function record(path: string): Promise<Record<string, any>> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 65536 || (stat.mode & 0o077) !== 0 || process.getuid && stat.uid !== process.getuid()) throw new AgentError('outcome_unknown');
+    // Windows chmod/stat do not represent POSIX group/other access bits.
+    if (!stat.isFile() || stat.size > 65536 || (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) || (process.getuid && stat.uid !== process.getuid())) throw new AgentError('outcome_unknown');
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await file.readFile()));
   } finally { await file.close(); }
 }

@@ -44,7 +44,7 @@ export class GraphDocumentVersions {
     const graph = this.graphs.scope(scope), id = scope.graphId;
     const document: Document = {
       title: String(graph['title']),
-      nodes: this.db.prepare('SELECT n.id,n.type,n.schema_version,n.x,n.y,n.width,n.height,n.read_only,n.read_only_reason,n.deleted,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.graph_id=? AND (n.deleted=0 OR EXISTS(SELECT 1 FROM execution_outputs o WHERE o.node_id=n.id)) ORDER BY n.creation_order').all(id),
+      nodes: this.db.prepare('SELECT n.id,n.type,n.schema_version,n.x,n.y,n.width,n.height,n.border_color,n.read_only,n.read_only_reason,n.deleted,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.graph_id=? AND (n.deleted=0 OR EXISTS(SELECT 1 FROM execution_outputs o WHERE o.node_id=n.id)) ORDER BY n.creation_order').all(id),
       edges: this.db.prepare('SELECT id,source_id,target_id,kind FROM edges WHERE graph_id=? ORDER BY id').all(id),
       groups: this.db.prepare('SELECT id,run_id,title FROM graph_groups WHERE graph_id=? ORDER BY id').all(id),
       members: this.db.prepare('SELECT m.group_id,m.node_id FROM group_members m JOIN graph_groups g ON g.id=m.group_id WHERE g.graph_id=? ORDER BY m.group_id,m.node_id').all(id),
@@ -253,7 +253,7 @@ export class GraphDocumentVersions {
         version = Number(this.db.prepare('SELECT max(version)+1 AS n FROM node_versions WHERE node_id=?').get(n['id']!)!['n']);
         this.db.prepare('INSERT INTO node_versions(node_id,version,content) VALUES(?,?,?)').run(n['id']!, version, n['content']!);
       }
-      this.db.prepare('UPDATE nodes SET type=?,schema_version=?,current_version=?,x=?,y=?,width=?,height=?,read_only=?,read_only_reason=?,deleted=?,undo_expires_at=NULL WHERE id=?').run(n['type']!, n['schema_version']!, version, n['x']!, n['y']!, n['width']!, n['height']!, n['read_only']!, n['read_only_reason']!, n['deleted']!, n['id']!);
+      this.db.prepare('UPDATE nodes SET type=?,schema_version=?,current_version=?,x=?,y=?,width=?,height=?,border_color=?,read_only=?,read_only_reason=?,deleted=?,undo_expires_at=NULL WHERE id=?').run(n['type']!, n['schema_version']!, version, n['x']!, n['y']!, n['width']!, n['height']!, n['border_color'] ?? null, n['read_only']!, n['read_only_reason']!, n['deleted']!, n['id']!);
       this.graphs.retainResources(scope, String(n['id']), version, JSON.parse(String(n['content'])) as Json);
       if (n['deleted']) this.db.prepare("DELETE FROM canvas_resource_references WHERE owner_kind='node' AND node_id=?").run(n['id']!);
     }

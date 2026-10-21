@@ -58,6 +58,10 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
   let executionScope: Native;
   const auxiliary = new Map<string, Native>();
   const commandFibers = new Map<string, Native>();
+  // Native Shell starts its spawn in a separate fiber. The exact invocation
+  // environment object survives that handoff without injecting markers into
+  // the child's environment or relying on command strings/observation order.
+  const shellInvocations = new WeakMap<object, string>();
   const deniedTool = (name: string) => Permission.evaluate(['write', 'patch'].includes(name) ? 'edit' : name, '*', modeRules).effect === 'deny';
   const trackedSessions = Session.node.mapLayer((layer: Native) => Layer.effect(Session.Service, Effect.gen(function* (): Native {
     const native = yield* Session.Service, scope = yield* Effect.scope;
@@ -98,8 +102,19 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
     const native = yield* Spawner.ChildProcessSpawner, scope = yield* Effect.scope;
     return Spawner.make((command: Native) => Effect.gen(function* (): Native {
       if (!accepting) throw Error('The owning Run is not accepting native processes');
-      const id = 'process:' + randomUUID(); reserve('process', id);
-      const handle = yield* native.spawn(command).pipe(Effect.onError(() => Effect.sync(() => terminal('process', id, 'failed'))));
+      const id = 'process:' + randomUUID();
+      const shellId = command.options?.env && shellInvocations.get(command.options.env);
+      journal.register({ kind: 'process', id, ...(shellId ? { parentId: shellId } : {}) });
+      journal.observe(options.instanceId, 'process', id, 'running');
+      const handle = yield* native.spawn(command).pipe(Effect.onExit((exit: Native) => Effect.sync(() => {
+        if (!Exit.isFailure(exit)) return;
+        const failure = Cause.findErrorOption(exit.cause);
+        const reason = Option.isSome(failure) ? failure.value.reason : undefined;
+        // An OS spawn refusal proves no executable started. Other failures or
+        // interruption can occur after launch and must retain unknown work.
+        const refused = reason?.module === 'ChildProcess' && reason.method === 'spawn' && ['ENOENT', 'EACCES', 'ENOTDIR', 'ENOEXEC'].includes(reason.cause?.code);
+        terminal('process', id, refused ? 'failed' : 'unknown');
+      })));
       journal.bindNative('process', id, String(handle.pid), Number(handle.pid));
       yield* handle.exitCode.pipe(Effect.matchCauseEffect({
         onSuccess: (code: number) => afterProcessExit('process', id, Number(handle.pid), code === 0 ? 'completed' : 'failed', code, command.options?.detached !== false),
@@ -140,6 +155,7 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
         } else if (options.permissionMode !== 'danger-full-access' && !before) throw Error('Unapproved native shell path');
         // Native Shell.create only spawns after this callback succeeds.
         dispatchReady = true;
+        shellInvocations.set(event.env, id);
         if (Option.isSome(invocation)) invocation.value.dispatched = true;
       });
       const info = yield* native.create(input, checkedBefore).pipe(Effect.onExit((exit: Native) => Effect.sync(() => {
@@ -287,7 +303,10 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
         }));
         return { ready: true };
       }
-      if (path === '/api/workgraph/state' && method === 'GET') return { instanceId: options.instanceId, runId: options.runId, attemptId: options.attemptId, accepting, pendingBackground: await inLocation(Effect.gen(function* (): Native { return (yield* (yield* Job.Service).pendingBackground).length; })), actions: journal.list().map(action => ({ ...action, nativeId: journal.nativeId(action.kind, action.id) })) };
+      if (path === '/api/workgraph/state' && method === 'GET') {
+        journal.settleUnboundShells();
+        return { instanceId: options.instanceId, runId: options.runId, attemptId: options.attemptId, accepting, pendingBackground: await inLocation(Effect.gen(function* (): Native { return (yield* (yield* Job.Service).pendingBackground).length; })), actions: journal.list().map(action => ({ ...action, nativeId: journal.nativeId(action.kind, action.id) })) };
+      }
       if (path === '/api/workgraph/cancel' && method === 'POST') {
         accepting = false;
         await inLocation(Effect.gen(function* (): Native {
@@ -504,6 +523,7 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
           }
         }));
         const pending = await inLocation(Effect.gen(function* (): Native { return (yield* (yield* Job.Service).pendingBackground).length; }));
+        journal.settleUnboundShells();
         return { instanceId: options.instanceId, drained: !journal.unresolved && pending === 0 };
       }
       if (path === '/api/workgraph/shutdown' && method === 'POST') {

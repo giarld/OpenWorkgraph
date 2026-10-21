@@ -1,0 +1,49 @@
+.node-info-dialog {
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 20px;
+  overflow: auto;
+  color: var(--text);
+  border: 1px solid var(--stroke);
+  border-radius: 18px;
+  box-shadow: 0 20px 64px #0003;
+}
+.node-info-dialog::backdrop { background: #0005; }
+.node-info-dialog .panel-heading { margin-bottom: 20px; }
+.node-info-details {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 14px 16px;
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.node-info-details dt { color: var(--muted); }
+.node-info-details dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.node-info-id { font-family: ui-monospace, monospace; font-size: 12px; }
+.node-info-colors { margin: 0; padding: 20px 0 4px; border: 0; border-top: 1px solid var(--stroke); min-width: 0; }
+.node-info-colors legend { float: left; width: 100%; padding: 0; margin-bottom: 14px; font-size: 13px; font-weight: 600; }
+.node-info-swatches { clear: both; display: grid; grid-template-columns: repeat(6, 36px); gap: 8px; }
+.node-info-swatch-default { grid-row: span 2; align-self: center; }
+.node-info-swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  padding: 5px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.node-info-swatch > span { width: 100%; height: 100%; box-sizing: border-box; border-radius: 50%; background: var(--swatch-color); }
+.node-info-swatch-default > span { border: 1px solid var(--muted); background: var(--panel); }
+.node-info-swatch-default > span::after { content: ''; display: block; width: 1px; height: 100%; margin: auto; background: var(--muted); transform: rotate(45deg); }
+.node-info-swatch[aria-pressed="true"] { border-color: var(--text); }
+.node-info-swatch:hover:not(:disabled) { background: var(--stroke); }
+.node-info-swatch:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
+.node-info-swatch:disabled { cursor: default; opacity: .6; }

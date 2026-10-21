@@ -253,5 +253,7 @@ CREATE UNIQUE INDEX runs_id_graph ON runs(id,graph_id);
 CREATE INDEX runs_pending_status_sequence ON runs(status,sequence) WHERE status NOT IN ('succeeded','failed','cancelled','interrupted');
 CREATE INDEX runs_node_sequence ON runs(node_id,sequence);
 CREATE INDEX run_runtime_chain_batch ON run_runtime(json_extract(details,'$.chainBatch'),run_id);
+` }, { version: 29, sql: `
+ALTER TABLE nodes ADD COLUMN border_color TEXT;
 ` }];
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;

@@ -1,6 +1,6 @@
 {
   "name": "openworkgraph",
-  "version": "0.5.11",
+  "version": "0.5.13",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -16,7 +16,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "README.md",
-    "README.en.md",
+    "README.zh-CN.md",
     "assets/readme/"
   ],
   "scripts": {

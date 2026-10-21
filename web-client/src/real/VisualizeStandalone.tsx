@@ -110,7 +110,7 @@ export function VisualizeStandalone() {
     {!selection || (graph && !node) ? <p role="alert">{t('The visualization node is unavailable.')}</p> : <>
       {error && <div role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry')}</button></div>}
       {owner && graph && node ? <VisualizeNodePreview owner={owner} nodeId={node.id} contentVersion={node.contentVersion}>
-        <VisualizeNode owner={owner} nodeId={node.id} pageRevision={Number(object(content.page).revision ?? 0)} theme={selection.theme} locale={locale} online={online} readOnly={!projectActive || graph.archived || graph.trashed || node.readOnly} temporary={selection.temporary} expanded standalone onChanged={() => refresh.current().then(() => undefined).catch(reason => setError(messageOf(reason)))} onError={reason => setError(messageOf(reason))} onOpenPrompt={() => setError(t('Generate an interactive page before downloading it.'))}/>
+        <VisualizeNode owner={owner} nodeId={node.id} nodeTitle={title} pageRevision={Number(object(content.page).revision ?? 0)} theme={selection.theme} locale={locale} online={online} readOnly={!projectActive || graph.archived || graph.trashed || node.readOnly} temporary={selection.temporary} expanded standalone onChanged={() => refresh.current().then(() => undefined).catch(reason => setError(messageOf(reason)))} onError={reason => setError(messageOf(reason))} onOpenPrompt={() => setError(t('Generate an interactive page before downloading it.'))}/>
       </VisualizeNodePreview> : !error && <p role="status">{t('Loading interactive page…')}</p>}
     </>}
   </main>;

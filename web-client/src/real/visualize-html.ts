@@ -3,9 +3,12 @@ import type { VisualizeDependency, VisualizeHostContext, VisualizePagePackage } 
 import { installVisualizeActivityController } from './visualize-activity';
 import { isVisualizeProjectPath } from '../../../packages/protocol/src/visualize-assets';
 import defaultStyles from './visualize-default.css?raw';
+import { normalizeVisualizePagePermissions, visualizeBrowserPermissions, visualizeSandbox, type VisualizePagePermissions } from './visualize-permissions';
+import { installVisualizeMediaClient } from './visualize-media-client';
+import { installVisualizePermissionReporter } from './visualize-permission-reporter';
 
-export const VISUALIZE_HTML_SANDBOX = 'allow-scripts';
-export const VISUALIZE_HTML_PERMISSIONS = ['camera', 'microphone', 'geolocation', 'clipboard-read', 'clipboard-write', 'display-capture', 'fullscreen', 'payment', 'usb', 'serial'].map(feature => feature + " 'none'").join('; ');
+export const VISUALIZE_HTML_SANDBOX = visualizeSandbox();
+export const VISUALIZE_HTML_PERMISSIONS = visualizeBrowserPermissions();
 export interface VisualizeStaticResource {
   resourceId: string; resourceVersion: number; media: VisualizeDependency['media'] | 'binary';
   relativePath?: string;
@@ -18,6 +21,10 @@ export interface VisualizeHtmlOptions {
   sdkSource: string; resources?: VisualizeStaticResource[];
   theme?: VisualizeHostContext['theme']; locale?: string; dependencyTimeoutMs?: number;
   expanded?: boolean;
+  permissions?: Partial<VisualizePagePermissions>;
+  /** Only node hosts with a bound, permission-checked device router enable this. */
+  mediaBridge?: boolean;
+  observePermissions?: boolean;
 }
 export function visualizeResourceUrl(resourceId: string, resourceVersion: number): string {
   return 'visualize-resource:' + encodeURIComponent(resourceId) + '@' + resourceVersion;
@@ -86,7 +93,7 @@ export async function prepareVisualizeHtmlDocument(options: VisualizeHtmlOptions
   copy.page.dependencies = dependencies;
   return buildVisualizeHtmlDocument(copy);
 }
-type Asset = { id: string; media: VisualizeDependency['media']; url: string | null; integrity?: string };
+type Asset = { id: string; media: VisualizeDependency['media']; url: string | null; integrity?: string; scriptType?: string };
 type Bootstrap = { html: string; hostOrigin: string; sessionId: string; nodeId: string; assets: Asset[]; urls: Record<string, string>; theme: VisualizeHostContext['theme']; locale: string; timeout: number; expanded: boolean };
 const jsonScript = (value: unknown) => JSON.stringify(value).replaceAll('<', '\\u003c').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
 const escapeAttribute = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
@@ -97,6 +104,7 @@ const escapeAttribute = (value: string) => value.replaceAll('&', '&amp;').replac
  * or self-navigation firewall. This synchronous path cannot cancel remote scripts. */
 export function buildVisualizeHtmlDocument(options: VisualizeHtmlOptions): string {
   const page = validateVisualizePagePackage(options.page);
+  const permissions = normalizeVisualizePagePermissions(options.permissions);
   const fail = (message: string): never => { throw new VisualizeValidationError('INVALID_REQUEST', message); };
   let origin: URL;
   try { origin = new URL(options.hostOrigin); } catch { return fail('Invalid visualize host origin'); }
@@ -137,13 +145,16 @@ export function buildVisualizeHtmlDocument(options: VisualizeHtmlOptions): strin
   const sources = (kind: Asset['media']) => [...new Set([
     // Refreshed inputs can introduce media after the document was created.
     ...(['image', 'video'].includes(kind) ? ['blob:'] : []),
-    ...assets.filter(asset => asset.media === kind && asset.url?.startsWith('https:')).map(asset => new URL(asset.url!).origin + new URL(asset.url!).pathname),
+    'http:', 'https:',
     ...resources.filter(resource => resource.media === kind).map(resource => resource.url.startsWith('blob:') || resource.url.startsWith('visualize-host-asset:') ? 'blob:' : 'data:'),
   ])].join(' ');
-  const csp = ["default-src 'none'", "script-src 'unsafe-inline' " + sources('script'), "style-src 'unsafe-inline' " + sources('style'), 'img-src data: ' + sources('image'), 'media-src data: ' + sources('video'), 'font-src data:', 'connect-src blob:', "worker-src 'none'", "frame-src 'none'", "child-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"].join('; ');
+  const csp = ["default-src 'none'", "script-src 'unsafe-inline' " + sources('script'), "style-src 'unsafe-inline' " + sources('style'), 'img-src data: ' + sources('image'), 'media-src data: ' + sources('video'), 'font-src data: http: https:', 'connect-src blob:' + (permissions.network ? ' http: https: ws: wss:' : ''), "worker-src 'none'", "frame-src 'none'", "child-src 'none'", "object-src 'none'", "form-action 'none'", "base-uri 'none'"].join('; ');
   const config: Bootstrap = { html: page.html, hostOrigin: options.hostOrigin, sessionId: options.sessionId, nodeId: options.nodeId, assets, urls, theme, locale, timeout, expanded: options.expanded === true };
   const sdk = options.sdkSource.replace(/<\/script/gi, '<\\/script');
-  return '<!doctype html><html lang="' + locale + '"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + escapeAttribute(csp) + '"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><style data-visualize-default-styles>' + defaultStyles + '</style></head><body><script>' + sdk + '</script><script>(' + installVisualizeActivityController.toString() + ')(' + jsonScript({ hostOrigin: options.hostOrigin, sessionId: options.sessionId, nodeId: options.nodeId }) + ');(' + bootstrap.toString() + ')(' + jsonScript(config) + ');</script></body></html>';
+  const identity = jsonScript({ hostOrigin: options.hostOrigin, sessionId: options.sessionId, nodeId: options.nodeId });
+  const mediaScript = options.mediaBridge ? '(' + installVisualizeMediaClient.toString() + ')(' + identity + ');' : '';
+  const permissionScript = options.observePermissions ? '(' + installVisualizePermissionReporter.toString() + ')(' + identity + ');' : '';
+  return '<!doctype html><html lang="' + locale + '"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="' + escapeAttribute(csp) + '"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><style data-visualize-default-styles>' + defaultStyles + '</style></head><body><script>' + sdk + '</script><script>' + mediaScript + permissionScript + '(' + installVisualizeActivityController.toString() + ')(' + identity + ');(' + bootstrap.toString() + ')(' + jsonScript(config) + ');</script></body></html>';
 }
 
 /** Self-contained because this function is emitted into srcdoc. */
@@ -261,7 +272,12 @@ function bootstrap(config: Bootstrap): void {
     if (replacement) return replacement;
     if (config.assets.some(asset => asset.media === kind && asset.url === value)) return value;
     if (kind === 'image' && /^data:image\//.test(value) || kind === 'video' && /^data:(?:video|audio)\//.test(value)) return value;
+    if (remoteUrl(value)) return value;
     return null;
+  }
+  function remoteUrl(value: string): boolean {
+    try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }
+    catch { return false; }
   }
   function css(text: string): string {
     return text.replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (_match, _quote, url: string) => {
@@ -288,6 +304,7 @@ function bootstrap(config: Bootstrap): void {
       if (asset.media === 'script' || asset.media === 'style') {
         node.setAttribute('crossorigin', 'anonymous'); if (asset.integrity) node.setAttribute('integrity', asset.integrity);
       }
+      if (asset.media === 'script' && asset.scriptType) node.setAttribute('type', asset.scriptType);
       if (asset.media === 'style') { node.setAttribute('rel', 'stylesheet'); node.setAttribute('href', asset.url!); }
       else node.setAttribute('src', asset.url!);
       if (asset.media === 'video') { node.setAttribute('preload', 'metadata'); node.setAttribute('muted', ''); }
@@ -301,9 +318,10 @@ function bootstrap(config: Bootstrap): void {
     page.visualizeResources = Object.freeze({ ...config.urls });
     for (const asset of config.assets) await load(asset);
     const author = new DOMParser().parseFromString(config.html, 'text/html');
+    const styles = Array.from(author.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')).filter(node => remoteUrl(node.getAttribute('href') ?? ''));
     author.querySelectorAll('iframe,frame,object,embed,base,meta,link').forEach(node => node.remove());
     const scripts: HTMLScriptElement[] = [];
-    author.querySelectorAll('script').forEach(node => { if (!node.hasAttribute('src')) scripts.push(node); node.remove(); });
+    author.querySelectorAll('script').forEach(node => { if (!node.hasAttribute('src') || remoteUrl(node.getAttribute('src') ?? '')) scripts.push(node); node.remove(); });
     author.querySelectorAll('*').forEach(node => {
       for (const attribute of Array.from(node.attributes)) {
         const key = attribute.name.toLowerCase();
@@ -319,7 +337,9 @@ function bootstrap(config: Bootstrap): void {
     });
     for (const child of [...Array.from(author.head.childNodes), ...Array.from(author.body.childNodes)]) document.body.append(document.importNode(child, true));
     document.querySelectorAll('img,video,audio,source').forEach(node => node.addEventListener('error', () => report(node.getAttribute('src') ?? 'media', 'media'), { once: true }));
+    for (const style of styles) await load({ id: style.href, media: 'style', url: style.href, ...(style.integrity ? { integrity: style.integrity } : {}) });
     for (const original of scripts) {
+      if (original.hasAttribute('src')) { await load({ id: original.src, media: 'script', url: original.src, scriptType: original.type, ...(original.integrity ? { integrity: original.integrity } : {}) }); continue; }
       const script = document.createElement('script'); if (original.type) script.type = original.type;
       script.textContent = original.textContent; document.body.append(script);
     }

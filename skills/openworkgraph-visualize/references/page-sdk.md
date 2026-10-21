@@ -53,6 +53,64 @@ else renderInputs(fresh.inputs);
 
 固定资源 marker 为 `visualize-resource:<encodedId>@<version>`，项目输入为 `visualize-project-file:<encodeURIComponent(relativePath)>`。在初次媒体使用前等待 `window.visualizeAssetsReady`，JS 调用 `window.visualizeResolveUrl(marker)`。不要保存宿主绝对路径、鉴权 URL、临时预览链接或 Blob URL。
 
+## 摄像头与麦克风（节点浏览器宿主）
+
+工作图节点、展开查看与独立页面提供 `window.visualizeMedia`，通过宿主采集和浏览器内 WebRTC 向隔离页面提供真实 `MediaStream`；不配置外部信令/STUN/TURN。桌面 Chrome/Edge 为首期验证范围，仍需浏览器授权和 HTTPS/localhost。生成测试页和资产预览未开放媒体通道，须先检测接口。
+
+```js
+// 在用户点击“开始”等明确操作中调用；根据业务仅申请所需种类。
+if (!window.visualizeMedia) throw new Error('请在工作图节点中使用摄像头或麦克风');
+const stream = await window.visualizeMedia.getUserMedia({video: true, audio: true});
+video.muted = true;
+video.playsInline = true;
+video.srcObject = stream;
+await video.play();
+stream.getAudioTracks().forEach(track => { track.enabled = false; }); // 静音
+// 使用完毕：stream.getTracks().forEach(track => track.stop());
+// 或 window.visualizeMedia.stopAll()，同时停止此页面所有采集。
+```
+
+宿主会尽可能兼容 `navigator.mediaDevices.getUserMedia`，专用接口始终优先。支持初始 audio/video 约束、真实音视频预览/分析、`enabled` 静音、`stop()`、轨道/流克隆；最后一个消费者停止才释放对应设备。监听轨道 `ended`：节点离屏/收起、标签页隐藏、刷新/查看切换、权限撤销或连接失败会停止采集，恢复后由用户重新申请。只读/离线不等同于禁止本地设备；摄像头/麦克风开关与浏览器授权继续决定访问。
+
+这不是完整原生设备 API 代理：未开放设备枚举、`getDisplayMedia`，接收轨道的 `applyConstraints()` / `getSettings()` 不代表能调整或获知宿主摄像头硬件。禁止修改 sandbox 或手写宿主消息协议绕过通道。
+
+### 纯音频录制
+
+录音只申请 `{audio:true,video:false}`。当前宿主媒体客户端会在返回流前启动内部静音播放，驱动 Chromium 的 WebRTC 接收音频解码；页面可直接使用 MediaRecorder 或 WebAudio，无须额外创建隐藏播放器，也不会因此外放麦克风声音。旧宿主可能缺少此兼容处理；先更新宿主，不能仅凭接口存在或轨道 live 判断已收到音频样本。
+
+以下为录音的开始/停止辅助函数；在用户操作中调用 `beginRecording()`，将 `stop()` 绑定到用户的停止操作。`showError` 为页面自己的错误呈现函数。
+
+```js
+async function beginRecording() {
+  if (!window.visualizeMedia || !window.MediaRecorder) throw new Error('当前视图不支持麦克风录音');
+  const stream = await window.visualizeMedia.getUserMedia({audio: true, video: false});
+  try {
+    const mime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4']
+      .find(value => MediaRecorder.isTypeSupported(value));
+    const recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+    const chunks = []; let recordingError;
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    recorder.onerror = event => { recordingError = event.error || new Error('录音失败'); showError(recordingError); };
+    const stopped = new Promise(resolve => recorder.addEventListener('stop', () => {
+      stream.getTracks().forEach(track => track.stop()); resolve();
+    }, {once: true}));
+    recorder.start(250);
+    return {recorder, async stop() {
+      if (recorder.state !== 'inactive') recorder.stop();
+      await stopped; // 最后的 dataavailable 先于 stop；此时才能组装完整文件。
+      if (recordingError) throw recordingError;
+      const blob = new Blob(chunks, {type: recorder.mimeType});
+      if (!blob.size) throw new Error('录音未产生音频数据，请重新开始录音');
+      return blob;
+    }};
+  } catch (error) { stream.getTracks().forEach(track => track.stop()); throw error; }
+}
+```
+
+录音错误、轨道结束及页面卸载都须有清理路径；暂停/继续可调用 recorder.pause()/resume()，按需要同步轨道 enabled 静音。不要在正常停止时提前销毁轨道或编码上下文；等最终数据收齐再清理。上例返回浏览器支持的录音格式，不能直接改扩展名当作 MP3；需要 MP3 时，对真实录音字节解码并用已加载的 MP3 编码器编码，再经 `exportAsset` 导出 `audio/mpeg` Blob。保留实际采集、录制、解码或编码错误；零字节本身不能证明权限拒绝或设备故障。
+
+有节点宿主测试条件时，纯音频须独立验证：收到非空分段、最终文件可解码且时长大于零、已知测试音产生非零样本，以及暂停/继续、克隆消费者和停止后设备释放。摄像头预览、计时器变化、live 轨道、协议校验或空控制台均不能代替录音验证。生成测试页没有媒体通道，不能据此声称真实录音通过；没有实际验证时明确说明范围。
+
 ## 信号、后继与执行
 
 `signals.on(name, handler)` 监听自身并返回取消订阅函数，也支持 `on({nodeId:'predecessors',signal:'outputs.changed'},handler)`。`signals.describe()` 返回真实相邻节点 ID 和类型；不要猜 ID。

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ExternalLink, Maximize, RefreshCw, Upload } from "lucide-react";
 import sdkSource from "virtual:visualize-sdk";
 import { bindVisualizeIframe, validateVisualizeLogoSvg, VISUALIZE_DEFAULT_LOGO_SVG, VisualizeValidationError } from "../../../packages/protocol/src/index";
@@ -6,13 +6,16 @@ import { NodeSignals } from './node-signals';
 import type { GraphScope, VisualizeBridgeRequest, VisualizeBridgeResponse, VisualizeHostContext, VisualizeInputSnapshot, VisualizeStoredNode } from "../../../packages/protocol/src/index";
 import { bindVisualizeAssetTransport, loadVisualizePageAssets, updateVisualizePageAssets } from "./visualize-assets";
 import { openVisualizeBridge } from "./visualize-bridge";
-import { prepareVisualizeHtmlDocument, VISUALIZE_HTML_SANDBOX, VISUALIZE_HTML_PERMISSIONS } from "./visualize-html";
+import { prepareVisualizeHtmlDocument } from "./visualize-html";
 import { graphPath, messageOf, errorCode, type Request } from "./contracts";
 import { randomId } from "../adapter/random";
 import { useI18n } from "../i18n/I18nProvider";
 import { coordinateVisualizePresentation, type VisualizePresentationStatus } from './visualize-presentation';
 import { useVisualizeDetail } from './use-visualize-detail';
 import { createBatchedRefresh, GRAPH_REFRESH_BATCH_MS } from './batched-refresh';
+import { VisualizePageInfo } from './VisualizePageInfo';
+import { bindVisualizeMediaHost } from './visualize-media-host';
+import { noteVisualizePermissionUse, parseVisualizePermissionUsage, parseVisualizePermissionsSnapshot, readVisualizePermissionsSnapshot, saveVisualizePermissions, subscribeVisualizePermissions, visualizeBrowserPermissions, visualizePermissionsKey, visualizePermissionUsageKey, visualizeSandbox, type VisualizePagePermission } from './visualize-permissions';
 import "./VisualizeNode.css";
 
 type Bridge = Awaited<ReturnType<typeof openVisualizeBridge>>;
@@ -100,7 +103,7 @@ export class VisualizeSessions {
   }
 }
 
-type VisualizeNodeProps = { owner: VisualizeSessions; nodeId: string; pageRevision?: number; theme?: "light" | "dark"; locale?: string; online: boolean; readOnly: boolean; temporary?: boolean; expanded?: boolean; standalone?: boolean; onDismiss?(): void; onChanged(): void; onAssetsChanged?(): void; onError(error: unknown): void; onOpenPrompt(): void; onImportFile?(file: File): Promise<void>; importDisabled?: boolean; onOpenContent?(): void; onOpenStandalone?(): void; onOpenInputs?(): void; boundInputNames?: string[] };
+type VisualizeNodeProps = { owner: VisualizeSessions; nodeId: string; nodeTitle?: string; pageRevision?: number; theme?: "light" | "dark"; locale?: string; online: boolean; readOnly: boolean; temporary?: boolean; expanded?: boolean; standalone?: boolean; onDismiss?(): void; onChanged(): void; onAssetsChanged?(): void; onError(error: unknown): void; onOpenPrompt(): void; onImportFile?(file: File): Promise<void>; importDisabled?: boolean; onOpenContent?(): void; onOpenStandalone?(): void; onOpenInputs?(): void; boundInputNames?: string[] };
 
 export function VisualizeNode(props: VisualizeNodeProps) {
   const { t } = useI18n();
@@ -122,6 +125,17 @@ export function VisualizeNode(props: VisualizeNodeProps) {
 
 function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean }) {
   const { t } = useI18n();
+  const permissionsKey = visualizePermissionsKey(props.owner.scope, props.nodeId, !!props.temporary);
+  const subscribePermissions = useCallback((listener: () => void) => subscribeVisualizePermissions(permissionsKey, listener), [permissionsKey]);
+  const permissionSnapshot = useSyncExternalStore(subscribePermissions, () => readVisualizePermissionsSnapshot(permissionsKey));
+  const permissions = useMemo(() => parseVisualizePermissionsSnapshot(permissionSnapshot), [permissionSnapshot]);
+  const usageKey = visualizePermissionUsageKey(permissionsKey);
+  const subscribeUsage = useCallback((listener: () => void) => subscribeVisualizePermissions(usageKey, listener), [usageKey]);
+  const usageSnapshot = useSyncExternalStore(subscribeUsage, () => readVisualizePermissionsSnapshot(usageKey));
+  const [loadedPageRevision, setLoadedPageRevision] = useState(0);
+  const currentPageRevision = props.pageRevision ?? loadedPageRevision;
+  const usedPermissions = useMemo(() => parseVisualizePermissionUsage(usageSnapshot, currentPageRevision), [usageSnapshot, currentPageRevision]);
+  const [pageTitle, setPageTitle] = useState('');
   const latest = useRef(props); latest.current = props;
   const iframe = useRef<HTMLIFrameElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -212,6 +226,8 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
   };
   useEffect(() => {
     if (!entered) return;
+    // A revoked policy must also replace a retained offscreen document.
+    setDocument(undefined); setFrameLoaded(false); setPageReady(false);
     if (!visibleRef.current) { setAwaitingViewport(true); finishRefresh(); return; }
     setAwaitingViewport(false);
     if (!props.online && !props.temporary) { setWaitingForConnection(true); finishRefresh(); return; }
@@ -231,6 +247,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         stored = await owner.request<VisualizeStoredNode>(graphPath(owner.scope.projectId, owner.scope.graphId) + "/visualize/" + encodeURIComponent(nodeId));
         if (!stored.page) { setEmpty(true); finishRefresh(); return; }
       }
+      await owner.settle(nodeId).catch(() => undefined);
       const entry = await owner.acquire(nodeId, props.pageRevision ?? stored!.content.page!.revision, view);
       const identity = await entry.bridge; activeEntry.current = entry;
       stored ??= entry.stored ?? await owner.request<VisualizeStoredNode>(graphPath(owner.scope.projectId, owner.scope.graphId) + "/visualize/" + encodeURIComponent(nodeId));
@@ -238,12 +255,20 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       if (!visibleRef.current) { setAwaitingViewport(true); finishRefresh(); return; }
       if (!stored.page || !stored.content.page || !stored.content.form || !stored.content.state) { setEmpty(true); finishRefresh(); return; }
       const page = stored.page;
+      const pageRevision = stored.content.page.revision;
+      setLoadedPageRevision(pageRevision);
+      setPageTitle(stored.content.title ?? '');
       setLogoSvg(validateVisualizeLogoSvg(page.logoSvg) === null ? page.logoSvg! : VISUALIZE_DEFAULT_LOGO_SVG);
       setInputNames(props.boundInputNames ? page.inputNames ?? [] : (page.inputNames ?? []).filter(name => !stored.content.inputBindings.some(binding => binding.name === name)));
       if (!live) return;
       const receivePageStatus = (event: MessageEvent) => {
         const data = event.data;
-        if (!live || event.source !== iframe.current?.contentWindow || event.origin !== 'null' || !data || data.channel !== 'openworkgraph.visualize.page-status' || data.version !== 1 || data.sessionId !== identity.sessionId || data.nodeId !== nodeId) return;
+        if (!live || event.source !== iframe.current?.contentWindow || event.origin !== 'null' || !data || data.version !== 1 || data.sessionId !== identity.sessionId || data.nodeId !== nodeId) return;
+        if (data.channel === 'openworkgraph.visualize.permission-use') {
+          if (typeof data.permission === 'string') noteVisualizePermissionUse(usageKey, pageRevision, data.permission as VisualizePagePermission);
+          return;
+        }
+        if (data.channel !== 'openworkgraph.visualize.page-status') return;
         if (data.status === 'error') { setPageLoadError(true); finishRefresh(); }
         else if (data.status === 'ready') { setPageReady(true); finishRefresh(); }
       };
@@ -323,7 +348,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       if (!live) return;
       if (errors.length) { setPageLoadError(true); setNotice(errors.join('；')); }
       else assetInputDigest = entry?.context?.inputs.digest;
-      const html = await prepareVisualizeHtmlDocument({ page: stored.page, hostOrigin: window.location.origin, ...identity, sdkSource, resources, theme: view.theme, locale: view.locale, expanded: props.expanded });
+      const html = await prepareVisualizeHtmlDocument({ page: stored.page, hostOrigin: window.location.origin, ...identity, sdkSource, resources, theme: view.theme, locale: view.locale, expanded: props.expanded, permissions, mediaBridge: true, observePermissions: true });
       if (!live) return;
       setChanged(entry?.context?.inputsChanged ?? false);
       pushCapabilities.current = () => {
@@ -336,6 +361,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         if (!live || !binding.current) return;
         iframe.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.theme', version: 1, sessionId: identity.sessionId, nodeId, theme: presentation().theme }, '*');
       };
+      let mediaHost: ReturnType<typeof bindVisualizeMediaHost> | undefined;
       attach.current = () => {
         if (!live || !iframe.current) return;
         if (binding.current) { binding.current.dispose(); binding.current = null; owner.close(nodeId); setError(t("The page navigated away. Reload it to reconnect.")); return; }
@@ -354,6 +380,15 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
             deltaY: gesture.deltaY * (gesture.deltaMode === 0 ? renderScale : 1), deltaMode: gesture.deltaMode, ctrlKey: gesture.ctrlKey, metaKey: gesture.metaKey,
           }));
         } });
+        mediaHost = bindVisualizeMediaHost({ window, iframe: iframe.current, ...identity,
+          permissions: () => parseVisualizePermissionsSnapshot(readVisualizePermissionsSnapshot(permissionsKey)),
+          active: () => live && visibleRef.current && latest.current.canRender(),
+          onRequest: constraints => {
+            if (constraints.audio) noteVisualizePermissionUse(usageKey, pageRevision, 'microphone');
+            if (constraints.video) noteVisualizePermissionUse(usageKey, pageRevision, 'camera');
+          },
+        });
+        releaseAssets.push(() => mediaHost?.dispose());
         const source = iframe.current.contentWindow;
         releaseAssets.push(owner.signals.bind(nodeId, identity.sessionId, message => {
           if (live && message.type === 'event' && message.event.signal === 'inputs.invalidated') setChanged(true);
@@ -361,7 +396,10 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
         }, () => live && visibleRef.current && latest.current.canRender() && (latest.current.online || !!latest.current.temporary)));
         pushCapabilities.current(); pushVisibility.current(); pushTheme.current(); setFrameLoaded(true);
       };
-      pushVisibility.current = () => iframe.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.visibility', sessionId: identity.sessionId, nodeId, active: visibleRef.current }, '*');
+      pushVisibility.current = () => {
+        mediaHost?.setActive(visibleRef.current);
+        iframe.current?.contentWindow?.postMessage({ channel: 'openworkgraph.visualize.visibility', sessionId: identity.sessionId, nodeId, active: visibleRef.current }, '*');
+      };
       if (!live) return;
       releaseAssets.push(bindVisualizeAssetTransport(window, () => iframe.current, identity, binaryAssets));
       setDocument(html);
@@ -375,9 +413,9 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
       else setError(message);
     });
     return () => { live = false; for (const release of releaseAssets) release(); binding.current?.dispose(); binding.current = null; attach.current = () => undefined; pushCapabilities.current = () => undefined; pushVisibility.current = () => undefined; pushTheme.current = () => undefined; };
-    // Keep the running document until a page replacement or an explicit reload.
+    // Keep the document until a page/policy replacement or an explicit reload.
     // Theme/locale and ordinary graph snapshots do not recreate its runtime.
-  }, [entered, props.owner, props.nodeId, props.pageRevision, props.temporary, retry]);
+  }, [entered, props.owner, props.nodeId, props.pageRevision, props.temporary, retry, permissions]);
   useEffect(() => {
     let live = true;
     // RealApp applies root CSS tokens in its parent effect. Read them after
@@ -440,6 +478,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
           </span>
         </span>
         {missingInputNames.length > 0 && props.onOpenInputs && <button className="ow-visualize-configure-inputs" type="button" disabled={props.readOnly} onPointerDown={event => event.stopPropagation()} onClick={props.onOpenInputs}>{t("Configure references")}</button>}
+        <VisualizePageInfo title={props.nodeTitle ?? pageTitle} permissions={permissions} usedPermissions={usedPermissions} onChange={value => saveVisualizePermissions(permissionsKey, value)}/>
         {props.onOpenStandalone && <button className="ow-visualize-header-action ow-visualize-view-standalone" type="button" aria-label={t("View in a separate page")} title={t("View in a separate page")} onClick={props.onOpenStandalone}>
           <ExternalLink size={18} strokeWidth={1.75} aria-hidden="true"/>
         </button>}
@@ -450,7 +489,7 @@ function VisualizeNodePage(props: VisualizeNodeProps & { canRender(): boolean })
           <RefreshCw ref={refreshIcon} size={18} strokeWidth={1.75} aria-hidden="true" className={spinning ? "is-spinning" : undefined} style={spinCycles === undefined ? undefined : { animationIterationCount: spinCycles }} onAnimationEnd={stopRefreshAnimation}/>
         </button>
       </div>
-      {error ? <div role="alert">{error}<button type="button" disabled={refreshLocked || (!props.online && !props.temporary)} onClick={reload}>{t("Reload page")}</button></div> : document && (visible || frameLoaded) ? <iframe ref={iframe} title={t("Interactive page")} tabIndex={0} sandbox={VISUALIZE_HTML_SANDBOX} allow={VISUALIZE_HTML_PERMISSIONS} referrerPolicy="no-referrer" srcDoc={document} onLoad={() => attach.current()}/> : <p role="status">{t("Loading interactive page…")}</p>}
+      {error ? <div role="alert">{error}<button type="button" disabled={refreshLocked || (!props.online && !props.temporary)} onClick={reload}>{t("Reload page")}</button></div> : document && (visible || frameLoaded) ? <iframe ref={iframe} title={t("Interactive page")} tabIndex={0} sandbox={visualizeSandbox(permissions)} allow={visualizeBrowserPermissions(permissions)} referrerPolicy="no-referrer" srcDoc={document} onLoad={() => attach.current()}/> : <p role="status">{t("Loading interactive page…")}</p>}
     </>}
   </div>;
 }

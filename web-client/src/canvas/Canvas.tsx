@@ -220,6 +220,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
     <div
       key={node.id}
       data-node-id={node.id}
+      data-node-border-color={node.borderColor}
       data-node-running={props.isNodeRunning?.(node.id) ? "true" : undefined}
       data-node-waiting={props.isNodeWaiting?.(node.id) ? "true" : undefined}
       data-node-awaiting-approval={props.isNodeAwaitingApproval?.(node.id) ? "true" : undefined}
@@ -240,7 +241,8 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         top: node.y,
         width: node.width,
         height: node.height,
-      }}
+        '--owg-node-border-color': node.borderColor,
+      } as CSSProperties}
       aria-label={node.title}
     >
       <div className="owg-node-title" title={node.title}>
@@ -248,14 +250,16 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         {props.renderTitlePrefix?.(node)}
         <span className="owg-node-title-text">{node.title}</span>
       </div>
-      <div data-canvas-scrollable={node.type === 'document' || undefined} className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize'].includes(node.type) ? ' owg-preview-body' : "")}>
-        {['preview', 'visualize'].includes(node.type) ? <>
+      <div data-canvas-scrollable={node.type === 'document' || undefined} className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize', 'file'].includes(node.type) ? ' owg-preview-body' : "")}>
+        {['preview', 'visualize', 'file'].includes(node.type) ? <>
           <div className="owg-preview-content" inert={!props.selectedIds.includes(node.id)}>
             <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />
           </div>
           {!props.selectedIds.includes(node.id) && <div className="owg-preview-selection-shield" data-canvas-draggable aria-hidden="true"/>}
         </> : node.type === "group" ? null : <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />}
       </div>
+      {/* SVG preserves fractional widths; CSS compensates for the outer world transform. */}
+      <svg className="owg-node-border" aria-hidden="true" focusable="false"><rect vectorEffect="non-scaling-stroke"/></svg>
       {acceptsInput(node) && (
         <button
           className="owg-port input"
@@ -1139,7 +1143,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
             e.ctrlKey || e.metaKey || e.altKey || e.shiftKey ||
             target?.closest('input,textarea,select,button:not([data-canvas-shortcut-surface]),a,[contenteditable]:not([contenteditable="false"]),[role="textbox"],dialog,[role="dialog"],[role="alertdialog"]')) return;
           const targetId = target?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
-          const previewTarget = props.graph.nodes.some(node => node.id === targetId && ['preview', 'visualize'].includes(node.type));
+          const previewTarget = props.graph.nodes.some(node => node.id === targetId && ['preview', 'visualize', 'file'].includes(node.type));
           // Read-only preview surfaces reserve Space for node activation,
           // even when their pointer interactions require an interactive wrapper.
           if (e.code === 'Space' && previewTarget) {
@@ -1187,6 +1191,13 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           const hit = document.elementFromPoint(e.clientX, e.clientY);
           const imagePreview = hit?.closest<HTMLButtonElement>(".ow-image-expand[data-canvas-draggable]");
           if (imagePreview) { imagePreview.click(); return; }
+          // File contents retain their expanded preview shortcut, while native
+          // controls and media keep their own double-click interactions.
+          if (hit?.closest('[data-canvas-file-preview]') && !hit.closest('input,textarea,select,button,a,video,audio,[contenteditable]:not([contenteditable="false"])')) {
+            const id = hit.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
+            const file = props.graph.nodes.find(node => node.id === id && node.type === 'file');
+            if (file) { props.onOpenNode?.(file); return; }
+          }
           if (interactive(hit)) return;
           const id =
             hit?.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId;
@@ -1414,6 +1425,8 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           style={{
             // Embedded pages rasterize at least at the display scale. Integer
             // steps avoid repainting their contents on every zoom frame.
+            '--owg-screen-pixel': 1 / viewport.k + 'px',
+            '--owg-inverse-scale': 1 / viewport.k,
             '--owg-visualize-scale': Math.max(1, Math.ceil(viewport.k)),
             transform:
               "translate(" +

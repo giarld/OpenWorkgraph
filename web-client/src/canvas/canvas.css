@@ -637,7 +637,7 @@
 .owg-node.owg-group[data-group-drop-target="true"] > .owg-node-body {
   border-color: #3b82f6;
   background: rgba(59, 130, 246, 0.16);
-  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 0 0 var(--owg-screen-pixel, 1px) rgba(59, 130, 246, 0.3);
 }
 .owg-group > .owg-node-title,
 .owg-group > .owg-resize {
@@ -651,6 +651,9 @@
   background: transparent;
   border: 0;
   border-radius: 0;
+  /* Keep the marker and its hit area at their 100% size, centered on the corner. */
+  transform: scale(var(--owg-inverse-scale, 1));
+  transform-origin: center;
 }
 .owg-resize::after {
   content: "";
@@ -798,52 +801,90 @@
   border-width: 2px;
   box-shadow: none;
 }
+.owg-node { --owg-default-border-color: var(--canvas-border); }
+.owg-node.owg-group { --owg-default-border-color: var(--canvas-muted); }
+.owg-node.selected { --owg-default-border-color: #2f80ff; }
+.owg-node.owg-group[data-group-drop-target="true"] { --owg-default-border-color: #3b82f6; }
+.owg-node > .owg-node-body,
+.owg-node.owg-group[data-group-drop-target="true"] > .owg-node-body {
+  border-color: transparent;
+}
 .owg-node.selected > .owg-node-body {
   outline: 0;
-  border-color: #2f80ff;
-  box-shadow: 0 0 0 1px #2f80ff55;
+  border-color: transparent;
+  box-shadow: 0 0 0 var(--owg-screen-pixel, 1px) #2f80ff55;
 }
+.owg-node[data-node-border-color] > .owg-node-body {
+  border-color: transparent;
+  box-shadow: none;
+}
+.owg-node-border {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  fill: none;
+  stroke: var(--owg-status-border-color, var(--owg-node-border-color, var(--owg-default-border-color)));
+  /* non-scaling-stroke does not cancel the CSS transform on .owg-world. */
+  stroke-width: calc(2 * var(--owg-screen-pixel, 1px));
+}
+.owg-node-border rect {
+  x: var(--owg-screen-pixel, 1px);
+  y: var(--owg-screen-pixel, 1px);
+  width: calc(100% - 2 * var(--owg-screen-pixel, 1px));
+  height: calc(100% - 2 * var(--owg-screen-pixel, 1px));
+  rx: calc(22px - var(--owg-screen-pixel, 1px));
+}
+.owg-group > .owg-node-border rect {
+  rx: max(0px, calc(18px - var(--owg-screen-pixel, 1px)));
+  stroke-dasharray: calc(6 * var(--owg-screen-pixel, 1px)) calc(4 * var(--owg-screen-pixel, 1px));
+}
+.owg-node-running { --owg-status-border-color: #34d399; }
+.owg-node-waiting { --owg-status-border-color: #38bdf8; }
+.owg-node-awaiting-approval { --owg-status-border-color: #f59e0b; }
+.owg-node-failed { --owg-status-border-color: #ef4444; }
 .owg-node.owg-node-running > .owg-node-body {
-  border-color: #34d399;
+  border-color: transparent;
   animation: owg-running-node-breathe 1.8s ease-in-out infinite;
 }
 @keyframes owg-running-node-breathe {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.48), 0 0 9px rgba(34, 197, 94, 0.34); }
-  50% { box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.82), 0 0 22px rgba(34, 197, 94, 0.72); }
+  0%, 100% { box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(52, 211, 153, 0.48), 0 0 calc(9 * var(--owg-screen-pixel, 1px)) rgba(34, 197, 94, 0.34); }
+  50% { box-shadow: 0 0 0 calc(2 * var(--owg-screen-pixel, 1px)) rgba(52, 211, 153, 0.82), 0 0 calc(22 * var(--owg-screen-pixel, 1px)) rgba(34, 197, 94, 0.72); }
 }
 .owg-node.owg-node-waiting > .owg-node-body {
-  border-color: #38bdf8;
+  border-color: transparent;
   animation: owg-waiting-node-breathe 1.8s ease-in-out infinite;
 }
 @keyframes owg-waiting-node-breathe {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.52), 0 0 10px rgba(14, 165, 233, 0.4); }
-  50% { box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.9), 0 0 24px rgba(14, 165, 233, 0.76); }
+  0%, 100% { box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(56, 189, 248, 0.52), 0 0 calc(10 * var(--owg-screen-pixel, 1px)) rgba(14, 165, 233, 0.4); }
+  50% { box-shadow: 0 0 0 calc(2 * var(--owg-screen-pixel, 1px)) rgba(125, 211, 252, 0.9), 0 0 calc(24 * var(--owg-screen-pixel, 1px)) rgba(14, 165, 233, 0.76); }
 }
 .owg-node.owg-node-awaiting-approval > .owg-node-body {
-  border-color: #f59e0b;
+  border-color: transparent;
   animation: owg-awaiting-approval-node-breathe 1.8s ease-in-out infinite;
 }
 @keyframes owg-awaiting-approval-node-breathe {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.48), 0 0 9px rgba(245, 158, 11, 0.34); }
-  50% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.82), 0 0 22px rgba(245, 158, 11, 0.72); }
+  0%, 100% { box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.48), 0 0 calc(9 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.34); }
+  50% { box-shadow: 0 0 0 calc(2 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.82), 0 0 calc(22 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.72); }
 }
 .owg-node.owg-node-failed > .owg-node-body {
-  border-color: #ef4444;
+  border-color: transparent;
   animation: none;
-  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.68), 0 0 14px rgba(239, 68, 68, 0.5);
+  box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(239, 68, 68, 0.68), 0 0 calc(14 * var(--owg-screen-pixel, 1px)) rgba(239, 68, 68, 0.5);
 }
 @media (prefers-reduced-motion: reduce) {
   .owg-node.owg-node-waiting > .owg-node-body {
     animation: none;
-    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.72), 0 0 16px rgba(14, 165, 233, 0.58);
+    box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(56, 189, 248, 0.72), 0 0 calc(16 * var(--owg-screen-pixel, 1px)) rgba(14, 165, 233, 0.58);
   }
   .owg-node.owg-node-running > .owg-node-body {
     animation: none;
-    box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.68), 0 0 14px rgba(34, 197, 94, 0.5);
+    box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(52, 211, 153, 0.68), 0 0 calc(14 * var(--owg-screen-pixel, 1px)) rgba(34, 197, 94, 0.5);
   }
   .owg-node.owg-node-awaiting-approval > .owg-node-body {
     animation: none;
-    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.68), 0 0 14px rgba(245, 158, 11, 0.5);
+    box-shadow: 0 0 0 calc(1 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.68), 0 0 calc(14 * var(--owg-screen-pixel, 1px)) rgba(245, 158, 11, 0.5);
   }
 }
 .owg-zoom-controls {

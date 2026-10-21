@@ -1,3 +1,4 @@
+import { isNodeBorderColor } from '../../../packages/protocol/src/node-appearance';
 import { validSkillReferences, portableSkillContent } from "./project-file-mentions";
 import { randomId } from "../adapter/random";
 import { previewEdgeError } from '../../../packages/protocol/src/preview';
@@ -158,6 +159,7 @@ interface ClipboardNode {
   y: number;
   width?: number;
   height?: number;
+  borderColor?: string;
   memberIds?: string[];
 }
 export interface ClipboardScope {
@@ -288,6 +290,7 @@ export function encodeNodeClipboard(
       y: n.y,
       ...(n.width === undefined ? {} : { width: n.width }),
       ...(n.height === undefined ? {} : { height: n.height }),
+      ...(n.borderColor === undefined ? {} : { borderColor: n.borderColor }),
       ...(n.type === "group"
         ? { memberIds: (n.memberIds ?? []).filter((id) => ids.has(id)) }
         : {}),
@@ -356,6 +359,7 @@ export function parseNodeClipboard(raw: string): Payload {
       "y",
       "width",
       "height",
+      "borderColor",
       "memberIds",
     ]);
     if (typeof n.type !== "string" || n.schemaVersion !== 1)
@@ -377,6 +381,10 @@ export function parseNodeClipboard(raw: string): Payload {
         if (size <= 0) throw Error(translate("Clipboard dimensions must be positive."));
         result[dimension] = size;
       }
+    if (n.borderColor !== undefined) {
+      if (!isNodeBorderColor(n.borderColor)) throw Error(translate('Invalid node border color.'));
+      result.borderColor = n.borderColor;
+    }
     if (n.memberIds !== undefined) {
       if (n.type !== "group" || !Array.isArray(n.memberIds))
         throw Error(translate("Only groups can declare members."));

@@ -1,3 +1,4 @@
+import { isNodeBorderColor } from '@openworkgraph/protocol';
 import { WORKGRAPH_UPLOAD_MAX_BYTES, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES, executionOrder, importedGraphTitle } from '@openworkgraph/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import type { GraphScope, GraphSnapshot, Json, Node, Edge, Scope } from '@openworkgraph/protocol';
@@ -154,10 +155,11 @@ export class GraphTransfer {
     if(!Array.isArray(bundle.graph.nodes)||bundle.graph.nodes.length>this.limits.maxNodes || !Array.isArray(bundle.graph.edges)||bundle.graph.edges.length>this.limits.maxNodes*9 || !Array.isArray(bundle.resources)||bundle.resources.length>this.limits.maxResources || !Array.isArray(bundle.pluginRequirements)||bundle.pluginRequirements.length>this.limits.maxNodes) invalid('Invalid bundle collection limits');
     const nodes=new Map<string,Node>();
     for(const n of bundle.graph.nodes) {
-      if(!record(n)) invalid('Invalid node');keys(n,['id','type','schemaVersion','contentVersion','content','x','y','width','height','memberIds','readOnly']);id(n.id);id(n.type);positive(n.schemaVersion);positive(n.contentVersion);
+      if(!record(n)) invalid('Invalid node');keys(n,['id','type','schemaVersion','contentVersion','content','x','y','width','height','borderColor','memberIds','readOnly']);id(n.id);id(n.type);positive(n.schemaVersion);positive(n.contentVersion);
       if(nodes.has(n.id)||typeof n.readOnly!=='boolean'||!Number.isFinite(n.x)||!Number.isFinite(n.y)||Math.abs(n.x)>1e9||Math.abs(n.y)>1e9) invalid('Invalid or duplicate node');
       checkedJson(n.content,2*1024*1024,32);
       if (core.has(n.type)) n.content = portableSkillContent(n.content);
+      if(n.borderColor!==undefined&&!isNodeBorderColor(n.borderColor))invalid('Invalid node border color');
       if(n.width!==undefined)nodeDimension(n.width);if(n.height!==undefined)nodeDimension(n.height);
       if(n.type!=='group'&&n.memberIds!==undefined)invalid('Only layout groups have members');
       if(n.type==='group'){

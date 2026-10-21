@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { ServiceError } from './errors.js';
 import { atomic } from './persistence/database.js';
 import { Repositories } from './persistence/repositories.js';
+import { interactionReplySummary } from './interaction-summary.js';
 
 export class History {
   readonly repo: Repositories;
@@ -44,6 +45,17 @@ export class History {
   records(id: string): { historyState: 'retained' | 'cleared'; records: { id: number; occurredAt: string; kind: string; payload: Json }[] } {
     const run = this.db.prepare('SELECT history_state FROM runs WHERE id=?').get(id);
     if (!run) throw new ServiceError('NOT_FOUND', 'Run not found');
-    return { historyState: run.history_state as 'retained' | 'cleared', records: this.db.prepare('SELECT * FROM run_process_records WHERE run_id=? ORDER BY id').all(id).map(row => ({ id: Number(row.id), occurredAt: String(row.occurred_at), kind: String(row.kind), payload: JSON.parse(String(row.payload)) as Json })) };
+    // Enrich existing reply events from their stored answer, including runs created before summaries existed.
+    const records = this.db.prepare(`SELECT r.*, i.kind AS interaction_kind, i.payload AS interaction_payload, i.answer AS interaction_answer
+      FROM run_process_records r LEFT JOIN interactions i
+      ON r.kind='interaction.reply' AND i.run_id=r.run_id AND i.id=json_extract(r.payload,'$.interactionId')
+      WHERE r.run_id=? ORDER BY r.id`).all(id).map(row => {
+      let payload = JSON.parse(String(row.payload)) as Json;
+      if (row.interaction_answer !== null && row.interaction_answer !== undefined && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        payload = { ...payload, summary: interactionReplySummary(String(row.interaction_kind), JSON.parse(String(row.interaction_payload)) as Json, JSON.parse(String(row.interaction_answer)) as Json) };
+      }
+      return { id: Number(row.id), occurredAt: String(row.occurred_at), kind: String(row.kind), payload };
+    });
+    return { historyState: run.history_state as 'retained' | 'cleared', records };
   }
 }

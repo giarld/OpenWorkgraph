@@ -50,6 +50,18 @@ const events: Record<string, string> = {
   'scheduler.error': 'A scheduling error occurred. Check the run status.', 'reconcile.error': 'Execution result verification failed. The result is still pending confirmation.',
 };
 
+/** Only explicit public reply summaries belong in the timeline; legacy events keep their label. */
+function replySummary(payload: Json): string | null {
+  const summary = object(object(payload)?.summary);
+  if (!summary || !['question', 'approval'].includes(String(summary.kind)) || typeof summary.text !== 'string') return null;
+  const chars = Array.from(summary.text.replace(/\s+/gu, ' ').trim());
+  const text = chars.length > 160 ? chars.slice(0, 159).join('') + '…' : chars.join('');
+  if (summary.kind === 'question') return text ? translate('Answered: {summary}', { summary: text }) : translate('Question answered');
+  if (summary.decision === 'accept') return text ? translate('Approved: {summary}', { summary: text }) : translate('Operation approved');
+  if (summary.decision === 'decline') return text ? translate('Declined: {summary}', { summary: text }) : translate('Operation declined');
+  return text ? translate('Approval answered: {summary}', { summary: text }) : translate('Approval answered');
+}
+
 /** Feed the selected service/Run's GET /v1/runs/:id/history response to RunSummary.
  * Refresh while active: backend.progress is durable history, not a run.changed SSE event.
  * Missing/cleared history stays empty; never serialize arbitrary payloads as summaries. */
@@ -82,7 +94,7 @@ function parseProgressEntries(history: RunProgressHistory | null | undefined, ma
       if (result.length > maxEntries) { result.shift(); omitted = true; }
     };
     const pushState = (label: string | undefined) => { if (label && label !== lastState) { push('state', label); lastState = label; } };
-    if (Object.hasOwn(events, record.kind)) { push('event', translate(events[record.kind]!)); continue; }
+    if (Object.hasOwn(events, record.kind)) { push('event', record.kind === 'interaction.reply' ? replySummary(record.payload) ?? translate(events[record.kind]!) : translate(events[record.kind]!)); continue; }
     if (record.kind === 'state') {
       const payload = object(record.payload);
       const to = payload?.to;

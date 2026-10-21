@@ -285,12 +285,12 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
   </section>;
 }
 
-/** Confirmed approvals no longer need a history entry in progress. */
+/** Answered requests are summarized by their ordered history event instead of a separate card. */
 export function visibleRunInteractions(interactions: Interaction[]): Interaction[] {
-  return interactions.filter(item => item.kind !== 'approval' || item.status !== 'answered');
+  return interactions.filter(item => item.status !== 'answered');
 }
 
-/** Keep active requests actionable and question history inspectable in progress. */
+/** Keep active requests actionable and unhandled/expired requests inspectable in progress. */
 export function RunInteractionRecords({ interactions, active, disabled, onReply, onError, submittedId }: {
   interactions: Interaction[]; active: Interaction | null; disabled: boolean;
   onReply: (answer: Json) => void; onError: (error: unknown) => void; submittedId?: string;

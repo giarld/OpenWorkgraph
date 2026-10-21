@@ -14,7 +14,7 @@ for (const cwd of [join(root, '..', 'packages', 'protocol'), root]) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 // Keep published documentation identical to the repository's maintained copies.
-for (const name of ['README.md', 'README.en.md']) {
+for (const name of ['README.md', 'README.zh-CN.md']) {
   await copyFile(join(root, '..', name), join(root, name));
 }
 const readmeAssets = join(root, 'assets', 'readme');

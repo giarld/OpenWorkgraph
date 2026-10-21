@@ -127,13 +127,13 @@
   font-size: 14px;
   margin: 24px 0 12px;
 }
-.real-app :where(label:not(.owg-canvas label):not(.run-preserve-outputs)) {
+.real-app :where(label:not(.owg-canvas label):not(.ow-visualize-page-info label):not(.run-preserve-outputs)) {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin: 10px 0;
 }
-.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.management-checkbox input):not(.management-panel input[type=checkbox]):not(.agent-settings input[type=checkbox]):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
+.real-app :where(input, select, textarea):not(.library-card-check):not(.owg-canvas input):not(.owg-canvas select):not(.owg-canvas textarea):not(.ow-visualize-page-info input):not(.management-checkbox input):not(.management-panel input[type=checkbox]):not(.agent-settings input[type=checkbox]):not(.ow-resources-panel input):not(.run-preserve-outputs input) {
   min-width: 0;
   width: 100%;
 }
@@ -470,6 +470,8 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-workspace .graph-recent-menu,
 .real-workspace .workgraph-save-menu,
 .real-workspace .workspace-status-hints > .panel,
+.real-workspace .ow-file-preview-mode::before,
+.real-workspace .ow-file-preview-mode-menu,
 .real-workspace .owg-zoom-controls {
   background-color: color-mix(in srgb, var(--panel) 72%, transparent);
   /* A faint, static texture breaks up visible steps in the blurred grid. */

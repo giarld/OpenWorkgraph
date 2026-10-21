@@ -40,6 +40,7 @@ export interface WorkNode extends Scope {
   y: number;
   width: number;
   height: number;
+  borderColor?: string;
   content: string;
   prompt: string;
   summary: string;

@@ -62,7 +62,7 @@ function InlineFilePreview({name,text,mime,preferredMode,onModeChange}: {name:st
 }
 
 export function ProjectFilePreview({request,projectId,relativePath,name,mime,download=false,preferredMode,onModeChange,onError,missingMessage,showName=true}: {request:Request;projectId:string;relativePath:string;name:string;mime:string;download?:boolean;preferredMode?:PreviewMode;onModeChange?:(mode:PreviewMode)=>void;onError?: (e: unknown) => void;missingMessage?:string;showName?:boolean}) {
-  if (mime.startsWith('image/')) return <CanvasProjectFilePreview request={request} projectId={projectId} relativePath={relativePath} mime={mime} name={name} imageNode onError={onError ?? (() => undefined)} missingMessage={missingMessage}/>;
+  if (mime.startsWith('image/') && preferredMode !== 'hex' && preferredMode !== 'text') return <CanvasProjectFilePreview request={request} projectId={projectId} relativePath={relativePath} mime={mime} name={name} imageNode onError={onError ?? (() => undefined)} missingMessage={missingMessage}/>;
   return <MarkdownPreviewProvider sourcePath={relativePath}><ProjectFileTextPreview request={request} projectId={projectId} relativePath={relativePath} name={name} mime={mime} download={download} preferredMode={preferredMode} onModeChange={onModeChange} missingMessage={missingMessage} showName={showName}/></MarkdownPreviewProvider>;
 }
 
@@ -88,6 +88,7 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
   const {t} = useI18n();
   const [state,setState] = useState<{blob?:Blob;stream?:{path:string;bytes:number};status?:'missing'|'unavailable'|'too-large';error?:string}>();
   const [retry,setRetry] = useState(0);
+  const streamVideo = previewFormat(name,mime) === 'video' && preferredMode !== 'hex' && preferredMode !== 'text';
   useEffect(() => {
     let active=true; setState(undefined);
     const base='/v1/projects/'+encodeURIComponent(projectId)+'/files';
@@ -98,7 +99,7 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
       const video = previewFormat(name,mime) === 'video';
       if (typeof observation.bytes === 'number' && observation.bytes > PROJECT_FILE_PREVIEW_MAX_BYTES && !video) { setState({status:'too-large'}); return; }
       const contentPath=base+'/content?'+query;
-      if (video && typeof observation.bytes === 'number' && await videoLoadMode(request,contentPath,observation.bytes)==='stream') {
+      if (streamVideo && typeof observation.bytes === 'number' && await videoLoadMode(request,contentPath,observation.bytes)==='stream') {
         if(active)setState({stream:{path:contentPath,bytes:observation.bytes}});
         return;
       }
@@ -107,7 +108,7 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
       if(active)setState({blob:new Blob([bytes],{type:mime||'application/octet-stream'})});
     }).catch(error=>{if(active)setState({status:'unavailable',error:error instanceof Error?error.message:String(error)});});
     return()=>{active=false;};
-  },[request,projectId,relativePath,mime,retry]);
+  },[request,projectId,relativePath,mime,retry,streamVideo]);
   return <div className="ow-preview-node" data-canvas-interactive>
     {!state&&<p role="status">{t('Reading project file…')}</p>}
     {state?.status==='missing'&&<p role="status">{missingMessage ?? t('The project file no longer exists. The reference is preserved.')} <button onClick={()=>setRetry(value=>value+1)}>{t('Check again')}</button></p>}
@@ -120,15 +121,15 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
 }
 
 /** Resource-scoped entry point shared by node previews and file dialogs. */
-export function ResourceFilePreview({request,projectId,graphId,resourceId,version,name,mime,showName=true}: {request:Request;projectId:string;graphId:string;resourceId:string;version:number;name:string;mime:string;showName?:boolean}) {
+export function ResourceFilePreview({request,projectId,graphId,resourceId,version,name,mime,showName=true,download=true,preferredMode,onModeChange,onError}: {request:Request;projectId:string;graphId:string;resourceId:string;version:number;name:string;mime:string;showName?:boolean;download?:boolean;preferredMode?:PreviewMode;onModeChange?:(mode:PreviewMode)=>void;onError?:(error:unknown)=>void}) {
   const path = graphPath(projectId,graphId) + '/resources/' + encodeURIComponent(resourceId) + '/versions/' + version;
-  return <VersionedFilePreview request={request} path={path} name={name} mime={mime} showName={showName}/>;
+  return <VersionedFilePreview request={request} path={path} name={name} mime={mime} showName={showName} download={download} preferredMode={preferredMode} onModeChange={onModeChange} onError={onError}/>;
 }
 
 /** Asset and Work Graph dialogs resolve formats through the same registry. */
-export function VersionedFilePreview({request,path,name,mime,showName=false,onError}: {request:Request;path:string;name:string;mime:string;showName?:boolean;onError?:(error:unknown)=>void}) {
+export function VersionedFilePreview({request,path,name,mime,showName=false,onError,download=true,preferredMode,onModeChange}: {request:Request;path:string;name:string;mime:string;showName?:boolean;onError?:(error:unknown)=>void;download?:boolean;preferredMode?:PreviewMode;onModeChange?:(mode:PreviewMode)=>void}) {
   const registryVersion = useSyncExternalStore(subscribePreviewRegistry, getPreviewRegistryVersion, getPreviewRegistryVersion);
-  return <PreviewBoundary resetKey={path + ':' + registryVersion}><FilePreview key={path} request={request} path={path} name={name} mime={mime} download showName={showName} onError={onError}/></PreviewBoundary>;
+  return <PreviewBoundary resetKey={path + ':' + registryVersion}><FilePreview key={path} request={request} path={path} name={name} mime={mime} download={download} showName={showName} onError={onError} preferredMode={preferredMode} onModeChange={onModeChange}/></PreviewBoundary>;
 }
 
 function FileDownload({blob,name,mime,children}: {blob:Blob;name:string;mime?:string;children?:ReactNode}) {
@@ -149,12 +150,13 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
   const {t} = useI18n();
   const [state, setState] = useState<{ blob?: Blob; stream?:{path:string;bytes:number}; error?: string }>();
   const [retry, setRetry] = useState(0);
+  const streamVideo = previewFormat(name,mime) === 'video' && preferredMode !== 'hex' && preferredMode !== 'text';
   const errors = useRef(onError); errors.current = onError;
   useEffect(() => {
     let active = true;
     setState(undefined);
     void (async () => {
-      if (previewFormat(name,mime)==='video') {
+      if (streamVideo) {
         const metadata=await request<{bytes:number}>(path);
         if (await videoLoadMode(request,path+'/content',metadata.bytes)==='stream') {
           if(active)setState({stream:{path:path+'/content',bytes:metadata.bytes}});
@@ -165,7 +167,7 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
       if (active) setState({ blob });
     })().catch(e => { if (active) { setState({ error: e instanceof Error ? e.message : String(e) }); errors.current?.(e); } });
     return () => { active = false; };
-  }, [request, path, retry]);
+  }, [request, path, retry, streamVideo]);
   return <div className="ow-preview-node" data-canvas-interactive>
     {!state && <p role="status">{t('Reading predecessor resource…')}</p>}
     {state?.error && <p role="status">{t('Preview failed: {error}', {error:state.error})} <button onClick={() => setRetry(n => n + 1)}>{t('Retry preview')}</button></p>}
@@ -217,7 +219,7 @@ function FileContent({ blob, name, mime, preferredMode, onModeChange, showName=t
 function FilePresentation({blob,name,mime,renderer,preferredMode,onModeChange,showName}: {blob:Blob;name:string;mime:string;renderer:PreviewRendererDefinition;preferredMode?:PreviewMode;onModeChange?:(mode:PreviewMode)=>void;showName:boolean}) {
   const {t} = useI18n();
   const [openedBlob,setOpenedBlob] = useState<Blob>();
-  if (renderer.initialView === 'metadata' && openedBlob !== blob) return <div className="ow-preview-file-summary">
+  if (renderer.initialView === 'metadata' && openedBlob !== blob && !(preferredMode && renderer.modes.includes(preferredMode))) return <div className="ow-preview-file-summary">
     <FileIcon size={32} aria-hidden="true"/>
     <div className="ow-file-metadata">{showName && <strong title={name}>{name}</strong>}<span className="ow-file-size">{formatFileSize(blob.size)}</span></div>
     <button type="button" onClick={() => setOpenedBlob(blob)}>{t('View content')}</button>

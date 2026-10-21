@@ -1,3 +1,4 @@
+import { isNodeBorderColor } from '../../../packages/protocol/src/node-appearance';
 import { portableSkillContent } from "./project-file-mentions";
 import { documentSnapshot, recordDocumentVersion, recordVisualizeInteraction, travelDocumentVersion, nextVisualizeVersions, type VersionedDocument } from './document-versions';
 import { jsonByteLength, WORKGRAPH_TRANSFER_TOTAL_BYTES, WORKGRAPH_BUNDLE_MAX_BYTES } from '../../../packages/protocol/src/index';
@@ -176,7 +177,7 @@ export function sameVisualizeGenerationInputs(a: GraphSnapshot, b: GraphSnapshot
   const snapshot = (graph: GraphSnapshot) => ({
     serviceId: graph.serviceId, projectId: graph.projectId, graphId: graph.graphId, archived: graph.archived, trashed: graph.trashed,
     edges: graph.edges,
-    nodes: graph.nodes.map(({ x, y, width, height, contentVersion, ...node }) => node.id !== nodeId
+    nodes: graph.nodes.map(({ x, y, width, height, borderColor, contentVersion, ...node }) => node.id !== nodeId
       ? { ...node, contentVersion }
       : { ...node, content: Object.fromEntries(Object.entries(validateVisualizeNodeContent(node.content)).filter(([key]) => !['form', 'state'].includes(key))) }),
   });
@@ -206,13 +207,14 @@ export function applyTemporaryOperations(source: GraphSnapshot, operations: Grap
     return value;
   };
   for (const op of operations) {
-    const layoutOnly = ['layout.move', 'layout.resize', 'group.members', 'group.rename', 'graph.rename'].includes(op.type)
+    const layoutOnly = ['layout.move', 'layout.resize', 'layout.appearance', 'group.members', 'group.rename', 'graph.rename'].includes(op.type)
       || (op.type === 'node.create' && op.node.type === 'group')
       || (op.type === 'node.delete' && node(op.nodeId).type === 'group');
     execution ||= !layoutOnly;
     layout ||= layoutOnly || op.type === 'node.create' || op.type === 'node.delete';
     switch (op.type) {
       case 'node.create':
+        if (op.node.borderColor !== undefined && !isNodeBorderColor(op.node.borderColor)) throw Error(translate('Invalid node border color.'));
         if (graph.nodes.some(n => n.id === op.node.id)) throw Error(translate("Node already exists"));
         if (op.node.type === 'visualize') {
           if (op.node.schemaVersion !== 1) throw Error(translate('Unsupported visualization node schema version.'));
@@ -258,6 +260,12 @@ export function applyTemporaryOperations(source: GraphSnapshot, operations: Grap
           }
         }
         for (const [id, position] of moves) Object.assign(node(id), position);
+        break;
+      }
+      case 'layout.appearance': {
+        if (op.borderColor !== null && !isNodeBorderColor(op.borderColor)) throw Error(translate('Invalid node border color.'));
+        const n = node(op.nodeId);
+        if (n) { if (op.borderColor === null) delete n.borderColor; else n.borderColor = op.borderColor; }
         break;
       }
       case 'layout.resize':
@@ -381,6 +389,7 @@ export class TemporaryCanvasStore {
         !Number.isInteger(n.schemaVersion) || n.schemaVersion < 1 || !Number.isInteger(n.contentVersion) || n.contentVersion < 1 ||
         !Number.isFinite(n.x) || !Number.isFinite(n.y) || typeof n.readOnly !== 'boolean' || n.content === undefined ||
         [n.width, n.height].some(v => v !== undefined && (!Number.isFinite(v) || v <= 0))) throw Error(translate("A Work Graph node is invalid or duplicated."));
+      if (n.borderColor !== undefined && !isNodeBorderColor(n.borderColor)) throw Error(translate('Invalid node border color.'));
       ids.set(n.id, randomId());
     }
     const members = new Set<string>();

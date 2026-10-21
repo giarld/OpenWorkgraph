@@ -10,7 +10,7 @@ export * from './agents.js';
 export * from './agent-forms.js';
 export * from './approval-permissions.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.5.11' as const;
+export const SERVICE_VERSION = '0.5.13' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -49,7 +49,8 @@ export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 export interface ExecutionSettings { revision: number; sandboxMode: SandboxMode }
 export interface ModelOption { id: string; reasoningEfforts: string[]; defaultReasoningEffort?: string | null }
 export interface ModelDefaults { revision: number; selection: ModelSelection | null; available: ModelOption[] }
-export interface Node { id: string; type: string; schemaVersion: number; contentVersion: number; content: Json; x: number; y: number; width?: number; height?: number; memberIds?: string[]; readOnly: boolean }
+export { NODE_BORDER_COLORS, isNodeBorderColor } from './node-appearance.js';
+export interface Node { id: string; type: string; schemaVersion: number; contentVersion: number; content: Json; x: number; y: number; width?: number; height?: number; borderColor?: string; memberIds?: string[]; readOnly: boolean }
 export interface ProjectFileSource { kind: 'project-file'; serviceId: string; projectId: string; relativePath: string }
 export interface EmptyProjectFileSource { kind: 'project-file-empty'; relativePath: string }
 export interface ProjectFileObservation { state: 'available' | 'missing' | 'unavailable'; name: string; mime: string | null; bytes: number | null; changeToken: string | null }
@@ -69,6 +70,7 @@ export type GraphOperation =
   | { type: 'node.project-file.associate'; nodeId: string; expectedContentVersion: number; nodeType: 'text' | 'image' | 'file'; content: Json }
   | { type: 'node.delete'; nodeId: string; retainResourcesForUndo?: boolean } | { type: 'edge.create'; edge: Edge } | { type: 'edge.delete'; edgeId: string }
   | { type: 'layout.move'; positions: { nodeId: string; x: number; y: number }[] }
+  | { type: 'layout.appearance'; nodeId: string; borderColor: string | null }
   | { type: 'layout.resize'; sizes: { nodeId: string; width: number | null; height: number | null; x?: number; y?: number }[] }
   | { type: 'group.members'; groupId: string; memberIds: string[] }
   | { type: 'group.rename'; groupId: string; title: string }

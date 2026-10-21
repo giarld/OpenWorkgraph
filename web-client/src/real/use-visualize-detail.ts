@@ -1,36 +1,23 @@
 import { useLayoutEffect, useState, type RefObject } from 'react';
 
-/** Measure the outer node, before the iframe's rendering-density compensation. */
+/** Only Work Graph zoom controls detail level, independently of node or window size. */
 export function useVisualizeDetail(box: RefObject<HTMLDivElement | null>, expanded: boolean) {
   const [compact, setCompact] = useState(false);
   useLayoutEffect(() => {
-    const node = box.current?.closest<HTMLElement>('[data-node-id]');
-    const world = node?.closest<HTMLElement>('.owg-world');
-    if (expanded || !node || !world) { setCompact(false); return; }
-    let small = false, frame = 0;
-    const measure = () => {
-      frame = 0;
-      const bounds = node.getBoundingClientRect();
-      const ratio = Math.min(bounds.width / window.innerWidth, bounds.height / window.innerHeight);
-      const next = ratio < (small ? 0.09 : 0.075);
-      if (next !== small) { small = next; setCompact(next); }
-    };
-    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
-    const resize = new ResizeObserver(schedule);
-    resize.observe(node);
-    // Panning does not change detail level; avoid node geometry reads on pan frames.
-    let scale = world.style.transform.match(/scale\(([^)]+)\)/)?.[1];
+    const world = box.current?.closest<HTMLElement>('.owg-world');
+    if (expanded || !world) { setCompact(false); return; }
+    const readScale = () => Number(world.style.transform.match(/scale\(([^)]+)\)/)?.[1] ?? 1);
+    // Enter Logo mode below 20%; keep it until zoom reaches 25%.
+    const updateCompact = (scale: number) => setCompact(previous => scale < (previous ? 0.25 : 0.2));
+    let scale = readScale();
+    updateCompact(scale);
+    // Panning does not change detail level; no geometry reads are needed.
     const transform = new MutationObserver(() => {
-      const next = world.style.transform.match(/scale\(([^)]+)\)/)?.[1];
-      if (next !== scale) { scale = next; schedule(); }
+      const next = readScale();
+      if (next !== scale) { scale = next; updateCompact(next); }
     });
     transform.observe(world, { attributes: true, attributeFilter: ['style'] });
-    window.addEventListener('resize', schedule);
-    measure();
-    return () => {
-      resize.disconnect(); transform.disconnect();
-      window.removeEventListener('resize', schedule); cancelAnimationFrame(frame);
-    };
+    return () => transform.disconnect();
   }, [box, expanded]);
   return compact;
 }

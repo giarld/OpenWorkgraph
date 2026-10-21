@@ -8,6 +8,7 @@ import { readVisualizeImportFile } from './visualize-file-import';
 import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandaloneUrl } from './visualize-download';
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
+import { NodeInfoDialog } from '../components/NodeInfoDialog';
 import { NodeTitleInput } from '../components/NodeTitleInput';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
@@ -21,7 +22,8 @@ import type { SkillReference } from "../../../packages/protocol/src/skills";
 import { isVisualizeFeatureSelection } from "../../../packages/protocol/src/visualize";
 import { DocumentDialog } from "../components/DocumentDialog";
 import { LinkedVideoPreview, LinkedFilePreview, PreviewNode, ProjectFilePreview, ResourceFilePreview } from "./PreviewNode";
-import { previewFormat, previewMode, type PreviewMode } from './preview-formats';
+import { FileNodePreview, filePreviewMode, type FilePreviewMode } from './FileNodePreview';
+import { previewMode } from './preview-formats';
 import { VideoNodeSummary } from './VideoNodeSummary';
 import { ExecutionOutputList } from "./ExecutionOutputList";
 import { Toast } from './Toast';
@@ -39,8 +41,8 @@ import { canDropAsset, dropAsset } from './asset-drag';
 import { canDropProjectFile, dropProjectFile } from './project-file-drag';
 import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFileReference, projectFileSource } from './project-file-reference';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
-import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, formatFileSize, importedNodeType } from '../domain/file-types';
+import { Info, Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
+import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
 import { readViewport, saveViewport, viewportStorageKey } from "./viewport-storage";
@@ -322,6 +324,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const [markdownLinkPending, setMarkdownLinkPending] = useState(false);
   const [copyingMarkdownLinkedFile,setCopyingMarkdownLinkedFile] = useState(false);
   const markdownLinkRequest = useRef(0);
+  const [nodeInfoId, setNodeInfoId] = useState<string>();
   const [externalLink, setExternalLink] = useState<string>();
   const [confirmRunNodeId, setConfirmRunNodeId] = useState<string>();
   const [confirmGroupIds, setConfirmGroupIds] = useState<string[]>();
@@ -615,26 +618,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     return () => window.removeEventListener('openworkgraph:project-files-changed', changed);
   }, [g.projectId]);
   const projectFileReferenceIds = new Set(g.nodes.flatMap(node => isProjectFileReference(node.content) ? [node.id] : []));
-  const [legacyFileSizes, setLegacyFileSizes] = useState<Record<string, { key: string; bytes: number }>>({});
-  const legacyFileTargets = g.nodes.flatMap(node => {
-    const content = object(node.content);
-    if (node.type !== 'file' || typeof content.resourceId !== 'string' || !Number.isSafeInteger(content.resourceVersion) || (typeof content.bytes === 'number' && Number.isSafeInteger(content.bytes) && content.bytes >= 0)) return [];
-    return [{ nodeId: node.id, key: [node.contentVersion, content.resourceId, content.resourceVersion].join(':'), resourceId: content.resourceId, version: Number(content.resourceVersion) }];
-  });
-  const legacyFileTargetStamp = JSON.stringify(legacyFileTargets);
-  useEffect(() => {
-    let live = true;
-    void Promise.all(legacyFileTargets.map(async target => {
-      try {
-        const metadata = await props.request<{ bytes: number }>(graphPath(g.projectId, g.graphId) + '/resources/' + encodeURIComponent(target.resourceId) + '/versions/' + target.version);
-        return Number.isSafeInteger(metadata.bytes) && metadata.bytes >= 0 ? { ...target, bytes: metadata.bytes } : undefined;
-      } catch { return undefined; }
-    })).then(results => {
-      if (!live) return;
-      setLegacyFileSizes(Object.fromEntries(results.filter(result => result !== undefined).map(result => [result.nodeId, { key: result.key, bytes: result.bytes }])));
-    });
-    return () => { live = false; };
-  }, [props.request, g.projectId, g.graphId, legacyFileTargetStamp]);
   const [titleDraft, setTitleDraft] = useState<string>();
   const [titleSaving, setTitleSaving] = useState(false);
   const titleInput = useRef<HTMLInputElement>(null);
@@ -744,6 +727,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       y: n.y,
       width: nodeBounds(n).width,
       height: nodeBounds(n).height,
+      borderColor: n.borderColor,
       ...(n.type === "group" && n.schemaVersion === 1
         ? { memberIds: [...(n.memberIds ?? [])] }
         : {}),
@@ -851,7 +835,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const nodeRenderKeys = useMemo(() => new Map(g.nodes.map(wire => {
     const run = latestNodeRuns.get(wire.id);
     const runProgress = run ? progress[run.id] : undefined;
-    const legacySize = legacyFileSizes[wire.id];
     return [wire.id, JSON.stringify([
       wire.contentVersion,
       state.runInputs[wire.id]?.id,
@@ -859,15 +842,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       readOnly,
       wire.readOnly,
       projectFilesRevision,
-      legacySize?.key,
-      legacySize?.bytes,
       run?.id,
       run?.status,
       runProgress?.summaries,
       runProgress?.error,
       run ? submittedPrompts[run.id] : undefined,
     ])] as const;
-  })), [g.nodes, state.runInputs, latestNodeRuns, progress, submittedPrompts, legacyFileSizes, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
+  })), [g.nodes, state.runInputs, latestNodeRuns, progress, submittedPrompts, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
   const snapshotRun = node ? latestNodeRuns.get(node.id) : undefined;
   // Submission responses arrive before the next Workspace snapshot. Keep their
   // details visible while the execution editor closes, then follow server state.
@@ -929,7 +910,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const effective = object(state.drafts.find(draft => draft.nodeId === wire.id)?.content ?? wire.content);
     return {
       preferredMode: previewMode(effective.previewMode),
-      ...(!readOnly && !wire.readOnly && !locked(wire.id) ? { onModeChange: (mode: PreviewMode) => act(() => {
+      ...(!readOnly && !wire.readOnly && !locked(wire.id) ? { onModeChange: (mode: FilePreviewMode) => act(() => {
         const current = editor.getSnapshot();
         const target = current.graph.nodes.find(item => item.id === wire.id);
         if (!target) throw Error(t('The preview node was removed.'));
@@ -1759,7 +1740,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       throw error;
     } finally { if (mounted.current) setSavingVisualizeAssets(ids => { const next = new Set(ids); next.delete(nodeId); return next; }); }
   };
-  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onImportFile={file => importVisualizeFile(wire.id, file)} importDisabled={locked(wire.id)} onOpenStandalone={() => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); if (expanded) closePreviewDialogs(); }} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => editor.refresh().then(() => { if (mounted.current) latest.current.onChanged(); }).catch(reason => { if (mounted.current) latest.current.onError(reason); })} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setNodeEditorOpen(wire.id, true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
+  const renderVisualize = (wire: GraphSnapshot["nodes"][number], expanded = false) => <VisualizeNode owner={visualizeSessions} nodeId={wire.id} nodeTitle={String(object(wire.content).title ?? "")} pageRevision={Number(object(object(wire.content).page).revision ?? 0)} theme={props.theme} locale={locale} online={props.online && state.online} readOnly={readOnly || wire.readOnly || savingVisualizeAssets.has(wire.id)} temporary={props.temporary} expanded={expanded} onImportFile={file => importVisualizeFile(wire.id, file)} importDisabled={locked(wire.id)} onOpenStandalone={() => { openVisualizeStandalone(visualizeStandaloneUrl(visualizeSessions.scope, wire.id, props.temporary ?? false, props.theme)); if (expanded) closePreviewDialogs(); }} onOpenContent={() => setReferenceId(wire.id)} onDismiss={closePreviewDialogs} onAssetsChanged={props.onAssetsChanged} onChanged={() => editor.refresh().then(() => { if (mounted.current) latest.current.onChanged(); }).catch(reason => { if (mounted.current) latest.current.onError(reason); })} onError={props.onError} onOpenPrompt={() => { setReferenceId(undefined); selectNodes([wire.id]); setNodeEditorOpen(wire.id, true); }} onOpenInputs={() => setInputBindingNodeId(wire.id)} boundInputNames={(Array.isArray(object(wire.content).inputBindings) ? (object(wire.content).inputBindings as Json[]).map(object) : []).filter(binding => g.edges.some(edge => edge.id === binding.edgeId && edge.kind === 'reference' && edge.targetId === wire.id)).map(binding => String(binding.name))}/>;
   const renderNodeContent = (n: WorkNode, wire: GraphSnapshot["nodes"][number]) => {
     if (wire.type === "group" && wire.schemaVersion === 1) return null;
     const c = object(wire.content);
@@ -1770,21 +1751,23 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (projectFileImport.state === 'loading' || projectFileImport.state === 'failed') return <div className="node-content ow-resource-import-state">{projectFileImport.state === 'loading' ? <LoaderCircle size={28} className="ow-resource-import-spinner" aria-hidden="true"/> : <CircleAlert size={28} aria-hidden="true"/>}<strong>{n.title}</strong><span>{projectFileImport.state === 'loading' ? t('Linking project file…') : t('Project file linking failed. Add the same file again to retry.')}</span></div>;
     const projectSource = object(c.source);
     if (projectSource.kind === 'project-file-empty') return <div className="node-content ow-empty-reference-node" aria-label={t('Empty reference node. Drop any project file here to associate it.')}><Link2 size={32} aria-hidden="true"/></div>;
-    if (wire.schemaVersion === 1 && (wire.type === 'video' || wire.type === 'file' && previewFormat(String(projectSource.relativePath ?? n.title), String(c.mime ?? '')) === 'video')) {
+    if (wire.schemaVersion === 1 && wire.type === 'file' && (projectSource.kind === 'project-file' || typeof c.resourceId === 'string')) {
+      const bytes = typeof c.bytes === 'number' && Number.isSafeInteger(c.bytes) && c.bytes >= 0 ? c.bytes : undefined;
+      const relativePath = projectSource.kind === 'project-file' ? String(projectSource.relativePath) : undefined;
+      return <FileNodePreview key={[wire.id, relativePath, c.resourceId, c.resourceVersion, projectFilesRevision].join(':')} request={relativePath !== undefined ? props.serviceRequest ?? props.request : props.request} projectId={g.projectId} graphId={g.graphId} relativePath={relativePath} resourceId={typeof c.resourceId === 'string' ? c.resourceId : undefined} version={Number(c.resourceVersion)} name={n.title} mime={String(c.mime ?? '')} bytes={bytes} {...previewModeProps(wire)} preferredMode={filePreviewMode(object(state.drafts.find(draft => draft.nodeId === wire.id)?.content ?? wire.content).previewMode)} onError={props.onError}/>;
+    }
+    if (wire.schemaVersion === 1 && wire.type === 'video') {
       const relativePath = projectSource.kind === 'project-file' ? String(projectSource.relativePath) : undefined;
       const resourcePath = typeof c.resourceId === 'string' ? graphPath(g.projectId, g.graphId) + '/resources/' + encodeURIComponent(c.resourceId) + '/versions/' + Number(c.resourceVersion) : undefined;
       if (relativePath !== undefined || resourcePath) return <VideoNodeSummary key={[wire.id, wire.contentVersion, projectFilesRevision].join(':')} request={relativePath !== undefined ? props.serviceRequest ?? props.request : props.request} projectId={g.projectId} relativePath={relativePath} resourcePath={resourcePath} name={n.title} mime={String(c.mime ?? '')} bytes={typeof c.bytes === 'number' ? c.bytes : undefined}/>;
     }
     if (projectSource.kind === 'project-file') {
-      if (wire.type === 'file') return <div className="node-content ow-file-node"><FileIcon size={32}/><div className="ow-file-metadata"><strong title={n.title}>{n.title}</strong><span className="ow-file-size" title={String(projectSource.relativePath)}>{String(projectSource.relativePath)}</span></div></div>;
       if (wire.type === 'image' || wire.type === 'video') return <CanvasProjectFilePreview key={String(projectSource.relativePath) + ':' + projectFilesRevision} request={props.serviceRequest ?? props.request} projectId={g.projectId} relativePath={String(projectSource.relativePath)} mime={String(c.mime ?? 'application/octet-stream')} name={n.title} imageNode={wire.type === 'image'} onError={props.onError}/>;
       return <ProjectFileContent request={props.serviceRequest ?? props.request} projectId={g.projectId} source={projectSource} mime={String(c.mime ?? 'application/octet-stream')} name={n.title} compact node={n} onError={props.onError} refreshKey={projectFilesRevision} onDetach={wire.type === 'text' && !readOnly && !n.readonly && !locked(n.id) ? text => detachProjectFileText(n.id,text) : undefined}/>;
     }
     if (wire.schemaVersion === 1 && wire.type === "preview") return <PreviewNode key={wire.id + ':' + projectFilesRevision} graph={g} nodeId={wire.id} request={props.request} onError={props.onError} {...previewModeProps(wire)}/>;
     if (wire.schemaVersion === 1 && n.type === 'file') {
-      const sizeKey = [wire.contentVersion, c.resourceId, c.resourceVersion].join(':');
-      const bytes = typeof c.bytes === 'number' && Number.isSafeInteger(c.bytes) && c.bytes >= 0 ? c.bytes : legacyFileSizes[n.id]?.key === sizeKey ? legacyFileSizes[n.id]?.bytes : undefined;
-      return <div className="node-content ow-file-node"><FileIcon size={32} aria-hidden="true"/>{typeof c.resourceId === 'string' ? <div className="ow-file-metadata"><strong title={n.title}>{n.title}</strong>{bytes !== undefined && <span className="ow-file-size">{formatFileSize(bytes)}</span>}</div> : <><span>{t('No file uploaded yet (maximum 300 MB)')}</span><button type="button" className="ow-file-upload-button" disabled={readOnly || n.readonly || locked(n.id)} onClick={() => { replacement.current = { nodeId: n.id, type: 'file', version: wire.contentVersion, content: wire.content }; file.current?.click(); }}><Upload size={16} aria-hidden="true"/>{t('Upload file')}</button></>}</div>;
+      return <div className="node-content ow-file-node"><FileIcon size={32} aria-hidden="true"/><span>{t('No file uploaded yet (maximum 300 MB)')}</span><button type="button" className="ow-file-upload-button" disabled={readOnly || n.readonly || locked(n.id)} onClick={() => { replacement.current = { nodeId: n.id, type: 'file', version: wire.contentVersion, content: wire.content }; file.current?.click(); }}><Upload size={16} aria-hidden="true"/>{t('Upload file')}</button></div>;
     }
     if (wire.schemaVersion === 1 && !c.resourceId && n.type === "execution") {
       const run = graphRuns.filter(r => r.nodeId === n.id).at(-1);
@@ -1971,6 +1954,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           }) : <p className="muted">{t('No recently opened Work Graphs')}</p>}
         </nav>}
       </>}
+      {nodeInfoId && work.nodes.some(n => n.id === nodeInfoId) && <NodeInfoDialog
+        key={nodeInfoId} node={work.nodes.find(n => n.id === nodeInfoId)!} disabled={readOnly}
+        onClose={() => setNodeInfoId(undefined)} onError={props.onError}
+        onChange={async borderColor => { await command([{ type: 'layout.appearance', nodeId: nodeInfoId, borderColor }]); }}/>}
       {confirmGroupIds && <ConfirmationDialog
         title={t('Merge groups')}
         text={t('The selection contains grouped nodes. Merge groups?')}
@@ -2043,9 +2030,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <button className="dismiss-layer" aria-label={t("Close add node menu")} onClick={() => setCreateMenu(undefined)} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCreateMenu(undefined); }}/>
         <div ref={createMenuElement} className="create-menu node-create-menu panel" role="dialog" aria-label={t("Add node")} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }} style={{ position: "fixed", left: createMenuPosition?.left ?? Math.max(12, createMenu.screen.x), top: createMenuPosition?.top ?? Math.max(12, createMenu.screen.y), visibility: createMenuPosition ? "visible" : "hidden" }}>
           <div className="panel-heading"><strong>{t("Add node")}</strong><button className="icon-button" aria-label={t("Close add node menu")} onClick={() => setCreateMenu(undefined)}><X size={16}/></button></div>
-          {["execution", "text", "image", "visualize", "document", "file", "preview"].map(type => {
+          {["execution", "text", "image", "visualize", "document", "file"].map(type => {
             const definition = getNodeDefinition(type), Icon = definition.icon;
-            return <button className="create-option" key={type} disabled={readOnly || (Boolean(createMenu.connection) && activeChainNodeIds.has(createMenu.connection!.nodeId)) || (!!createMenu.connection && ((type === "execution" && createMenu.connection.port === "input") || (type === "preview" && g.nodes.find(n => n.id === createMenu.connection!.nodeId)?.type === "preview")))} onClick={() => { const { world, connection } = createMenu; setCreateMenu(undefined); act(() => create(type, "", world, {}, connection)); }}><Icon size={18}/><span>{t(definition.title)}</span></button>;
+            return <button className="create-option" key={type} disabled={readOnly || (Boolean(createMenu.connection) && activeChainNodeIds.has(createMenu.connection!.nodeId)) || (!!createMenu.connection && type === "execution" && createMenu.connection.port === "input")} onClick={() => { const { world, connection } = createMenu; setCreateMenu(undefined); act(() => create(type, "", world, {}, connection)); }}><Icon size={18}/><span>{t(definition.title)}</span></button>;
           })}
           <button className="create-option" disabled={readOnly} onClick={() => { setCreateMenu(undefined); file.current?.click(); }}><Upload size={18}/>{t("Import file")}</button>
         </div>
@@ -2184,6 +2171,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 e.stopPropagation();
                 e.currentTarget.blur();
               }}/>
+            <button type="button" className="icon-button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16}/></button>
             {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16}/></button>}
             {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
             {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}

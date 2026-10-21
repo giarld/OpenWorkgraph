@@ -251,7 +251,7 @@ class OpenCodeAdapter implements AgentAdapter {
         const action = this.journal.list().find(action => action.kind === 'skill' && action.id === operation.callId);
         if (action && ['completed', 'failed', 'cancelled'].includes(action.phase)) this.operations.confirm(operation.callId, action.phase as 'completed' | 'failed' | 'cancelled');
       }
-      if (!this.journal.unresolved && !this.operations.unresolved) { this.snapshot.state = 'interrupted'; this.drainedOutcome = 'interrupted'; await this.host?.close(); await this.interactions?.cancel(); return this.copy(); }
+      if (!this.journal.unresolved && !this.operations.unresolved) { this.snapshot.state = this.cancelled ? 'cancelled' : 'interrupted'; this.drainedOutcome = this.snapshot.state; await this.host?.close(); await this.interactions?.cancel(); return this.copy(); }
       throw new AgentError('outcome_unknown');
     }
     const transport = this.instance.transport;

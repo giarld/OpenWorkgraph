@@ -45,6 +45,17 @@ export class OpenCodeActionJournal {
   get unresolved(): boolean {
     return !!this.db.prepare("SELECT 1 FROM action WHERE phase NOT IN ('completed', 'failed', 'cancelled') LIMIT 1").get();
   }
+  /** Shell.create can be interrupted while its detached native spawn fiber is
+   * still settling. Only its explicitly linked process exit/failure can close
+   * an unbound shell; idle sessions or an empty native list are insufficient. */
+  settleUnboundShells(): void {
+    const actions = this.list();
+    for (const shell of actions.filter(action => action.kind === 'shell' && action.phase === 'unknown' && action.pid === null && !this.nativeId('shell', action.id))) {
+      const processes = actions.filter(action => action.kind === 'process' && action.parentId === shell.id);
+      if (!processes.length || processes.some(action => !terminal.has(action.phase))) continue;
+      this.observe(this.identity.instanceId, 'shell', shell.id, processes.some(action => action.phase === 'cancelled') ? 'cancelled' : 'failed');
+    }
+  }
   bindNative(kind: OpenCodeActionKind, id: string, nativeId: string, pid?: number): void {
     identifier(nativeId);
     const previous = this.nativeId(kind, id);
