@@ -5,6 +5,8 @@
   --video-track: #ffffff55;
   --video-accent: #f5f7fa;
   --video-hover: #ffffff16;
+  --video-controls-inline: 16px;
+  --video-controls-bottom: 8px;
   container-type: inline-size;
   position: relative;
   display: flex;
@@ -29,7 +31,12 @@
 .ow-preview-node .ow-preview-video .ow-preview-video-surface:hover:not(:disabled),
 .ow-preview-node .ow-preview-video .ow-preview-video-surface:active:not(:disabled) { background: transparent; }
 .ow-preview-node .ow-preview-video .ow-preview-video-surface:focus-visible { outline-offset: -2px; }
-.ow-preview-node .ow-preview-video-controls { position: absolute; z-index: 1; inset: auto 0 0; padding: 32px 16px 8px; background: linear-gradient(180deg, transparent 0%, #00000052 30%, #000000b3 70%, #000000d9 100%); pointer-events: none; }
+/* Match the 18px toolbar icon centered inside its 44px button. */
+.ow-preview-node .ow-preview-video-idle-icon { display: none; position: absolute; left: calc(var(--video-controls-inline) + 13px); bottom: calc(var(--video-controls-bottom) + 13px); pointer-events: none; filter: drop-shadow(0 2px 6px #000a); }
+.owg-node:not(.selected) .ow-file-node-preview .ow-preview-video:not(:fullscreen) .ow-preview-video-idle-icon { display: block; }
+.owg-node:not(.selected) .ow-file-node-preview .ow-preview-video:not(:fullscreen) .ow-preview-video-controls,
+.owg-node:not(.selected) .ow-file-node-preview:has(.ow-preview-video) > .ow-file-preview-mode { display: none; }
+.ow-preview-node .ow-preview-video-controls { position: absolute; z-index: 1; inset: auto 0 0; padding: 32px var(--video-controls-inline) var(--video-controls-bottom); background: linear-gradient(180deg, transparent 0%, #00000052 30%, #000000b3 70%, #000000d9 100%); pointer-events: none; }
 .ow-preview-node .ow-preview-video-controls button,
 .ow-preview-node .ow-preview-video-controls input { pointer-events: auto; }
 .ow-preview-node .ow-preview-video-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -52,7 +59,9 @@
 .ow-preview-node .ow-preview-video:fullscreen .ow-preview-video-controls { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
 @keyframes ow-video-spin { to { transform: rotate(360deg); } }
 @container (max-width: 360px) {
-  .ow-preview-node .ow-preview-video-controls { padding: 28px 8px 6px; }
+  .ow-preview-node .ow-preview-video-stage,
+  .ow-preview-node .ow-preview-video-controls { --video-controls-inline: 8px; --video-controls-bottom: 6px; }
+  .ow-preview-node .ow-preview-video-controls { padding-top: 28px; }
   .ow-preview-node .ow-preview-video-toolbar { gap: 4px; }
   .ow-preview-node .ow-preview-video input.ow-preview-video-volume { display: none; }
 }

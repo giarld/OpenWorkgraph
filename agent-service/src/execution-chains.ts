@@ -1,3 +1,4 @@
+import { mergeRunInput, parseNodeInputDrafts, type NodeInputDrafts } from '@openworkgraph/protocol';
 import { createHash, randomUUID } from 'node:crypto';
 import { executionOrder, isTerminalRunStatus, type ExecutionPlan, type GraphSnapshot, type Json, type Run, type SubmitRun } from '@openworkgraph/protocol';
 import { Runs } from './runs.js';
@@ -18,24 +19,28 @@ export class ExecutionChains {
   private histories(graph: GraphSnapshot, nodeId: string, exclude?: string) {
     return this.db.prepare('SELECT id FROM runs WHERE project_id=? AND graph_id=? AND node_id=? ORDER BY sequence').all(graph.projectId,graph.graphId,nodeId).filter(row=>row.id!==exclude).map(row=>this.runs.get(String(row.id)));
   }
-  plan(graph: GraphSnapshot, targetId: string, exclude?: string): ExecutionPlan {
+  plan(graph: GraphSnapshot, targetId: string, exclude?: string, drafts?: NodeInputDrafts): ExecutionPlan {
     const edges = graph.edges.filter(e => e.kind === 'execution');
     if (!executionOrder(edges)) throw new ServiceError('INVALID_EDGE', '执行依赖存在环。');
     if (graph.nodes.find(n => n.id === targetId)?.type !== 'execution') throw new ServiceError('INVALID_REQUEST', '只有执行节点支持串联调度。');
     const ids = new Set([targetId]), queue = [targetId];
     for (let i = 0; i < queue.length; i++) for (const e of edges) if (e.targetId === queue[i] && !ids.has(e.sourceId)) { ids.add(e.sourceId); queue.push(e.sourceId); }
+    if (drafts !== undefined) {
+      try { drafts = parseNodeInputDrafts(drafts); } catch { throw new ServiceError('INVALID_REQUEST', '无效串联输入草稿。'); }
+      if (Object.keys(drafts).some(id => !ids.has(id))) throw new ServiceError('INVALID_REQUEST', '串联输入包含无关节点。');
+    }
     const nodes = graph.nodes.filter(n => ids.has(n.id)).map(n => {
       const history = this.histories(graph, n.id, exclude);
       const content = n.content && typeof n.content === 'object' && !Array.isArray(n.content) ? n.content : {};
       // Already submitted runs use their frozen prompt, not subsequent node edits.
       const submitted = n.id === targetId && exclude || history.find(r => r.status === 'accepted' && ['manual','confirm'].includes(r.executionStart ?? ''))?.id;
-      const prompt = submitted ? this.runs.snapshot(submitted).prompt : content.prompt;
+      const prompt = submitted ? this.runs.snapshot(submitted).prompt : mergeRunInput(content, drafts?.[n.id]).prompt;
       return { id:n.id, title:typeof content.title === 'string' ? content.title : n.id, required:n.id === targetId || !history.some(r => r.status === 'succeeded'), hasRun:history.some(r => r.status !== 'accepted'), missingPrompt:typeof prompt !== 'string' || !prompt.trim(), hasExpandedOutputs:graph.edges.some(e=>e.kind==='delivery'&&e.sourceId===n.id) };
     });
     const requiresConfirmation = nodes.some(n => n.hasRun) && nodes.length > 1;
     return { targetId, executionRevision:graph.executionRevision, nodes, edges:edges.filter(e => ids.has(e.sourceId) && ids.has(e.targetId)), initialNodeIds:nodes.filter(n => n.required).map(n => n.id), requiresConfirmation, ...(exclude && typeof this.runs.runtime(exclude).details.preserveHistoricalOutputs === 'boolean' ? {preserveHistoricalOutputs:this.runs.runtime(exclude).details.preserveHistoricalOutputs as boolean} : {}) };
   }
-  forRun(id: string) { const run = this.runs.get(id); return this.plan(this.graphs.snapshot(run), run.nodeId, id); }
+  forRun(id: string, drafts?: NodeInputDrafts) { const run = this.runs.get(id); return this.plan(this.graphs.snapshot(run), run.nodeId, id, drafts); }
   cancel(id: string, key: string, principal: string): Run {
     this.runs.repo.idempotent(principal + ':chain.cancel:' + id, key, {id}, () => {
       const target = this.runs.get(id);
@@ -69,7 +74,7 @@ export class ExecutionChains {
     this.runs.repo.appendEvent({eventId:randomUUID(),type:'run.changed',projectId:run.projectId,graphId:run.graphId,entityId:id,revision:runtime.revision+1,occurredAt:new Date().toISOString(),payload:run as unknown as Json});
   }
   /** Prepare every missing run before entering the auth transaction. No partial batch on failure. */
-  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun) => Promise<(principal:string)=>Run>, preserveHistoricalOutputs = false, prepareHistory?: (nodeId: string, copies: Map<string, string>) => Promise<() => void>, expectedCommitExecutionRevision=plan.executionRevision) {
+  async prepareMembers(graph: GraphSnapshot, plan: ExecutionPlan, selected: string[], targetRunId: string | undefined, prepare: (request: SubmitRun, revisionOffset: number, content: Record<string, Json>) => Promise<(principal:string)=>Run>, preserveHistoricalOutputs = false, prepareHistory?: (nodeId: string, copies: Map<string, string>) => Promise<() => void>, expectedCommitExecutionRevision=plan.executionRevision, drafts?: NodeInputDrafts) {
     const missing = plan.nodes.filter(n => selected.includes(n.id) && n.missingPrompt);
     if (missing.length) throw new ServiceError('INPUT_BLOCKED', '请先填写以下节点的提示词：' + missing.map(n => n.title).join('、'));
     const historyCopies: (() => void)[] = [];
@@ -80,6 +85,7 @@ export class ExecutionChains {
     }
     const members = new Map<string, string>();
     const commits = new Map<string, (principal:string)=>Run>();
+    let revisionOffset = expectedCommitExecutionRevision - graph.executionRevision;
     for (const id of selected) {
       if (id === plan.targetId && targetRunId) { members.set(id,targetRunId); continue; }
       const active = this.histories(graph,id).find(r => !isTerminalRunStatus(r.status));
@@ -88,8 +94,11 @@ export class ExecutionChains {
         members.set(id,active.id);
       } else {
         const node = graph.nodes.find(n => n.id===id)!;
-        const content = node.content && typeof node.content==='object'&&!Array.isArray(node.content)?node.content:{};
-        commits.set(id,await prepare({serviceId:graph.serviceId,projectId:graph.projectId,graphId:graph.graphId,nodeId:id,kind:'execution',idempotencyKey:randomUUID(),expectedExecutionRevision:graph.executionRevision,...(content.modelOverride ? {modelOverride:content.modelOverride as unknown as import('@openworkgraph/protocol').ModelSelection} : {})}));
+        const inputDraft = drafts?.[id];
+        const content = inputDraft ? this.graphs.runInputContent(graph,id,inputDraft) : mergeRunInput(node.content);
+        commits.set(id,await prepare({serviceId:graph.serviceId,projectId:graph.projectId,graphId:graph.graphId,nodeId:id,kind:'execution',idempotencyKey:randomUUID(),expectedExecutionRevision:graph.executionRevision,...(inputDraft ? {inputDraft} : {}),...(content.modelOverride ? {modelOverride:content.modelOverride as unknown as import('@openworkgraph/protocol').ModelSelection} : {})}, revisionOffset, content));
+        // All preflights read the same revision; only known input writes advance commits.
+        if (id !== plan.targetId && canonicalJson(content) !== canonicalJson(node.content)) revisionOffset++;
       }
     }
     const reused = new Map<string,string>();

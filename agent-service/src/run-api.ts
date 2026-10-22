@@ -1,4 +1,4 @@
-import { parseRunInput } from '@openworkgraph/protocol';
+import { parseRunInput, parseNodeInputDrafts } from '@openworkgraph/protocol';
 import type { IncomingMessage } from 'node:http';
 import type { ImageRoute, InteractionReply, Json, ModelSelection, SubmitRun } from '@openworkgraph/protocol';
 import type { ApiResult } from './api.js';
@@ -13,6 +13,7 @@ import { AgentControl } from './agents/control.js';
 import type { AgentSettingsPatch } from './agents/settings.js';
 function text(value:unknown):string{if(typeof value!=='string'||!value)throw new ServiceError('INVALID_REQUEST','需要非空字符串。');return value;}
 function fields(body:Record<string,unknown>,allowed:string[]):void{if(Object.keys(body).some(key=>!allowed.includes(key)))throw new ServiceError('INVALID_REQUEST','请求包含未知字段。');}
+function executionInputs(value:unknown){try{return parseNodeInputDrafts(value);}catch{throw new ServiceError('INVALID_REQUEST','无效串联输入草稿。');}}
 function requireSecureCredentialConnection(request:IncomingMessage, origin:string):void {
   const web=new URL(origin), host=request.headers.host ?? '';
   const remote=request.socket.remoteAddress ?? '';
@@ -181,7 +182,7 @@ export class RunApi {
       if(graph[3]==='input-preview'&&request.method==='POST'){fields(body,['nodeId','excludeFiles','inputDraft']);if(body.excludeFiles!==undefined&&typeof body.excludeFiles!=='boolean')throw new ServiceError('INVALID_REQUEST','无效输入预检选项');return ok(read(()=>{ const nodeId=text(body.nodeId); if(body.inputDraft===undefined)return rt.inputs.inputPreview(scope.graphId,nodeId,body.excludeFiles===true); rt.graphs.runInputContent(scope,nodeId,body.inputDraft); return rt.previewRunInput(scope.graphId,nodeId,parseRunInput(body.inputDraft),body.excludeFiles===true); }));}
       if(graph[3]==='runs'&&request.method==='GET')return ok(read(()=>rt.runs.list(scope.projectId).filter(value=>value.graphId===scope.graphId)));
       if(graph[3]==='runs'&&request.method==='POST'){
-        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs','agent','inputDraft']);
+        fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs','agent','inputDraft','nodeInputDrafts']);
         if('agent' in body&&(body.kind==='image_generation'||'imageRoute' in body||'modelOverride' in body))throw new ServiceError('INVALID_REQUEST','执行器选择不能与图片或旧模型选项混用。');
         const route=imageRoute(body);
         const input={...body,...scope,...(route?{imageRoute:route}:{})} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
@@ -217,16 +218,18 @@ export class RunApi {
           return ok(read(()=>{rt.graphs.scope(current);return result;}));
         }
         if(request.method==='GET'&&action==='execution-plan')return ok(read(()=>rt.executionChains.forRun(id)));
+        if(request.method==='POST'&&action==='execution-plan'){fields(body,['nodeInputDrafts']);return ok(read(()=>rt.executionChains.forRun(id,executionInputs(body.nodeInputDrafts))));}
         if(request.method==='POST'&&action==='start'){
-          fields(body,['nodeIds','expectedExecutionRevision','idempotencyKey','preserveHistoricalOutputs']);
+          fields(body,['nodeIds','expectedExecutionRevision','idempotencyKey','preserveHistoricalOutputs','nodeInputDrafts']);
+          const nodeInputDrafts=body.nodeInputDrafts===undefined?undefined:executionInputs(body.nodeInputDrafts);
           if(body.preserveHistoricalOutputs!==undefined&&typeof body.preserveHistoricalOutputs!=='boolean')throw new ServiceError('INVALID_REQUEST','无效历史输出选项。');
           const key=text(body.idempotencyKey);
           if(!Array.isArray(body.nodeIds)||body.nodeIds.some(v=>typeof v!=='string')||!Number.isSafeInteger(body.expectedExecutionRevision))throw new ServiceError('INVALID_REQUEST','无效执行范围。');
-          const data={nodeIds:body.nodeIds,expectedExecutionRevision:body.expectedExecutionRevision,...(body.preserveHistoricalOutputs===undefined?{}:{preserveHistoricalOutputs:body.preserveHistoricalOutputs})};
+          const data={nodeIds:body.nodeIds,expectedExecutionRevision:body.expectedExecutionRevision,...(nodeInputDrafts===undefined?{}:{nodeInputDrafts}),...(body.preserveHistoricalOutputs===undefined?{}:{preserveHistoricalOutputs:body.preserveHistoricalOutputs})};
           const prior=read(()=>repo.replay(principal+':run.start:'+id,key,data as Json));
           if(prior!==undefined)return ok(read(()=>rt.runs.get(id)));
           const cleanups: (() => unknown)[] = [];
-          try { const commit=await rt.prepareExecutionStart(id,body.nodeIds as string[],body.expectedExecutionRevision as number,body.preserveHistoricalOutputs as boolean|undefined,cleanups);
+          try { const commit=await rt.prepareExecutionStart(id,body.nodeIds as string[],body.expectedExecutionRevision as number,body.preserveHistoricalOutputs as boolean|undefined,cleanups,nodeInputDrafts);
             return ok(read(()=>commit(principal,key))); }
           finally { if(cleanups.length)atomic(rt.db,()=>{for(const cleanup of cleanups)cleanup();}); }
         }

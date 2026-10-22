@@ -1,6 +1,6 @@
 import type { Json } from './index.js';
 
-/** Browser-local generation settings. Only an accepted Run writes these to a node. */
+/** Local generation settings; accepted runs persist them, explicit editor close shares prompt fields. */
 export const RUN_INPUT_FIELDS = ['prompt', 'skillReferences', 'features', 'modelOverride', 'agentModelOverride', 'imageRoute'] as const;
 export type RunInput = Partial<Record<typeof RUN_INPUT_FIELDS[number], Json>>;
 export function parseRunInput(value: unknown): RunInput {
@@ -13,4 +13,14 @@ export function parseRunInput(value: unknown): RunInput {
 }
 export function mergeRunInput(content: Json, input?: RunInput): Record<string, Json> {
   return { ...(content && typeof content === 'object' && !Array.isArray(content) ? content : {}), ...input };
+}
+
+/** Unsubmitted execution members, keyed by node ID in the target's ancestor scope. */
+export type NodeInputDrafts = Record<string, RunInput>;
+export function parseNodeInputDrafts(value: unknown): NodeInputDrafts {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid execution input drafts');
+  return Object.fromEntries(Object.entries(value).map(([id, fields]) => {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw Error('Invalid execution input node');
+    return [id, parseRunInput(fields)];
+  }));
 }

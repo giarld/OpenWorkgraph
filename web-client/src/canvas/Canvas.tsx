@@ -66,6 +66,7 @@ import {
 import "./canvas.css";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { primaryKey, primaryModifier } from "./primary-modifier";
+import { createWheelInputClassifier } from './wheel-input';
 import { useI18n } from "../i18n/I18nProvider";
 export type { Viewport, Point } from "./geometry";
 export interface CanvasHandle {
@@ -146,14 +147,15 @@ export interface CanvasProps {
 }
 // Viewport frames change geometry, not document content. Keep expensive node
 // previews mounted without re-running their renderers on every pan/zoom frame.
-const NodeBody = memo(function NodeBody({ node, renderer, renderKey }: {
+const NodeBody = memo(function NodeBody({ node, renderer, renderKey, selected }: {
   node: WorkNode;
   renderer: { current: CanvasProps['renderNode'] };
   renderKey: unknown;
+  selected: boolean;
 }) {
   const contentKey = useMemo(() => ({ node, renderKey }), [node, renderKey]);
   return ['image', 'video', 'audio', 'document', 'preview', 'file'].includes(node.type)
-    ? <NodeViewport key={node.id} contentKey={contentKey} render={() => renderer.current(node)}/>
+    ? <NodeViewport key={node.id} contentKey={contentKey} selected={selected} render={() => renderer.current(node)}/>
     : <>{renderer.current(node)}</>;
 });
 type Gesture = {
@@ -175,6 +177,15 @@ const element = (target: EventTarget | null) =>
   target instanceof Element ? target : null;
 const interactive = (target: EventTarget | null) =>
   !!element(target)?.closest(INTERACTIVE);
+function keepsNativeWheel(target: EventTarget | null, selectedIds: string[]) {
+  const hit = element(target);
+  const node = hit?.closest('[data-node-id]');
+  if (!node) return interactive(target) || !!hit?.closest('[data-canvas-scrollable]');
+  if (hit?.closest('[data-canvas-no-zoom]')) return true;
+  // Selection explicitly hands ordinary scrolling to the node. Hover alone
+  // must keep graph navigation in control, regardless of content overflow.
+  return selectedIds.includes(node.getAttribute('data-node-id')!);
+}
 // Native scrollbar events target the scroll container itself. Preserve its
 // default pointer action even when the surrounding content can drag a node.
 function hitsNativeScrollbar(event: PE) {
@@ -216,6 +227,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
   linkPort?: 'input' | 'output' | 'chain-input' | 'chain-output';
 }) {
   const { t } = useI18n();
+  const selected = props.selectedIds.includes(node.id);
   return (
     <div
       key={node.id}
@@ -234,7 +246,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         (props.isNodeWaiting?.(node.id) ? "owg-node-waiting " : "") +
         (props.isNodeAwaitingApproval?.(node.id) ? "owg-node-awaiting-approval " : "") +
         (props.isNodeFailed?.(node.id) ? "owg-node-failed " : "") +
-        (props.selectedIds.includes(node.id) ? "selected" : "")
+        (selected ? "selected" : "")
       }
       style={{
         left: node.x,
@@ -252,11 +264,11 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
       </div>
       <div data-canvas-scrollable={node.type === 'document' || undefined} className={"owg-node-body" + (node.type === "execution" ? " execution-chain-body" : ['preview', 'visualize', 'file'].includes(node.type) ? ' owg-preview-body' : "")}>
         {['preview', 'visualize', 'file'].includes(node.type) ? <>
-          <div className="owg-preview-content" inert={!props.selectedIds.includes(node.id)}>
-            <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />
+          <div className="owg-preview-content" inert={!selected}>
+            <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} selected={selected} />
           </div>
-          {!props.selectedIds.includes(node.id) && <div className="owg-preview-selection-shield" data-canvas-draggable aria-hidden="true"/>}
-        </> : node.type === "group" ? null : <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} />}
+          {!selected && <div className="owg-preview-selection-shield" data-canvas-draggable aria-hidden="true"/>}
+        </> : node.type === "group" ? null : <NodeBody node={node} renderer={nodeRenderer} renderKey={nodeRenderKey} selected={selected} />}
       </div>
       {/* SVG preserves fractional widths; CSS compensates for the outer world transform. */}
       <svg className="owg-node-border" aria-hidden="true" focusable="false"><rect vectorEffect="non-scaling-stroke"/></svg>
@@ -674,20 +686,23 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
     useEffect(() => {
       const el = root.current;
       if (!el) return;
+      const classifyWheel = createWheelInputClassifier();
       const wheel = (e: WheelEvent) => {
         // Cancel browser zoom before any interactive/gesture early return.
         // Chromium reports trackpad pinch as Ctrl+wheel, including on macOS.
-        if (e.ctrlKey || primaryModifier(e)) e.preventDefault();
+        const modifiedZoom = e.ctrlKey || primaryModifier(e);
+        if (modifiedZoom) e.preventDefault();
         if (gestureRef.current) return;
-        if (e.ctrlKey || primaryModifier(e)) {
+        const action = modifiedZoom ? 'zoom' : classifyWheel(e, window.devicePixelRatio);
+        if (modifiedZoom) {
           if (element(e.target)?.closest('[data-canvas-no-zoom]')) return;
-        } else if (interactive(e.target) || element(e.target)?.closest('[data-canvas-scrollable]')) return;
+        } else if (keepsNativeWheel(e.target, current.current.props.selectedIds)) return;
         e.preventDefault();
         const pointer = relative({ x: e.clientX, y: e.clientY });
         // Keep high-frequency wheel input direct so it does not lag behind
         // the pointer. Ctrl+wheel includes trackpad pinch; Command+wheel
         // remains a zoom shortcut on macOS.
-        if (e.ctrlKey || primaryModifier(e))
+        if (action === 'zoom')
           changeViewport(
             wheelZoom(
               current.current.viewport,

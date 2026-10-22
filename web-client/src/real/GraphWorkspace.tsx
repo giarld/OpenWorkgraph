@@ -821,7 +821,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     setSelected(ids);
   };
   const dismissNodeEditor = () => {
-    if (selected.length === 1) setNodeEditorOpen(selected[0], false);
+    if (selected.length === 1) {
+      const id=selected[0];setNodeEditorOpen(id, false);
+      if(!readOnly && !locked(id) && !g.nodes.find(node=>node.id===id)?.readOnly)act(async()=>{await editor.savePrompt(id);props.onChanged();});
+    }
   };
   useEffect(() => { if (props.installedNodeId && editor.getSnapshot().graph.nodes.some(node => node.id === props.installedNodeId)) selectNodes([props.installedNodeId]); }, [props.installedNodeId]);
   useEffect(()=>{

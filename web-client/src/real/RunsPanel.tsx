@@ -19,6 +19,7 @@ export interface RunsPanelProps {
   describeRun?: (run: Run) => { node: string; graph: string; project: string };
   request: <T>(path: string, body?: unknown, method?: string) => Promise<T>;
   runs: Run[]; graphId?: string; onLocate: (run: Run) => void;
+  executionInputs?: import('./ExecutionStartPanel').ExecutionInputs;
   onEditExecutionNode?: (run: Run, nodeId: string) => void;
   onChanged: () => void; onError: (e: unknown) => void; readOnly: boolean;
 }
@@ -449,7 +450,7 @@ export function RunsPanel(props: RunsPanelProps) {
       {busy && <p role="status">{t('Submitting. Waiting for Workspace confirmation…')}</p>}
       {!selected && <p>{t('There are no run records yet.')}</p>}
       {selected && <button className="secondary-button" onClick={() => onLocate(selected)}>{t('Locate this task')}</button>}
-      {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
+      {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} inputs={props.executionInputs} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
       {selected?.status === 'accepted' && ['manual','confirm'].includes(selected.executionStart ?? '') && <button className="secondary-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), {idempotencyKey:randomId()}, 'POST'))}>{t('Withdraw this submission')}</button>}
       {selected?.status === 'paused_restore' && <div className="interaction-box" role="group" aria-label={t('Paused after restore')}><p>{t('The Workspace will check the saved inputs before continuing this task.')}</p><button type="button" className="primary-button" disabled={readOnly || busy || loading} aria-busy={continuingKey === selectedKey} onClick={() => continueTask(selected)}>{t(continuingKey === selectedKey ? 'Continuing restored run…' : 'Continue restored run')}</button></div>}
       {!current && stopControl}

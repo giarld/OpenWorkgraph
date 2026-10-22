@@ -13,9 +13,7 @@ English | [简体中文](README.zh-CN.md)
 
 Open the [official OpenWorkgraph editor](https://canvas.giarld.com) and follow the on-screen setup guide to get started.
 
-## Design Philosophy: First Principles
-
-![Input is transformed by a system into output](assets/readme/first-principles.png)
+![A Work Graph that branches number calculations, combines the results, and generates an image of a character holding the resulting number](assets/readme/workflow-example.png)
 
 ## Build and Run Locally
 

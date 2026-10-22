@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { subscribeDatabaseChanges } from './persistence/changes.js';
 import type { DatabaseSync } from 'node:sqlite';
-import { mergeRunInput, type RunInput, PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
+import { mergeRunInput, parseNodeInputDrafts, type RunInput, type NodeInputDrafts, PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
 import type { AgentPlatform, AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
@@ -356,23 +356,29 @@ export class WorkflowRuntime {
         return structuredClone(replay) as unknown as Run;
       };
     }
+    if(input.nodeInputDrafts!==undefined){try{input.nodeInputDrafts=parseNodeInputDrafts(input.nodeInputDrafts);}catch{throw new ServiceError('INVALID_REQUEST','无效串联输入草稿。');}}
     if (input.agent && (String(input.kind) === 'image_generation' || input.modelOverride)) throw new AgentError('invalid_configuration');
     const agentPlan = input.agent ? await this.prepareAgent(input.agent, input.projectId) : this.productionAgents && input.imageRoute?.type !== 'api' ? await this.prepareImplicitCodex(input) : undefined;
+    if(input.nodeInputDrafts && input.kind!=='execution')throw new ServiceError('INVALID_REQUEST','Only execution tasks accept member inputs');
     if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const graph=this.graphs.snapshot(input);
     let inputRevision=0;
     if(input.inputDraft){
       const content=this.graphs.runInputContent(input,input.nodeId,input.inputDraft);
-      graph.nodes=graph.nodes.map(node=>{if(node.id!==input.nodeId)return node;inputRevision=Number(canonicalJson(node.content)!==canonicalJson(content));return {...node,content};});
+      inputRevision=Number(canonicalJson(graph.nodes.find(node=>node.id===input.nodeId)!.content)!==canonicalJson(content));
     }
-    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId)))return this.prepareSingleSubmission(input,false,cleanups,agentPlan);
-    const plan=this.executionChains.plan(graph,input.nodeId);
+    if(input.nodeInputDrafts && Object.hasOwn(input.nodeInputDrafts,input.nodeId))throw new ServiceError('INVALID_REQUEST','目标输入须通过 inputDraft 提交。');
+    if(!graph.edges.some(e=>e.kind==='execution'&&(e.sourceId===input.nodeId||e.targetId===input.nodeId))){
+      if(input.nodeInputDrafts && Object.keys(input.nodeInputDrafts).length)throw new ServiceError('INVALID_REQUEST','串联输入包含无关节点。');
+      return this.prepareSingleSubmission(input,false,cleanups,agentPlan);
+    }
+    const plan=this.executionChains.plan(graph,input.nodeId,undefined,{...input.nodeInputDrafts,...(input.inputDraft ? {[input.nodeId]:input.inputDraft} : {})});
     const outgoing=graph.edges.some(e=>e.kind==='execution'&&e.sourceId===input.nodeId);
     const commit=await this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const auto=!outgoing&&!plan.requiresConfirmation&&!plan.nodes.some(n=>n.required&&n.missingPrompt);
     const selected=this.executionChains.selection(plan,plan.initialNodeIds);
     const preserve=input.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
-    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,request=>request.nodeId===input.nodeId?Promise.resolve(commit):this.prepareSingleSubmission(request,true,cleanups,agentPlan,inputRevision),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies),graph.executionRevision+inputRevision):undefined;
+    const members=auto?await this.executionChains.prepareMembers(graph,plan,selected,undefined,(request,offset,content)=>request.nodeId===input.nodeId?Promise.resolve(commit):this.prepareChainMember(request,cleanups,agentPlan,offset,content),preserve,(id,copies)=>this.prepareChainOutputHistory(input,id,cleanups,copies),graph.executionRevision+inputRevision,input.nodeInputDrafts):undefined;
     return principal=>atomic(this.db,()=>{
       const run=this.runs.get(commit(principal).id);
       if(run.status!=='accepted'||run.executionStart==='dependencies')return run;
@@ -381,21 +387,37 @@ export class WorkflowRuntime {
       return this.runs.get(run.id);
     });
   }
-  async prepareExecutionStart(id:string,nodeIds:string[],expectedExecutionRevision:number,preserveHistoricalOutputs?:boolean,cleanups:(()=>unknown)[] = []):Promise<(principal:string,key:string)=>Run>{
+  async prepareExecutionStart(id:string,nodeIds:string[],expectedExecutionRevision:number,preserveHistoricalOutputs?:boolean,cleanups:(()=>unknown)[] = [],nodeInputDrafts?:NodeInputDrafts):Promise<(principal:string,key:string)=>Run>{
     if (!Array.isArray(nodeIds)) throw new ServiceError('INVALID_REQUEST', '执行深度必须是节点列表。');
     nodeIds = [...nodeIds];
     if (preserveHistoricalOutputs !== undefined && typeof preserveHistoricalOutputs !== 'boolean') throw new ServiceError('INVALID_REQUEST', 'Invalid historical output option');
+    nodeInputDrafts = nodeInputDrafts === undefined ? undefined : structuredClone(nodeInputDrafts);
     const run=this.runs.get(id);
     if(run.status!=='accepted'||!['manual','confirm'].includes(run.executionStart??''))throw new ServiceError('CONFLICT','任务已开始或不可启动。');
-    const graph=this.graphs.snapshot(run),plan=this.executionChains.plan(graph,run.nodeId,id);
+    const graph=this.graphs.snapshot(run),plan=this.executionChains.plan(graph,run.nodeId,id,nodeInputDrafts);
     if(plan.executionRevision!==expectedExecutionRevision)throw new ServiceError('REVISION_CONFLICT','工作图已变化，请重新选择执行深度。');
     const selected=this.executionChains.selection(plan,nodeIds);
+    if (nodeInputDrafts && Object.keys(nodeInputDrafts).some(id=>!selected.includes(id))) throw new ServiceError('INVALID_REQUEST','串联输入包含未选中的节点。');
     const preserve=preserveHistoricalOutputs ?? plan.preserveHistoricalOutputs ?? plan.nodes.some(n=>selected.includes(n.id)&&n.hasExpandedOutputs);
     const originalSnapshot = this.runs.snapshot(id);
     const inherited = originalSnapshot.agent ?? (this.productionAgents ? resolveProductionSelection(this.options.agentRegistry!, originalSnapshot, this.runs.runtime(id).details) : undefined);
     const agentPlan = inherited ? { frozen: inherited, independent: false, implicit: 'legacy' in inherited } : undefined;
-    const members=await this.executionChains.prepareMembers(graph,plan,selected,id,request=>this.prepareSingleSubmission(request,true,cleanups,agentPlan),preserve,(nodeId,copies)=>this.prepareChainOutputHistory({...run,kind:'execution',expectedExecutionRevision},nodeId,cleanups,copies));
-    return (principal,key)=>this.runs.repo.idempotent(principal+':run.start:'+id,key,{nodeIds,expectedExecutionRevision,...(preserveHistoricalOutputs === undefined ? {} : {preserveHistoricalOutputs})},()=>members(principal) as unknown as Json) as unknown as Run;
+    const members=await this.executionChains.prepareMembers(graph,plan,selected,id,(request,offset,content)=>this.prepareChainMember(request,cleanups,agentPlan,offset,content),preserve,(nodeId,copies)=>this.prepareChainOutputHistory({...run,kind:'execution',expectedExecutionRevision},nodeId,cleanups,copies),graph.executionRevision,nodeInputDrafts);
+    return (principal,key)=>this.runs.repo.idempotent(principal+':run.start:'+id,key,{nodeIds,expectedExecutionRevision,...(nodeInputDrafts===undefined?{}:{nodeInputDrafts}),...(preserveHistoricalOutputs === undefined ? {} : {preserveHistoricalOutputs})},()=>members(principal) as unknown as Json) as unknown as Run;
+  }
+  private async prepareChainMember(request:SubmitRun,cleanups:(()=>unknown)[],inherited:AgentPlan|undefined,offset:number,content:Record<string,Json>) {
+    const preference=content.agentModelOverride as {backendId?:string;model?:import('@openworkgraph/protocol').ModelSelection}|null|undefined;
+    let agentPlan=inherited;
+    if(preference?.backendId && preference.model && this.productionAgents) {
+      if(content.modelOverride && preference.backendId!=='codex')throw new AgentError('invalid_configuration');
+      const settings=this.agentConfiguration!.getBackend(preference.backendId);
+      request.agent={settingsGeneration:'agent-configuration-v1',permissions:this.agentConfiguration!.get().permissions,backendId:preference.backendId,configRevision:settings.revision,schemaVersion:settings.schemaVersion,model:preference.model};
+      delete request.modelOverride;
+      agentPlan=await this.prepareAgent(request.agent,request.projectId);
+    } else if(content.modelOverride && (!inherited || inherited.implicit)) {
+      agentPlan=this.productionAgents?await this.prepareImplicitCodex(request):undefined;
+    }
+    return this.prepareSingleSubmission(request,true,cleanups,agentPlan,offset);
   }
   private async prepareChainOutputHistory(scope: Omit<SubmitRun, 'idempotencyKey'>, nodeId: string, cleanups: (() => unknown)[], copies: Map<string, string>) {
     const request = {...scope,nodeId,kind:'execution' as const,idempotencyKey:randomUUID()} as SubmitRun;

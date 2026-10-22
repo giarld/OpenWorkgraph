@@ -105,7 +105,7 @@ export class AgentControl {
     return { backendId, configRevision: settings.revision, schemaVersion: settings.schemaVersion };
   }
   validateSubmission(body: unknown, principal: string): SubmitRun {
-    if (!identity(principal) || !record(body, ['serviceId', 'projectId', 'graphId', 'nodeId', 'kind', 'idempotencyKey', 'expectedExecutionRevision', 'agent', 'preserveHistoricalOutputs', 'inputDraft'])
+    if (!identity(principal) || !record(body, ['serviceId', 'projectId', 'graphId', 'nodeId', 'kind', 'idempotencyKey', 'expectedExecutionRevision', 'agent', 'preserveHistoricalOutputs', 'inputDraft', 'nodeInputDrafts'])
       || ['serviceId', 'projectId', 'graphId', 'nodeId', 'idempotencyKey'].some(key => !identity(body[key]))
       || typeof body.kind !== 'string' || !['execution', 'text_generation', 'visualize_generation'].includes(body.kind)
       || !revision(body.expectedExecutionRevision) || !selection(body.agent)

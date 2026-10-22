@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { executionOrder } from '../../../packages/protocol/src/execution-chain';
 import type { ExecutionPlan, Run } from '../../../packages/protocol/src/index';
 import { randomId } from '../adapter/random';
+import type { GraphEditor } from './editor';
 import type { Request } from './contracts';
 import '../i18n/catalogs/runs';
 import '../i18n/catalogs/real-core';
 import { useI18n } from '../i18n/I18nProvider';
 
-export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEditNode}:{run:Run;request:Request;disabled:boolean;onChanged:()=>void;onError:(error:unknown)=>void;onEditNode?:(nodeId:string)=>void}) {
+export type ExecutionInputs = { plan:(run:Run)=>Promise<ExecutionPlan>; start:(run:Run,body:Parameters<GraphEditor['startExecution']>[1])=>Promise<Run> };
+
+export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEditNode,inputs}:{run:Run;request:Request;disabled:boolean;onChanged:()=>void;onError:(error:unknown)=>void;onEditNode?:(nodeId:string)=>void;inputs?:ExecutionInputs}) {
   const { t } = useI18n();
   const [open,setOpen]=useState(run.executionStart==='confirm');
   const [plan,setPlan]=useState<ExecutionPlan>();
@@ -22,14 +25,14 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
     let alive=true,initial=true,signature='',timer:ReturnType<typeof setTimeout>;setPlan(undefined);setError('');
     const read=async()=>{
       try {
-        const value=await request<ExecutionPlan>('/v1/runs/'+encodeURIComponent(run.id)+'/execution-plan');
+        const value=await (inputs ? inputs.plan(run) : request<ExecutionPlan>('/v1/runs/'+encodeURIComponent(run.id)+'/execution-plan'));
         if(alive){const first=initial,next=JSON.stringify(value);if(signature!==next){signature=next;setPlan(value);setKey(randomId());setSeeds(ids=>first?value.initialNodeIds:ids.filter(id=>value.nodes.some(n=>n.id===id)));}initial=false;}
       } catch(e){if(alive){signature='';setPlan(undefined);setError(String(e));onError(e);}}
       finally {if(alive)timer=setTimeout(()=>void read(),2000);}
     };
     void read();
     return()=>{alive=false;clearTimeout(timer);};
-  },[run.id,request,open,disabled,reload]);
+  },[run.id,request,inputs,open,disabled,reload]);
   const selected=useMemo(()=>{
     const ids=new Set([...(plan?.nodes.filter(n=>n.required).map(n=>n.id)??[]),...seeds]);
     const queue=[...ids];
@@ -58,7 +61,7 @@ export function ExecutionStartPanel({run,request,disabled,onChanged,onError,onEd
   const toggle=(id:string)=>{if(!busy&&!disabled&&!plan?.nodes.find(n=>n.id===id)?.required){setSeeds(ids=>ids.includes(id)?ids.filter(v=>v!==id):[...ids,id]);setKey(randomId());}};
   const start=async()=>{
     if(!plan||busy||disabled||missing.length)return;setBusy(true);setError('');
-    try{await request('/v1/runs/'+encodeURIComponent(run.id)+'/start',{nodeIds:[...selected],expectedExecutionRevision:plan.executionRevision,idempotencyKey:key,preserveHistoricalOutputs:keepOutputs},'POST');onChanged();setOpen(false);}
+    try{const body={nodeIds:[...selected],expectedExecutionRevision:plan.executionRevision,idempotencyKey:key,preserveHistoricalOutputs:keepOutputs};await (inputs ? inputs.start(run,body) : request('/v1/runs/'+encodeURIComponent(run.id)+'/start',body,'POST'));onChanged();setOpen(false);}
     catch(e){setError(e instanceof Error?e.message:String(e));onError(e);}
     finally{setBusy(false);}
   };

@@ -5,7 +5,7 @@ const NodeViewportContext = createContext(true);
 export const useNodeViewport = () => useContext(NodeViewportContext);
 
 /** Defer expensive content, then retain its DOM and resources while offscreen. */
-export function NodeViewport({ render, contentKey }: { render: () => ReactNode; contentKey: unknown }) {
+export function NodeViewport({ render, contentKey, selected }: { render: () => ReactNode; contentKey: unknown; selected: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const retained = useRef<ReactNode>(null);
@@ -28,20 +28,23 @@ export function NodeViewport({ render, contentKey }: { render: () => ReactNode; 
   useEffect(() => {
     const element = container.current;
     if (!element) return;
+    const deselectedVideo = (media: HTMLMediaElement) => media instanceof HTMLVideoElement && !selected;
+    // Deselecting also cancels an offscreen video's pending automatic resume.
+    for (const media of playing.current) if (deselectedVideo(media)) playing.current.delete(media);
     if (visible) {
       for (const media of playing.current) if (media.isConnected) void media.play().catch(() => undefined);
       playing.current.clear();
-      return;
     }
     const pause = (media: HTMLMediaElement) => {
-      playing.current.add(media);
+      if (!deselectedVideo(media)) playing.current.add(media);
       media.pause();
     };
-    for (const media of element.querySelectorAll<HTMLMediaElement>('video,audio')) if (!media.paused) pause(media);
-    const onPlay = (event: Event) => { if (event.target instanceof HTMLMediaElement) pause(event.target); };
+    const shouldPause = (media: HTMLMediaElement) => !visible || deselectedVideo(media);
+    for (const media of element.querySelectorAll<HTMLMediaElement>('video,audio')) if (!media.paused && shouldPause(media)) pause(media);
+    const onPlay = (event: Event) => { if (event.target instanceof HTMLMediaElement && shouldPause(event.target)) pause(event.target); };
     element.addEventListener('play', onPlay, true);
     return () => element.removeEventListener('play', onPlay, true);
-  }, [visible]);
+  }, [visible, selected]);
   return <div ref={container} className="owg-node-viewport" data-node-viewport-active={visible}>
     <NodeViewportContext.Provider value={visible}>{content}</NodeViewportContext.Provider>
   </div>;

@@ -109,7 +109,9 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
         onError={() => { setFailed(true); setLoading(false); setPlaying(false); }}/>}
       <button className="ow-preview-video-surface" type="button" data-canvas-shortcut-surface onClick={toggle}
         onKeyDown={event => { if (event.key === ' ' || event.key === 'Enter') event.stopPropagation(); }}
-        aria-label={playLabel} title={playLabel} disabled={!source || failed}/>
+        aria-label={playLabel} title={playLabel} disabled={!source || failed}>
+        {!loading && !failed && <Play className="ow-preview-video-idle-icon" size={18} fill="currentColor" aria-hidden="true"/>}
+      </button>
       {failed ? <div className="ow-preview-video-message" role="status">
         <AlertCircle size={28} aria-hidden="true"/>
         <span>{t('Video preview failed. Check the file format or codec.')}</span>

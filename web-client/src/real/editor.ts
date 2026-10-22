@@ -1,11 +1,11 @@
-import { RUN_INPUT_FIELDS, mergeRunInput, parseRunInput, type RunInput } from '../../../packages/protocol/src/run-input';
+import { RUN_INPUT_FIELDS, mergeRunInput, parseRunInput, type RunInput, type NodeInputDrafts } from '../../../packages/protocol/src/run-input';
 import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import { syncSkillReferences, validSkillReferences } from "./project-file-mentions";
 import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-title';
 import { projectOperations } from './optimistic-operations';
 import { randomId } from "../adapter/random";
 import type { GraphSnapshot, GraphOperation, Json, Request, Run } from "./contracts";
-import type { ImageRoute, ModelSelection } from '../../../packages/protocol/src/index';
+import type { ExecutionPlan, ImageRoute, ModelSelection } from '../../../packages/protocol/src/index';
 import { graphPath, errorCode, messageOf } from "./contracts";
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
@@ -604,6 +604,61 @@ export class GraphEditor {
     });
     await this.flushDrafts(draftId);
   }
+  /** Explicitly closing the prompt editor shares prompt text and its bound mentions. */
+  async savePrompt(nodeId:string) {
+    const captured=this.state.runInputs[nodeId];
+    const fields:RunInput=Object.fromEntries(Object.entries(captured?.fields??{}).filter(([key])=>['prompt','skillReferences','features'].includes(key)));
+    if (!Object.keys(fields).length) return;
+    const epoch=this.connectionEpoch;
+    await this.flush();
+    this.writable();
+    if(epoch!==this.connectionEpoch)throw Error(translate('The connection changed. Run the operation again.'));
+    const node=this.state.graph.nodes.find(node=>node.id===nodeId);
+    if(!node || node.readOnly)throw Error(translate('The node does not exist or is read-only.'));
+    const graph=await this.command([{type:'node.content',nodeId,expectedContentVersion:node.contentVersion,content:mergeRunInput(node.content,fields)}]);
+    // Preserve models and any newer prompt typed while this save was in flight.
+    const current=this.state.runInputs[nodeId];
+    if(current?.id!==captured.id)return;
+    const content=mergeRunInput(graph.nodes.find(node=>node.id===nodeId)?.content??{});
+    if(!Object.entries(fields).every(([key,value])=>sameInputValue(content[key],value)))return;
+    const remaining=Object.fromEntries(Object.entries(current.fields).filter(([key])=>!Object.hasOwn(fields,key)));
+    const runInputs={...this.state.runInputs};
+    try {
+      const stored=JSON.parse(this.storage?.getItem(this.runInputKey(nodeId))??'null');
+      if(Object.keys(remaining).length) {
+        runInputs[nodeId]={id:randomId(),fields:remaining};
+        if(stored?.id===captured.id)this.storage?.setItem(this.runInputKey(nodeId),JSON.stringify(runInputs[nodeId]));
+      } else {
+        delete runInputs[nodeId];
+        if(stored?.id===captured.id)this.storage?.removeItem(this.runInputKey(nodeId));
+      }
+    } catch { /* The in-memory draft remains available if browser storage fails. */ }
+    this.emit({runInputs});
+  }
+  private captureExecutionInputs(nodeId:string,selected?:string[]) {
+    const ids=new Set([nodeId]),queue=[nodeId];
+    for(let i=0;i<queue.length;i++)for(const edge of this.state.graph.edges)if(edge.kind==='execution'&&edge.targetId===queue[i]&&!ids.has(edge.sourceId)){ids.add(edge.sourceId);queue.push(edge.sourceId);}
+    return Object.fromEntries([...ids].filter(id=>id!==nodeId&&(!selected||selected.includes(id))&&this.state.runInputs[id]).map(id=>[id,structuredClone(this.state.runInputs[id])]));
+  }
+  private async acceptExecutionInputs(inputs:EditorState['runInputs']) {
+    for(const [id,draft] of Object.entries(inputs))this.acceptedInputs.set(id,draft.id);
+    try {await this.refresh();} catch { /* Accepted inputs reconcile on the next authoritative graph. */ }
+  }
+  async executionPlan(run:Run):Promise<ExecutionPlan> {
+    const drafts=this.captureExecutionInputs(run.nodeId);
+    const nodeInputDrafts:NodeInputDrafts=Object.fromEntries(Object.entries(drafts).map(([id,draft])=>[id,draft.fields]));
+    return this.request('/v1/runs/'+encodeURIComponent(run.id)+'/execution-plan',Object.keys(drafts).length?{nodeInputDrafts}:undefined,Object.keys(drafts).length?'POST':'GET');
+  }
+  async startExecution(run:Run,body:{nodeIds:string[];expectedExecutionRevision:number;idempotencyKey:string;preserveHistoricalOutputs?:boolean}) {
+    const epoch=this.connectionEpoch;
+    const drafts=this.captureExecutionInputs(run.nodeId,body.nodeIds);
+    await this.flush();this.writable();
+    if(epoch!==this.connectionEpoch || Object.entries(drafts).some(([id,draft])=>this.state.runInputs[id]?.id!==draft.id))throw Error(translate('Inputs or the connection changed during preview. Click Run again.'));
+    const nodeInputDrafts:NodeInputDrafts=Object.fromEntries(Object.entries(drafts).map(([id,draft])=>[id,draft.fields]));
+    const result=await this.request<Run>('/v1/runs/'+encodeURIComponent(run.id)+'/start',{...body,...(Object.keys(drafts).length?{nodeInputDrafts}:{})},'POST');
+    if(Object.keys(drafts).length)await this.acceptExecutionInputs(drafts);
+    return result;
+  }
   async run(nodeId: string, kind: string, selectionOrOverride?: RunSubmissionOptions | ModelSelection, imageRoute?: ImageRoute, preserveHistoricalOutputs?: boolean) {
     const options = selectionOrOverride && typeof selectionOrOverride === 'object' && ['agent', 'modelOverride', 'imageRoute', 'preserveHistoricalOutputs'].some(key => key in selectionOrOverride)
       ? structuredClone(selectionOrOverride as RunSubmissionOptions)
@@ -618,6 +673,8 @@ export class GraphEditor {
     const epoch = this.connectionEpoch;
     const localInput=this.state.runInputs[nodeId];
     const inputDraft=localInput?structuredClone(localInput.fields):undefined;
+    const memberInputs=kind==='execution'?this.captureExecutionInputs(nodeId):{};
+    const nodeInputDrafts:NodeInputDrafts=Object.fromEntries(Object.entries(memberInputs).map(([id,draft])=>[id,draft.fields]));
     await this.flush();
     this.writable();
     if (epoch !== this.connectionEpoch)
@@ -629,7 +686,7 @@ export class GraphEditor {
     if (kind === 'visualize_generation' && node.type !== 'visualize') throw Error(translate('Page generation requires a visualization node.'));
     if (g.serviceId === 'browser-local' && kind === 'visualize_generation') throw Object.assign(Error(translate('Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.')), { code: 'TEMPORARY_SERVICE_REQUIRED' });
     const visualize = kind === 'visualize_generation';
-    const localInputChanged=()=>this.state.runInputs[nodeId]?.id!==localInput?.id;
+    const localInputChanged=()=>this.state.runInputs[nodeId]?.id!==localInput?.id || Object.entries(memberInputs).some(([id,draft])=>this.state.runInputs[id]?.id!==draft.id);
     const changed = () => Error(translate("Inputs or the connection changed during preview. Click Run again."));
     for (let attempt = 0; attempt < (visualize ? COMMAND_MAX_ATTEMPTS : 1); attempt++) {
       if (visualize) {
@@ -656,11 +713,12 @@ export class GraphEditor {
         const submitted=await this.request<Run>(graphPath(current.projectId, current.graphId) + "/runs", {
           nodeId, kind, idempotencyKey: randomId(), expectedExecutionRevision: current.executionRevision,
           ...(inputDraft?{inputDraft}:{}),
+          ...(Object.keys(memberInputs).length?{nodeInputDrafts}:{}),
           ...(agent ? { agent } : modelOverride ? { modelOverride } : {}),
           ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
           ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
         });
-        if(localInput){this.acceptedInputs.set(nodeId,localInput.id);try {await this.refresh();}catch { /* The accepted Run remains successful; retain its local input until reconciliation. */ }}
+        if(localInput || Object.keys(memberInputs).length)await this.acceptExecutionInputs({...memberInputs,...(localInput?{[nodeId]:localInput}:{})});
         return submitted;
       } catch (error) {
         // Only a definite revision rejection can start a fresh submission.

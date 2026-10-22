@@ -13,9 +13,7 @@
 
 打开 [万象画布官方编辑器](https://canvas.giarld.com)，按照页面提供的引导完成配置即可开始使用。
 
-## 设计哲学：第一性原理
-
-![输入经由系统转化为输出](assets/readme/first-principles.png)
+![工作图示例：分支计算数字、汇总结果，并生成角色手持结果数字的图片](assets/readme/workflow-example.png)
 
 ## 本地构建与运行
 

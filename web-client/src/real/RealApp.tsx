@@ -503,6 +503,16 @@ export function RealApp() {
       setGraphId(id);
     }
   };
+  const executionInputs = useMemo(() => {
+    const withEditor = async <T,>(run:Run,work:(owner:GraphEditor)=>Promise<T>) => {
+      const current=editor.current,scope=current?.getSnapshot().graph;
+      if(scope?.serviceId===run.serviceId && scope.projectId===run.projectId && scope.graphId===run.graphId)return work(current!);
+      const graph=await request<GraphSnapshot>(graphPath(run.projectId,run.graphId));
+      const owner=new GraphEditor(request,graph,localStorage);
+      try {return await work(owner);} finally {owner.dispose();}
+    };
+    return {plan:(run:Run)=>withEditor(run,owner=>owner.executionPlan(run)),start:(run:Run,body:Parameters<GraphEditor['startExecution']>[1])=>withEditor(run,owner=>owner.startExecution(run,body))};
+  },[request]);
   const managementAgents = useMemo(() => {
     if (!serviceId || connection?.status !== 'paired') return undefined;
     return workspaceAgentStore(registry, serviceId);
@@ -1628,7 +1638,7 @@ export function RealApp() {
           {panelContent === 'details' && <div className="real-right-panel-content">
             <div className="service-panel-heading"><h2>{t('Run details')}</h2><button className="icon-button" aria-label={t('Close run details')} onClick={() => setRightPanel(null)}>×</button></div>
             {detailRun && connection && detailRun.serviceId === serviceId ? <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
-              request={request} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
+              request={request} executionInputs={executionInputs} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
               onEditExecutionNode={(run,nodeId)=>{setTemporary(false);setProjectId(run.projectId);setGraphId(run.graphId);setEditExecutionNode({nodeId,graphId:run.graphId,projectId:run.projectId,nonce:Date.now()});}}
               readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/> : <p className="muted">{t('No run history')}</p>}
           </div>}

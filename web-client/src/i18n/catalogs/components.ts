@@ -47,7 +47,7 @@ export const componentsZhCN: Record<string, string> = {
   "Snap node resizing to half-grid steps": "调整尺寸按 0.5 网格对齐",
   "Middle mouse drag": "鼠标中键拖动",
   "Pan the Work Graph": "平移工作图",
-  "Two-finger scroll / Mouse wheel": "双指滑动 / 鼠标滚轮",
+  "Two-finger scroll": "双指滑动",
   "Mouse wheel": "滚轮",
   "Zoom around the pointer": "以指针为中心缩放",
   "Pinch / Ctrl + Mouse wheel": "双指捏合 / Ctrl + 滚轮",
