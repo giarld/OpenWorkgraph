@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { tokenUsage } from './backend/token-usage.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { isTerminalRunStatus, limitNodeTitle } from '@openworkgraph/protocol';
 import type { InputSnapshot, Interaction, InteractionReply, Json, Run, RunNotification, RunStatus, SubmitRun, SandboxMode } from '@openworkgraph/protocol';
@@ -68,11 +69,12 @@ export class Runs {
     const id = String(row.id);
     const executionDetails = row.runtime_details ? JSON.parse(String(row.runtime_details)) : {};
     const executionStart = executionDetails.executionStart as Run['executionStart'];
+    const usage = tokenUsage(executionDetails.tokenUsage?.input, executionDetails.tokenUsage?.output);
     const chainBatch = typeof executionDetails.chainBatch === 'string' ? executionDetails.chainBatch : undefined;
     const chainMembers = chainBatch === id ? this.statement("SELECT r.status FROM run_runtime rt INDEXED BY run_runtime_chain_batch CROSS JOIN runs r ON r.id=rt.run_id WHERE r.project_id=? AND r.graph_id=? AND json_extract(rt.details,'$.chainBatch')=?").all(String(row.project_id),String(row.graph_id),id) : [];
     const chainActive = chainMembers.some(member => !isTerminalRunStatus(member.status as RunStatus));
     const chainControl: Run['chainControl'] = chainMembers.length ? executionDetails.chainStopRequested ? chainActive ? 'stopping' : 'stopped' : chainActive ? 'active' : undefined : undefined;
-    return { serviceId: this.serviceId, projectId: String(row.project_id), graphId: String(row.graph_id), id: String(row.id), nodeId: String(row.node_id), status: row.status as RunStatus, submissionSequence: String(row.sequence), inputDigest: String(row.input_digest), createdAt: String(row.created_at), historyState: row.history_state as Run['historyState'], ...(row.status === 'accepted' && executionStart ? { executionStart } : {}), ...(chainBatch ? {chainBatch} : {}), ...(row.pending_generation_candidate ? {hasPendingGenerationCandidate: true} : {}), ...(chainControl ? {chainControl} : {}) };
+    return { serviceId: this.serviceId, projectId: String(row.project_id), graphId: String(row.graph_id), id: String(row.id), nodeId: String(row.node_id), status: row.status as RunStatus, submissionSequence: String(row.sequence), inputDigest: String(row.input_digest), createdAt: String(row.created_at), historyState: row.history_state as Run['historyState'], ...(row.status === 'accepted' && executionStart ? { executionStart } : {}), ...(chainBatch ? {chainBatch} : {}), ...(row.pending_generation_candidate ? {hasPendingGenerationCandidate: true} : {}), ...(chainControl ? {chainControl} : {}), ...(usage ? { tokenUsage: usage } : {}) };
   }
   list(projectId?: string): Run[] {
     const rows = projectId === undefined ? this.statement(this.selection + ' ORDER BY r.sequence').all() : this.statement(this.selection + ' WHERE r.project_id=? ORDER BY r.sequence').all(projectId);
@@ -335,6 +337,20 @@ export class Runs {
       const reason = next === 'failed' ? recordedFailureReason(details) : undefined;
       this.record(id, 'state', { from: run.status, to: next, ...(reason ? { reason } : {}), ...(next === 'failed' && details.errorDetails ? { errorCode: details.errorCode ?? null, errorDetails: details.errorDetails } : {}) });
       return changed;
+    });
+  }
+  /** Replace cumulative observations, never add replayed callbacks or poll results. */
+  observeTokenUsage(id: string, epoch: string, usage: import('@openworkgraph/protocol').TokenUsage): void {
+    const checked = tokenUsage(usage?.input, usage?.output);
+    if (!checked) return;
+    atomic(this.db, () => {
+      const run = this.get(id), runtime = this.runtime(id);
+      if (runtime.epoch !== epoch || isTerminalRunStatus(run.status)) return;
+      const previous = tokenUsage(run.tokenUsage?.input, run.tokenUsage?.output);
+      const next = { input: Math.max(previous?.input ?? 0, checked.input), output: Math.max(previous?.output ?? 0, checked.output) };
+      if (previous?.input === next.input && previous.output === next.output) return;
+      this.db.prepare('UPDATE run_runtime SET revision=revision+1,details=? WHERE run_id=? AND epoch=? AND revision=?').run(canonicalJson({ ...runtime.details, tokenUsage: next }), id, epoch, runtime.revision);
+      this.event(this.get(id), runtime.revision + 1);
     });
   }
   cancel(id: string, key: string, principal = 'local'): Run {

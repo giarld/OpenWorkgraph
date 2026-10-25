@@ -42,6 +42,7 @@ export class ApiImageAgent implements SchedulerBackend {
       if(this.runs.db.prepare('SELECT 1 FROM image_provider_revoked_credentials WHERE provider_id=? AND revision=?').get(route.providerId,route.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销。');
       phase='provider_request';
       const result=await executeOpenAiImage(plan,frozen.endpoint,secret,AbortSignal.any([controller.signal,AbortSignal.timeout(180000)]));
+      if(result.tokenUsage)this.runs.observeTokenUsage(run.id,context.epoch,result.tokenUsage);
       if(controller.signal.aborted||this.runs.get(run.id).status==='cancelling'){context.emit({type:'stopped'});return;}
       phase='output_staging';
       await stageApiImageOutput(run,this.dirs,result.bytes,{providerId:route.providerId,modelId:route.modelId,inputDigest:snapshot.inputDigest});

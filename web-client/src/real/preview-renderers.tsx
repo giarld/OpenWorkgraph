@@ -31,7 +31,7 @@ function SvgPreview({blob,name}: PreviewRendererProps) {
     return () => URL.revokeObjectURL(url);
   },[blob]);
   if (failed) return <p role="status">{t('SVG preview failed. Switch to plain text to inspect the file contents.')}</p>;
-  return image?.blob === blob ? <img className="ow-preview-svg" src={image.url} alt={t('SVG preview: {name}', {name})} draggable={false} onContextMenu={e => e.preventDefault()} onError={() => setFailed(true)}/> : <p role="status">{t('Loading SVG…')}</p>;
+  return image?.blob === blob ? <img className="ow-preview-svg" src={image.url} alt={t('SVG preview: {name}', {name})} draggable={false} onContextMenu={e => e.stopPropagation()} onError={() => setFailed(true)}/> : <p role="status">{t('Loading SVG…')}</p>;
 }
 function ImagePreview({blob,name,mime}: PreviewRendererProps) {
   const {t} = useI18n();
@@ -43,7 +43,7 @@ function ImagePreview({blob,name,mime}: PreviewRendererProps) {
     return () => URL.revokeObjectURL(url);
   },[blob,name,mime]);
   if (failed) return <p role="status">{t('Image preview failed. Switch to hexadecimal to inspect the file contents.')}</p>;
-  return image?.blob === blob ? <img className="ow-preview-image" src={image.url} alt={name} draggable={false} onContextMenu={e => e.preventDefault()} onError={() => setFailed(true)}/> : <p role="status">{t('Loading image…')}</p>;
+  return image?.blob === blob ? <img className="ow-preview-image" src={image.url} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} onError={() => setFailed(true)}/> : <p role="status">{t('Loading image…')}</p>;
 }
 function CodePreview(props: PreviewRendererProps) { return <MarkdownPreview {...props} text={codeMarkdown(props.text,props.name)}/>; }
 function PdfPreview({blob}: PreviewRendererProps) { const {t} = useI18n(); return <Suspense fallback={<p role="status">{t('Loading PDF reader…')}</p>}><Pdf blob={blob}/></Suspense>; }

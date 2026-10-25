@@ -1,3 +1,4 @@
+import { tokenUsage } from './token-usage.js';
 import type { AgentHostTools } from '../agents/host-tools.js';
 import { APPROVAL_MAX_PATHS, normalizeApprovalPermissions, validApprovalPaths, type ApprovalPermissions } from '@openworkgraph/protocol';
 import { AgentOperations } from '../agents/operations.js';
@@ -228,6 +229,10 @@ export class CodexBackendAdapter implements BackendAdapter {
     }
     if (['item/started', 'item/completed'].includes(method) && params.turnId === s.snapshot.turnId && s.snapshot.turnId && params.item?.type === 'fileChange') this.fileChange(s, params.item);
     if (method === 'item/completed' && params.turnId === s.snapshot.turnId && s.snapshot.turnId) this.message(s, params.item);
+    if (method === 'thread/tokenUsage/updated' && params.turnId === s.snapshot.turnId) {
+      const usage = tokenUsage(params.tokenUsage?.total?.inputTokens, params.tokenUsage?.total?.outputTokens);
+      if (usage) { s.snapshot.tokenUsage = usage; this.emit(s); }
+    }
     if (method === 'turn/completed' && params.turn?.id === s.snapshot.turnId) {
       if (s.finishing) return;
       if (s.pendingSkillCommands || s.work.size) {

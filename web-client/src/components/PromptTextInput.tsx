@@ -1,9 +1,8 @@
 import type { SkillReference } from "../../../packages/protocol/src/skills";
-import { legacySkillMentions, skillSourceLabel, skillIdentityKey } from "../../../packages/protocol/src/skills";
+import { skillSourceLabel, skillIdentityKey } from "../../../packages/protocol/src/skills";
 import { useLayoutEffect, useRef, useImperativeHandle, type Ref, type KeyboardEvent, type DragEvent } from 'react';
-import { extractReferenceMention } from '../real/reference-mentions';
-import { extractBuiltinFeatureMention } from '../real/builtin-feature-mentions';
-import { extractProjectFileMarkdownLinks, syncSkillReferences, validSkillReferences, type PromptEdit, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
+import { syncSkillReferences, validSkillReferences, type PromptEdit, type ProjectFileMentionCandidate } from '../real/project-file-mentions';
+import { promptMentionTokens, promptMentionIconPath } from './prompt-mentions';
 
 export interface PromptTextInputHandle {
   value: string;
@@ -16,26 +15,6 @@ export interface PromptTextInputHandle {
   caretTop(): number;
 }
 
-type Token = { start: number; end: number; raw: string; name: string; kind: string; path?: string; id?: string };
-function tokens(value: string, skills: boolean, refs: readonly SkillReference[], skillNames: readonly string[]): Token[] {
-  const result: Token[] = [];
-  const pattern = /\[((?:\\.|[^\]])*)\]\((?:<((?:\\.|[^>\r\n])*)>|([^)\s]+))\)/g;
-  for (const match of value.matchAll(pattern)) {
-    const feature = extractBuiltinFeatureMention(match[0]);
-    if (feature) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...feature });
-    const reference = extractReferenceMention(match[0]);
-    if (reference) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...reference });
-    const item = extractProjectFileMarkdownLinks(match[0])[0];
-    if (item) result.push({ start: match.index!, end: match.index! + match[0].length, raw: match[0], ...item, path: item.relativePath });
-  }
-  if (skills) for (const ref of validSkillReferences(value, refs)) {
-    if (!result.some(token => ref.start < token.end && ref.end > token.start)) result.push({ start: ref.start, end: ref.end, raw: value.slice(ref.start, ref.end), name: ref.name, kind: 'skill' });
-  }
-  if (skills) for (const { name, start, end } of legacySkillMentions(value, skillNames)) {
-    if ((start === 0 || /\s/.test(value[start - 1])) && (end === value.length || /[\s.,!?;，。！？；]/.test(value[end])) && !result.some(token => start < token.end && end > token.start)) result.push({ start, end, raw: value.slice(start, end), name, kind: 'skill' });
-  }
-  return result.sort((a, b) => a.start - b.start);
-}
 function textOf(node: Node): string {
   if (node instanceof HTMLElement && node.dataset.mention !== undefined) return node.dataset.mention;
   if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? '';
@@ -122,7 +101,7 @@ function select(root: HTMLElement, start: number, end: number) {
 }
 function render(root: HTMLElement, value: string, skills: boolean, skillReferences: SkillReference[], skillNames: readonly string[], onOpenFile?: (item: ProjectFileMentionCandidate) => void, onOpenReference?: (id: string) => void, skillBackendNames: Readonly<Record<string, string>> = {}, skillConflictReasons: Readonly<Record<string, string>> = {}) {
   const fragment = document.createDocumentFragment(); let cursor = 0;
-  for (const token of tokens(value, skills, skillReferences, skillNames)) {
+  for (const token of promptMentionTokens(value, skills, skillReferences, skillNames)) {
     fragment.append(document.createTextNode(value.slice(cursor, token.start)));
     const chip = document.createElement('span'); chip.contentEditable = 'false'; chip.className = 'prompt-mention-token';
     const reference = skillReferences.find(ref => ref.start === token.start && ref.end === token.end);
@@ -147,7 +126,7 @@ function render(root: HTMLElement, value: string, skills: boolean, skillReferenc
     icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('width', '14'); icon.setAttribute('height', '14');
     icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor'); icon.setAttribute('stroke-width', '1.8'); icon.setAttribute('aria-hidden', 'true');
     const path = document.createElementNS(icon.namespaceURI, 'path');
-    path.setAttribute('d', (token.kind === 'skill' || token.kind === 'builtin-feature') ? 'm12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z' : token.kind === 'directory' ? 'M3 7V5h6l2 2h10v13H3Z' : 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6M8 13h8M8 17h6');
+    path.setAttribute('d', promptMentionIconPath(token.kind));
     if (conflict) path.setAttribute('d', 'M12 9v4M12 17h.01M10.3 3.9 1.8 18.6a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z');
     icon.append(path); chip.append(icon, document.createTextNode(token.name));
     if (conflict) { const reason = document.createElement('span'); reason.className = 'prompt-skill-conflict-reason'; reason.textContent = conflict; chip.append(reason); }
@@ -224,7 +203,7 @@ export function PromptTextInput({ ref, value, disabled, skillEnabled, skillRefer
       if (backward) start = Math.max(0, start - (source.codePointAt(start - 2)! > 0xffff ? 2 : 1));
       if (forward) end = Math.min(source.length, end + (source.codePointAt(end)! > 0xffff ? 2 : 1));
     }
-    for (const token of tokens(source, skillEnabled, currentRefs.current, skillNames)) if (start < token.end && end > token.start) { start = Math.min(start, token.start); end = Math.max(end, token.end); }
+    for (const token of promptMentionTokens(source, skillEnabled, currentRefs.current, skillNames)) if (start < token.end && end > token.start) { start = Math.min(start, token.start); end = Math.max(end, token.end); }
     const next = source.slice(0, start) + text + source.slice(end);
     const edit = { start, end, text };
     const refs = validSkillReferences(next, [...syncSkillReferences(source, next, currentRefs.current, edit), ...pastedRefs.map(ref => ({ ...ref, start: ref.start + start, end: ref.end + start }))]);

@@ -1638,7 +1638,7 @@ export function RealApp() {
           {panelContent === 'details' && <div className="real-right-panel-content">
             <div className="service-panel-heading"><h2>{t('Run details')}</h2><button className="icon-button" aria-label={t('Close run details')} onClick={() => setRightPanel(null)}>×</button></div>
             {detailRun && connection && detailRun.serviceId === serviceId ? <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
-              request={request} executionInputs={executionInputs} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
+              request={request} executionInputs={executionInputs} graphs={current?.graphs ?? []} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
               onEditExecutionNode={(run,nodeId)=>{setTemporary(false);setProjectId(run.projectId);setGraphId(run.graphId);setEditExecutionNode({nodeId,graphId:run.graphId,projectId:run.projectId,nonce:Date.now()});}}
               readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/> : <p className="muted">{t('No run history')}</p>}
           </div>}

@@ -757,3 +757,8 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 
 .run-preserve-outputs { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; min-height: 24px; margin: 16px 0; cursor: pointer; }
 .run-preserve-outputs input { flex: 0 0 16px; width: 16px; min-width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; accent-color: var(--text); }
+
+.run-parameters { display: grid; gap: 12px; min-width: 0; margin: 12px 0 0; }
+.run-parameters dt { color: var(--muted); }
+.run-parameters dd { min-width: 0; margin: 4px 0 0; }
+.run-parameters p, .run-parameters pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }

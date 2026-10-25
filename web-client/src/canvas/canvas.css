@@ -180,6 +180,11 @@
   pointer-events: none;
   opacity: 0.4;
 }
+/* Iframe events cannot bubble to the graph. Select their node before handing
+   pointer interaction to the embedded document and its native context menu. */
+.owg-canvas[data-node-context-menu] .owg-node:not(.selected) iframe {
+  pointer-events: none;
+}
 .owg-grid.lines {
   background-image:
     linear-gradient(var(--canvas-line) 1px, transparent 1px),

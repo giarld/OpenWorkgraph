@@ -1,4 +1,6 @@
 import { MarkdownPreview } from "../real/MarkdownPreview";
+import { PromptText } from './PromptText';
+import type { SkillReference } from '../../../packages/protocol/src/skills';
 import {
   useEffect,
   useId,
@@ -80,7 +82,7 @@ export function AssetPreviewContent({
   return (
     <div className="media-content">
       {kind === "image" ? (
-        <img src={url} alt={title} draggable={false} onContextMenu={e => e.preventDefault()} onError={mediaError} />
+        <img src={url} alt={title} draggable={false} onContextMenu={e => e.stopPropagation()} onError={mediaError} />
       ) : kind === "video" ? (
         <video
           data-canvas-interactive
@@ -163,7 +165,7 @@ function RunProcessText({ text, collapsible }: { text: string; collapsible: bool
   </div>;
 }
 
-function SubmittedPrompt({ text }: { text: string }) {
+function SubmittedPrompt({ text, skillReferences, skillNames }: { text: string; skillReferences?: readonly SkillReference[]; skillNames?: readonly string[] }) {
   const { t } = useI18n();
   const contentId = useId();
   const copyRef = useRef<HTMLDivElement>(null);
@@ -186,13 +188,13 @@ function SubmittedPrompt({ text }: { text: string }) {
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
     observer?.observe(copy);
     return () => observer?.disconnect();
-  }, [text]);
+  }, [text, skillReferences, skillNames]);
 
   return <div className="execution-submitted-prompt" data-expandable={overflowing ? 'true' : 'false'}>
     {overflowing && <button type="button" data-canvas-interactive className="execution-submitted-prompt-toggle" aria-label={expanded ? t('Collapse submitted prompt') : t('Expand submitted prompt')} aria-controls={contentId} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><ChevronRight size={14} aria-hidden="true" /></button>}
     <div className="execution-submitted-prompt-copy" ref={copyRef}>
-      <p id={contentId} className="execution-submitted-prompt-text" data-expanded={expanded ? 'true' : undefined}>{text}</p>
-      <p ref={measureRef} className="execution-submitted-prompt-measure" aria-hidden="true">{text}</p>
+      <p id={contentId} className="execution-submitted-prompt-text" data-expanded={expanded ? 'true' : undefined}><PromptText text={text} skillReferences={skillReferences} skillNames={skillNames}/></p>
+      <p ref={measureRef} className="execution-submitted-prompt-measure" aria-hidden="true"><PromptText text={text} skillReferences={skillReferences} skillNames={skillNames}/></p>
     </div>
   </div>;
 }
@@ -201,11 +203,12 @@ export function RunSummary({
   run,
   node,
   interaction,
-}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string }; statusLabel?: string; interaction?: ReactNode }) {
+}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string; skillReferences?: readonly SkillReference[]; skillNames?: readonly string[] }; statusLabel?: string; interaction?: ReactNode }) {
   const { t } = useI18n();
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
-  const submittedPrompt = run ? (run.prompt ?? node.prompt).trim() : "";
+  const submittedPrompt = run ? (run.prompt ?? node.prompt) : "";
+  const hasSubmittedPrompt = !!submittedPrompt.trim();
   useEffect(() => {
     const element = list.current;
     if (!element) return;
@@ -221,9 +224,9 @@ export function RunSummary({
   }, [following, run?.summaries.length, run?.status]);
   return (
     <div className="execution-content">
-      {run && submittedPrompt && <SubmittedPrompt text={submittedPrompt} />}
+      {run && hasSubmittedPrompt && <SubmittedPrompt text={submittedPrompt} skillReferences={run.skillReferences} skillNames={run.skillNames}/>}
       {run ? (
-        <div className={`execution-process-wrap${submittedPrompt ? " has-submitted-prompt" : ""}`}>
+        <div className={`execution-process-wrap${hasSubmittedPrompt ? " has-submitted-prompt" : ""}`}>
           <RunProcessList
             className="run-summaries"
             ref={list}

@@ -103,6 +103,7 @@ export interface CanvasProps {
   renderToolbar?(node: WorkNode): ReactNode;
   renderPanel?(node: WorkNode): ReactNode;
   onCreateMenu?(position: Point, screenPosition: Point): void;
+  onNodeContextMenu?(node: WorkNode, screenPosition: Point): void;
   onOpenNode?(node: WorkNode): void;
   onActivateNode?(node: WorkNode): void;
   canEditTextOnSpace?(node: WorkNode): boolean;
@@ -1144,6 +1145,7 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
         ref={root}
         className={"owg-canvas " + (props.className ?? "")}
         data-theme={props.theme ?? "dark"}
+        data-node-context-menu={props.onNodeContextMenu ? 'true' : undefined}
         data-viewport-animating={viewportAnimating}
         tabIndex={0}
         role="region"
@@ -1233,11 +1235,31 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
               y: e.clientY,
             });
         }}
+        onContextMenuCapture={(e) => {
+          const nodeId = element(e.target)?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
+          const node = props.graph.nodes.find(node => node.id === nodeId);
+          // An unselected node always opens its menu, even over a preview or
+          // editor. Execution nodes always use the node menu; other selected
+          // content gets its own context-menu handler first.
+          if (!node || (node.type !== 'execution' && props.selectedIds.includes(node.id)) || !props.onNodeContextMenu) return;
+          e.preventDefault();
+          e.stopPropagation();
+          if (suppressContext.current) { suppressContext.current = false; return; }
+          setSelectedEdge(null);
+          props.onNodeContextMenu(node, { x: e.clientX, y: e.clientY });
+        }}
         onContextMenu={(e) => {
-          if (interactive(e.target)) return;
+          if (e.defaultPrevented || interactive(e.target)) return;
           e.preventDefault();
           if (suppressContext.current) {
             suppressContext.current = false;
+            return;
+          }
+          const nodeId = element(e.target)?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
+          const node = props.graph.nodes.find(node => node.id === nodeId);
+          if (node && props.onNodeContextMenu) {
+            setSelectedEdge(null);
+            props.onNodeContextMenu(node, { x: e.clientX, y: e.clientY });
             return;
           }
           if (

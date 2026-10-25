@@ -1,3 +1,4 @@
+import { tokenUsage, sumTokens } from '../backend/token-usage.js';
 import { AGENT_PLUGIN_API_VERSION, SERVICE_VERSION, isSkillName } from '@openworkgraph/protocol';
 import type { AgentDescriptor, AgentAvailability, AgentModelOption, FrozenSkill, Json, SandboxMode } from '@openworkgraph/protocol';
 import { canonicalJson } from '../persistence/repositories.js';
@@ -93,6 +94,7 @@ class OpenCodeAdapter implements AgentAdapter {
   private readonly operations = new AgentOperations();
   private readonly secrets: Record<string, string> = {};
   private readonly messages = new Set<string>();
+  private readonly messageUsage = new Map<string, import('@openworkgraph/protocol').TokenUsage>();
   private readonly sessions = new Set<string>();
   private readonly commands = new Map<string, { fingerprint: string; value: Promise<Json> }>();
   private snapshot: RuntimeSnapshot;
@@ -286,6 +288,25 @@ class OpenCodeAdapter implements AgentAdapter {
     if (main?.model?.providerID + '/' + main?.model?.id !== this.context!.model.model || (main?.model?.variant ?? 'default') !== (selectedVariant(this.dependencies.selection) || 'default') || main?.agent !== String(this.dependencies.selection.options.profile || 'build')) throw new AgentError('outcome_unknown');
     const content = (await transport.request('/api/session/' + this.sessionId + '/context') as Native).data;
     if (!Array.isArray(content) || content.length > 2048) throw new AgentError('protocol_error');
+    // Compaction records its own model usage. Native IDs deduplicate repeated
+    // polls and inherited fork history; retain usage removed from later context.
+    for (const id of this.sessions) {
+      const messages = id === this.sessionId ? content : (await transport.request('/api/session/' + id + '/context') as Native).data;
+      if (!Array.isArray(messages) || messages.length > 2048) throw new AgentError('protocol_error');
+      for (const message of messages) if (['assistant', 'compaction'].includes(message.type) && typeof message.id === 'string' && message.tokens) {
+        const value = message.tokens;
+        const usage = tokenUsage(sumTokens(value.input, value.cache?.read ?? 0, value.cache?.write ?? 0), sumTokens(value.output, value.reasoning ?? 0));
+        if (usage) {
+          const previous = this.messageUsage.get(message.id);
+          this.messageUsage.set(message.id, {input: Math.max(previous?.input ?? 0, usage.input), output: Math.max(previous?.output ?? 0, usage.output)});
+        }
+      }
+    }
+    if (this.messageUsage.size) {
+      const usage = [...this.messageUsage.values()];
+      const total = tokenUsage(sumTokens(...usage.map(value => value.input)), sumTokens(...usage.map(value => value.output)));
+      if (total) this.snapshot.tokenUsage = total;
+    }
     for (const message of content) if (message.type === 'assistant' && message.time?.completed && !message.error) {
       const answer = (message.content ?? []).filter((part: Native) => part.type === 'text').map((part: Native) => part.text).join(String.fromCharCode(10));
       if (Buffer.byteLength(answer) > 1024 * 1024) throw new AgentError('protocol_error');

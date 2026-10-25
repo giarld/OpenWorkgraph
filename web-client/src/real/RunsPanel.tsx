@@ -5,6 +5,7 @@ import { isTerminalRunStatus, normalizeApprovalPermissions, validApprovalPaths, 
 import type { RunStatus } from '../../../packages/protocol/src/index';
 import type { AgentApprovalDetails, AgentQuestionMode } from '../../../packages/protocol/src/agents';
 import { RunProcessList } from '../components/NodeContent';
+import { getNodeDefinition } from '../components/node-registry';
 import { ArrowDown, Check, ChevronRight, ShieldCheck, Terminal, X } from 'lucide-react';
 import { RefreshIcon } from '../components/RefreshIcon';
 import './RunApproval.css';
@@ -18,6 +19,7 @@ export interface RunsPanelProps {
   mode?: 'all' | 'queue' | 'details'; selectedRunId?: string; onSelectRun?: (run: Run) => void;
   describeRun?: (run: Run) => { node: string; graph: string; project: string };
   request: <T>(path: string, body?: unknown, method?: string) => Promise<T>;
+  graphs?: GraphSnapshot[];
   runs: Run[]; graphId?: string; onLocate: (run: Run) => void;
   executionInputs?: import('./ExecutionStartPanel').ExecutionInputs;
   onEditExecutionNode?: (run: Run, nodeId: string) => void;
@@ -215,13 +217,37 @@ function RunSectionSummary({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
   return <summary><ChevronRight className="run-section-chevron" size={16} aria-hidden="true" /><span className="run-section-title">{children}</span><span className="run-section-expand" aria-hidden="true">{t('Expand')}</span><span className="run-section-collapse" aria-hidden="true">{t('Collapse')}</span></summary>;
 }
-function FrozenInputs({ snapshot }: { snapshot: InputSnapshot }) {
+export function RunParameters({ snapshot, run, nodes = [] }: { snapshot: InputSnapshot | null; run: Run; nodes?: Pick<GraphSnapshot['nodes'][number], 'id' | 'type' | 'content'>[] }) {
   const { t } = useI18n();
-  const route=snapshot.imageRoute;
-  const model=snapshot.agent?.model ?? snapshot.model;
-  const inputModes: Record<string, string> = { text: 'Text to image', image: 'Image to image', text_image: 'Text and image to image' };
-  return <><p>{route?.type==='api' ? t('Image generation API') + ' · ' + route.providerId + ' / ' + route.modelId + ' · ' + t(snapshot.inputMode ? inputModes[snapshot.inputMode] ?? 'Unknown mode' : 'Unknown mode') : model ? (route?.type==='codex' ? t('Codex image generation') + ' · ' : snapshot.agent ? snapshot.agent.backendId + ' · ' : '') + model.model + ' · ' + (model.reasoningEffort || t('Default reasoning effort')) : t('Snapshot model unavailable')}</p><pre>{snapshot.prompt}</pre>
-    {snapshot.resources.map((resource, i) => <article key={i}><strong>{t('Reference {number} · {kind}', { number: i + 1, kind: resource.kind })}</strong>{resource.text !== null && <pre>{resource.text}</pre>}{resource.resource && <p className="muted">{resource.resource.mime} · v{resource.resource.version}</p>}</article>)}</>;
+  const sources = new Map<string, string>();
+  for (const reference of [...(snapshot?.resources ?? []), ...(snapshot?.projectFiles ?? [])]) {
+    for (const id of reference.sourceNodeIds) if (!sources.has(id)) sources.set(id, reference.kind);
+  }
+  for (const reference of snapshot?.frozenVisualizeInputs ?? []) if (!sources.has(reference.sourceNodeId)) sources.set(reference.sourceNodeId, 'visualize');
+  const references = [...sources].map(([id, kind]) => {
+    const node = nodes.find(node => node.id === id);
+    const title = node && object(node.content).title;
+    return {id, type: t(getNodeDefinition(node?.type ?? kind).title), name: node ? typeof title === 'string' && title.trim() ? title : t('Untitled node') : t('Node removed')};
+  });
+  const route = snapshot?.imageRoute;
+  const model = snapshot?.agent?.model ?? snapshot?.model;
+  const agentModel = route?.type === 'api'
+    ? t('Image generation API') + ' · ' + route.providerId + ' / ' + route.modelId
+    : model ? (snapshot?.agent?.backendId ?? 'codex') + ' · ' + model.model + ' · ' + (model.reasoningEffort || t('Default reasoning effort'))
+    : t('Snapshot model unavailable');
+  return <>
+    {!snapshot && <p>{t('Frozen input could not be read. It will be retried automatically.')}</p>}
+    <dl className="run-parameters">
+    {snapshot && <>
+      <div><dt>{t('Prompt')}</dt><dd><pre>{snapshot.prompt}</pre></dd></div>
+      <div><dt>{t('Reference content')}</dt><dd>
+        {!references.length && <p>{t('No references')}</p>}
+        {references.map(reference => <p key={reference.id}>{reference.type} · {reference.name}</p>)}
+      </dd></div>
+      <div><dt>{t('Agent / model / reasoning effort')}</dt><dd><p>{agentModel}</p></dd></div>
+    </>}
+    {isTerminalRunStatus(run.status) && <div><dt>{t('Token usage')}</dt><dd><p>{t('Input {input} · Output {output}', { input: run.tokenUsage?.input ?? 0, output: run.tokenUsage?.output ?? 0 })}</p></dd></div>}
+  </dl></>;
 }
 export function InteractionForm({ interaction, disabled, onReply, onError }: { interaction: Interaction; disabled: boolean; onReply: (answer: Json) => void; onError: (error: unknown) => void }) {
   const { t } = useI18n();
@@ -477,7 +503,7 @@ export function RunsPanel(props: RunsPanelProps) {
           <div className="button-row"><button className="primary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('accept')}>{t('Accept candidate')}</button><button className="secondary-button" disabled={disabled || !current.target || current.target.readOnly} onClick={() => setConfirmCandidate('discard')}>{t('Discard candidate')}</button></div>
           {confirmCandidate && current.target && <div role="group" aria-label={t('Confirm candidate action')}><p>{t('{action}, validating version {version}.', { action: confirmCandidate === 'accept' ? t('Replace the current body above with the candidate') : t('Discard this candidate and keep the current body'), version: current.target.contentVersion })}</p><button className="primary-button" disabled={disabled} onClick={() => void mutate(() => decideRunCandidate(request, selected, confirmCandidate, current.target!.contentVersion, randomId()))}>{confirmCandidate === 'accept' ? t('Confirm accept') : t('Confirm discard')}</button><button className="secondary-button" disabled={busy} onClick={() => setConfirmCandidate(null)}>{t('Back')}</button></div>}
         </section>}
-        <details className="snapshot-details run-section"><RunSectionSummary>{t('Frozen input / model / resource versions for this run')}</RunSectionSummary>{current.snapshot ? <FrozenInputs snapshot={current.snapshot} /> : <p>{t('Frozen input could not be read. It will be retried automatically.')}</p>}</details>
+        <details className="snapshot-details run-section"><RunSectionSummary>{t('Parameters for this run')}</RunSectionSummary><RunParameters snapshot={current.snapshot} run={selected} nodes={props.graphs?.find(graph => graph.serviceId === selected.serviceId && graph.projectId === selected.projectId && graph.graphId === selected.graphId)?.nodes ?? []} /></details>
       </>}
       </>}
     </>}

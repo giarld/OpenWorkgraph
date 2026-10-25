@@ -87,6 +87,7 @@ export class RuntimeBackend implements SchedulerBackend {
   private snapshot(snapshot: RuntimeSnapshot, context: BackendContext, expectedRunId: string): void {
     if (!this.accepts(snapshot, context, expectedRunId)) return;
     const run = this.runs.get(snapshot.runId);
+    if (snapshot.tokenUsage) this.runs.observeTokenUsage(run.id, context.epoch, snapshot.tokenUsage);
     if (snapshot.state === 'starting') return;
     const backendId = this.runs.snapshot(run.id).agent?.backendId;
     if (run.status === 'preparing') context.emit({ type: 'started', identity: { threadId: snapshot.threadId, turnId: snapshot.turnId, ...(backendId ? { backendId, attemptId: context.epoch } : {}) } });

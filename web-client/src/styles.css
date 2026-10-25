@@ -562,6 +562,14 @@ pre {
   padding: 2px 4px 8px;
   color: var(--muted);
 }
+.node-context-menu {
+  max-width: calc(100vw - 24px);
+}
+.node-context-menu .create-option > svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
 @media (max-height: 560px) {
   .node-create-menu {
     display: grid;
@@ -1526,7 +1534,18 @@ pre {
 .execution-depth-legend i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
 .execution-depth-legend .is-selected { background: var(--depth-success); }
 .execution-depth-legend .is-target { background: transparent; border: 1.5px solid var(--depth-success); box-shadow: 0 0 0 2px color-mix(in srgb, var(--depth-success) 15%, transparent); }
-.execution-depth-preview { max-width: 100%; max-height: 420px; overflow: auto; border: 1px solid var(--stroke); border-radius: 12px; background-color: var(--canvas); background-image: radial-gradient(circle, color-mix(in srgb, var(--faint) 25%, transparent) .7px, transparent .8px); background-size: 12px 12px; scrollbar-width: thin; scrollbar-color: var(--stroke) transparent; }
+.execution-depth-map { position: relative; min-width: 0; }
+.execution-depth-preview { max-width: 100%; max-height: 420px; overflow: auto; overscroll-behavior: contain; user-select: none; cursor: grab; border: 1px solid var(--stroke); border-radius: 12px; background-color: var(--canvas); background-image: radial-gradient(circle, color-mix(in srgb, var(--faint) 25%, transparent) .7px, transparent .8px); background-size: 12px 12px; scrollbar-width: thin; scrollbar-color: var(--stroke) transparent; }
+.execution-depth-map > .execution-depth-expand { position: absolute; top: 8px; left: 8px; z-index: 1; box-sizing: border-box; width: 32px; min-width: 32px; max-width: 32px; height: 32px; min-height: 32px; max-height: 32px; aspect-ratio: 1; padding: 0; background: var(--panel); border: 1px solid var(--stroke); box-shadow: 0 2px 6px #0001; }
+.execution-depth-preview:focus-visible, .execution-depth-expand:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.execution-depth-preview[data-panning="true"], .execution-depth-preview[data-panning="true"] .execution-depth-node { cursor: grabbing; }
+.execution-depth-dialog { width: min(1100px, calc(100vw - 32px)); height: min(800px, calc(100dvh - 32px)); max-width: none; max-height: none; margin: auto; padding: 20px; box-sizing: border-box; border: 1px solid var(--stroke); border-radius: 18px; color: var(--text); box-shadow: var(--shadow); }
+.execution-depth-dialog[open] { display: flex; flex-direction: column; gap: 12px; }
+.execution-depth-dialog::backdrop { background: #0005; }
+.execution-depth-dialog .execution-depth-heading strong { flex: 1; }
+.execution-depth-dialog .execution-depth-legend { margin: 0; }
+.execution-depth-dialog .execution-depth-map { flex: 1; min-height: 0; }
+.execution-depth-dialog .execution-depth-preview { height: 100%; max-height: none; box-sizing: border-box; }
 .execution-depth-preview svg { display: block; max-width: none; margin: 8px auto; }
 .execution-depth-edge { fill: none; stroke: var(--faint); stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
 .execution-depth-edge.is-selected { stroke: var(--depth-success); opacity: .65; }
@@ -1542,7 +1561,7 @@ pre {
 .execution-depth-symbol { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .execution-depth-play { fill: currentColor; }
 .execution-depth-title { fill: var(--text); font-size: 12px; font-weight: 500; }
-.execution-depth-status { fill: currentColor; font-size: 11px; font-weight: 400; }
+.execution-depth-status { color: inherit; font-size: 11px; font-weight: 400; line-height: 16px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .execution-depth-node[aria-disabled="false"]:hover .execution-depth-hit { fill: color-mix(in srgb, var(--text) 5%, transparent); }
 .execution-depth-node:focus-visible .execution-depth-hit { stroke: var(--link); stroke-width: 2; }
 .execution-depth-node[aria-disabled="true"] { cursor: default; }

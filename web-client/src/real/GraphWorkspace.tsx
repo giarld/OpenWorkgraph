@@ -9,6 +9,8 @@ import { openVisualizeStandalone, visualizeDownloadFilename, visualizeStandalone
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES, type VisualizeAssetPackage, type VisualizeCompatibility } from '../../../packages/protocol/src/visualize-library';
 import { syncBuiltinFeatureMentions } from './builtin-feature-mentions';
 import { NodeInfoDialog } from '../components/NodeInfoDialog';
+import { NodeContextMenu } from '../components/NodeContextMenu';
+import { NodeToolButton } from '../components/NodeToolButton';
 import { NodeTitleInput } from '../components/NodeTitleInput';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { PreviewDialogHeading, PreviewDialogLayers, visibleDialogControls, type PreviewDialogNavigation } from '../components/PreviewDialogStack';
@@ -41,7 +43,7 @@ import { canDropAsset, dropAsset } from './asset-drag';
 import { canDropProjectFile, dropProjectFile } from './project-file-drag';
 import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFileReference, projectFileSource } from './project-file-reference';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { Info, Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
+import { Pencil, Info, Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
 import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
@@ -171,7 +173,7 @@ function ProjectFileContent({ request, projectId, source, mime, name, compact = 
   if (value.state === 'missing') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{t('The project file no longer exists. Its reference and connections are preserved.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Check again')}</button></div>;
   if (value.state === 'too-large') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{t('The file exceeds 50 MiB and cannot be previewed. Reduce its size and try again.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry reading')}</button></div>;
   if (value.state === 'unavailable') return <div className="ow-project-reference-empty"><strong>{name}</strong><span>{path}</span><span>{value.error || t('The project file is currently unavailable. Check the workspace or project directory.')}</span><button type="button" onClick={() => setRetry(value => value + 1)}>{t('Retry reading')}</button></div>;
-  if (mime.startsWith('image/')) return <div className="ow-project-reference-preview"><img src={'data:' + mime + ';base64,' + value.data} alt={name} onContextMenu={e => e.preventDefault()}/><small>{path}</small></div>;
+  if (mime.startsWith('image/')) return <div className="ow-project-reference-preview"><img src={'data:' + mime + ';base64,' + value.data} alt={name} onContextMenu={e => e.stopPropagation()}/><small>{path}</small></div>;
   if (mime.startsWith('text/') || ['application/json','application/xml','application/yaml'].includes(mime)) {
     const bytes = Uint8Array.from(atob(value.data ?? ''), character => character.charCodeAt(0));
     const text = new TextDecoder().decode(bytes);
@@ -367,6 +369,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     saveNodeEditorState(key, open);
     setNodeEditorStates(previous => previous.get(key) === open ? previous : new Map(previous).set(key, open));
   };
+  const [nodeContextMenu, setNodeContextMenu] = useState<{ nodeId: string; screen: { x: number; y: number } }>();
   const [createMenu, setCreateMenu] = useState<{ world: { x: number; y: number }; screen: { x: number; y: number }; connection?: { nodeId: string; port: "input" | "output" }; preferAbove?: boolean }>();
   const createMenuElement = useRef<HTMLDivElement>(null);
   const [createMenuPosition, setCreateMenuPosition] = useState<{ left: number; top: number }>();
@@ -756,6 +759,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }), [g, readOnly, state.drafts, t]);
   const node = g.nodes.find((n) => n.id === selected[0]);
   useEffect(() => {
+    if (nodeContextMenu && (nodeContextMenu.nodeId !== node?.id || selected.length !== 1)) setNodeContextMenu(undefined);
+  }, [nodeContextMenu, node?.id, selected.length]);
+  useEffect(() => {
     if(node?.type!=='image'||isProjectFileReference(node.content)||!props.online){setImagePreview(null);return;}
     let live=true;
     setImagePreview(null);
@@ -798,10 +804,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const key = failureKey(run);
     setAcknowledgedFailures(previous => previous.has(key) ? previous : new Set([...previous, key]));
   };
-  const selectNodes = (ids: string[]) => {
+  const selectNodes = (ids: string[], openEditor = true) => {
     setConfirmRunNodeId(undefined);
     setSelectionRevision(revision => revision + 1);
-    if (ids.length !== 1 || selected.length !== 1 || selected[0] !== ids[0]) {
+    if (openEditor && (ids.length !== 1 || selected.length !== 1 || selected[0] !== ids[0])) {
       const snapshot = editor.getSnapshot();
       const target = ids.length === 1 ? snapshot.graph.nodes.find(item => item.id === ids[0]) : undefined;
       const targetContent = object(snapshot.drafts.find(item => item.nodeId === target?.id)?.content ?? target?.content ?? {});
@@ -834,7 +840,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   },[props.editExecutionNode,g.graphId,g.projectId]);
   const progress = useRunProgress(props.request, graphRuns, props.online, props.refreshToken);
   const submittedInputs = useRunInputs(props.request, graphRuns, props.online, props.refreshToken);
-  const submittedPrompts = useMemo(() => Object.fromEntries(Object.entries(submittedInputs).map(([id, input]) => [id, input.prompt])), [submittedInputs]);
   const nodeRenderKeys = useMemo(() => new Map(g.nodes.map(wire => {
     const run = latestNodeRuns.get(wire.id);
     const runProgress = run ? progress[run.id] : undefined;
@@ -849,9 +854,9 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       run?.status,
       runProgress?.summaries,
       runProgress?.error,
-      run ? submittedPrompts[run.id] : undefined,
+      run ? [submittedInputs[run.id]?.prompt, submittedInputs[run.id]?.skills] : undefined,
     ])] as const;
-  })), [g.nodes, state.runInputs, latestNodeRuns, progress, submittedPrompts, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
+  })), [g.nodes, state.runInputs, latestNodeRuns, progress, submittedInputs, projectFilesRevision, readOnly, referenceId, props.theme, props.online]);
   const snapshotRun = node ? latestNodeRuns.get(node.id) : undefined;
   // Submission responses arrive before the next Workspace snapshot. Keep their
   // details visible while the execution editor closes, then follow server state.
@@ -1774,7 +1779,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     }
     if (wire.schemaVersion === 1 && !c.resourceId && n.type === "execution") {
       const run = graphRuns.filter(r => r.nodeId === n.id).at(-1);
-      return <div className="node-content"><RunSummary interaction={run ? <NodeRunInteractions key={run.id} run={run} request={props.request} disabled={readOnly || !!n.readonly} onChanged={props.onChanged} onError={props.onError}/> : undefined} node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedPrompts[run.id] ?? n.prompt } : undefined}/></div>;
+      return <div className="node-content"><RunSummary interaction={run ? <NodeRunInteractions key={run.id} run={run} request={props.request} disabled={readOnly || !!n.readonly} onChanged={props.onChanged} onError={props.onError}/> : undefined} node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedInputs[run.id]?.prompt ?? n.prompt, skillNames: submittedInputs[run.id]?.skills?.map(skill => skill.name), skillReferences: submittedInputs[run.id] ? undefined : (Array.isArray(c.skillReferences) ? c.skillReferences : []) as unknown as SkillReference[] } : undefined}/></div>;
     }
     if (wire.schemaVersion === 1 && n.type === "document") return <DocumentNodeContent node={n} wire={wire} request={props.request} imageRequest={props.serviceRequest ?? props.request} imageRevision={projectFilesRevision} onOpenLink={openMarkdownLink}/>;
     if (wire.schemaVersion === 1 && !c.resourceId && ["image", "video", "audio"].includes(n.type)) return <div className="node-content"><ContentPlaceholder node={n}/></div>;
@@ -1861,6 +1866,26 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         {job.state === 'failed' && (job.visualize || !job.replacement && visualizeUploadMime(job.file)) && <button type="button" onClick={() => act(() => resumeUpload(job))}>{t('Retry')}</button>}
       </Toast>
     ))}
+  </>;
+  const renderNodeTools = (n: WorkNode, menu = false) => <>
+    <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} type="button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16} aria-hidden="true"/></NodeToolButton>
+    {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16} aria-hidden="true"/></NodeToolButton>}
+    {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16} aria-hidden="true"/></NodeToolButton>}
+    {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === 'file' && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16} aria-hidden="true"/></NodeToolButton>}
+    {canCopyText && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Create editable text copy")} title={t("Create editable text copy")} disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === "execution" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy execution task")} title={t("Copy execution task (prompt only)")} disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
+    {hasProjectFileSource(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy as resource node")} title={props.temporary ? t('Temporary Work Graphs do not support copying project file resources yet') : t('Copy as resource node')} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
+    {hasProjectFileSource(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Add to asset library (independent copy)")} title={t("Add to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === 'visualize' && visualizeSaveJobs.current.get(n.id)?.conflict && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} className="" aria-label={t('Read latest page and start a new save')} disabled={savingVisualizeAssets.has(n.id)} onClick={() => { visualizeSaveJobs.current.delete(n.id); act(() => saveVisualizeAsset(n.id)); }}>{menu ? <FolderPlus size={16} aria-hidden="true"/> : t('Read latest page and start a new save')}</NodeToolButton>}
+    {n.type === 'visualize' && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t('Save interactive page to asset library')} title={!object(content.page).resource ? t('Generate an interactive page before saving it to the asset library.') : props.assetsAvailable === false ? t('Connect an available Workspace first.') : props.visualizeLibraryAvailable === false ? t('Upgrade the Workspace to save and install interactive visualizations.') : savingVisualizeAssets.has(n.id) ? t('Saving interactive page…') : visualizeSaveJobs.current.has(n.id) ? t('Retry original interactive page save') : t('Save interactive page to asset library')} aria-busy={savingVisualizeAssets.has(n.id)} disabled={readOnly || n.readonly || locked(n.id) || !object(content.page).resource || props.assetsAvailable === false || props.visualizeLibraryAvailable === false || savingVisualizeAssets.has(n.id)} onClick={() => act(() => saveVisualizeAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === "text" && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Save to asset library (independent copy)")} title={savingTextAssets.has(n.id) ? t("Saving text asset…") : textAssetJobs.current.has(n.id) ? t("Retry saving original text copy") : t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false || savingTextAssets.has(n.id)} onClick={() => act(() => saveTextAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Save to asset library (independent copy)")} title={t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
+      const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
+    })}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === 'group' && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16} aria-hidden="true"/></NodeToolButton>}
+    <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Delete selected node")} title={t("Delete selected node")} disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16} aria-hidden="true"/></NodeToolButton>
   </>;
   return (
     <MarkdownPreviewProvider onOpenLink={openMarkdownLink} imageRequest={props.serviceRequest ?? props.request} projectId={g.projectId} imageRevision={projectFilesRevision}>
@@ -2029,6 +2054,18 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           />
         </div>
       </>}
+      {nodeContextMenu && node?.id === nodeContextMenu.nodeId && selected.length === 1 && <NodeContextMenu screen={nodeContextMenu.screen} onClose={() => {
+        setNodeContextMenu(undefined);
+        workspaceElement.current?.querySelector<HTMLElement>('.owg-canvas')?.focus({ preventScroll: true });
+      }}>
+        <NodeToolButton menu onDismiss={() => setNodeContextMenu(undefined)} aria-label={t('Rename')}
+          disabled={node.type === 'file' || !canGeometry([node.id]) || node.readOnly}
+          onClick={() => {
+            const input = workspaceElement.current?.querySelector<HTMLInputElement>('.owg-node-toolbar .node-title-input');
+            input?.focus({ preventScroll: true }); input?.select();
+          }}><Pencil size={16} aria-hidden="true"/></NodeToolButton>
+        {renderNodeTools(toWorkNode(node), true)}
+      </NodeContextMenu>}
       {createMenu && <>
         <button className="dismiss-layer" aria-label={t("Close add node menu")} onClick={() => setCreateMenu(undefined)} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setCreateMenu(undefined); }}/>
         <div ref={createMenuElement} className="create-menu node-create-menu panel" role="dialog" aria-label={t("Add node")} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }} style={{ position: "fixed", left: createMenuPosition?.left ?? Math.max(12, createMenu.screen.x), top: createMenuPosition?.top ?? Math.max(12, createMenu.screen.y), visibility: createMenuPosition ? "visible" : "hidden" }}>
@@ -2159,7 +2196,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             if (n.type === 'document') { openDocument(n.id, true); return; }
             if (n.type === 'text' || n.type === 'file' || n.type === 'video' || n.type === 'preview' || n.type === 'visualize') setReferenceId(n.id);
           }}
-          onCreateMenu={readOnly ? undefined : (world, screen) => setCreateMenu({ world, screen })}
+          onNodeContextMenu={(node, screen) => {
+            setCreateMenu(undefined); setOutputMenu(undefined);
+            selectNodes([node.id], false);
+            setNodeContextMenu({ nodeId: node.id, screen });
+          }}
+          onCreateMenu={readOnly ? undefined : (world, screen) => { setNodeContextMenu(undefined); setCreateMenu({ world, screen }); }}
           onConnectCreate={readOnly ? undefined : (nodeId, world, screen, port) => { if (activeChainNodeIds.has(nodeId)) { props.onError(new Error(chainTopologyError)); return; } setCreateMenu({ world, screen, connection: { nodeId, port } }); }}
           onExecutionOutputs={(nodeId, world, screen) => { setCreateMenu(undefined); setOutputMenu({ nodeId, world, screen }); }}
           hiddenExecutionOutputCounts={(g.hiddenExecutionOutputs ?? []).reduce<Record<string, number>>((counts, output) => {
@@ -2174,24 +2216,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                 e.stopPropagation();
                 e.currentTarget.blur();
               }}/>
-            <button type="button" className="icon-button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16}/></button>
-            {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16}/></button>}
-            {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <button className="icon-button" aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16}/></button>}
-            {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <button className="icon-button" aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16}/></button>}
-            {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
-            {n.type === 'file' && !isProjectFileReference(content) && <button className="icon-button" aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16}/></button>}
-            {canCopyText && <button className="icon-button" aria-label={t("Create editable text copy")} title={t("Create editable text copy")} disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16}/></button>}
-            {n.type === "execution" && <button className="icon-button" aria-label={t("Copy execution task")} title={t("Copy execution task (prompt only)")} disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16}/></button>}
-            {hasProjectFileSource(content) && <button className="icon-button" aria-label={t("Copy as resource node")} title={props.temporary ? t('Temporary Work Graphs do not support copying project file resources yet') : t('Copy as resource node')} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16}/></button>}
-            {hasProjectFileSource(content) && <button className="icon-button" aria-label={t("Add to asset library (independent copy)")} title={t("Add to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16}/></button>}
-            {n.type === 'visualize' && visualizeSaveJobs.current.get(n.id)?.conflict && <button type="button" disabled={savingVisualizeAssets.has(n.id)} onClick={() => { visualizeSaveJobs.current.delete(n.id); act(() => saveVisualizeAsset(n.id)); }}>{t('Read latest page and start a new save')}</button>}
-            {n.type === 'visualize' && <button className="icon-button" aria-label={t('Save interactive page to asset library')} title={!object(content.page).resource ? t('Generate an interactive page before saving it to the asset library.') : props.assetsAvailable === false ? t('Connect an available Workspace first.') : props.visualizeLibraryAvailable === false ? t('Upgrade the Workspace to save and install interactive visualizations.') : savingVisualizeAssets.has(n.id) ? t('Saving interactive page…') : visualizeSaveJobs.current.has(n.id) ? t('Retry original interactive page save') : t('Save interactive page to asset library')} aria-busy={savingVisualizeAssets.has(n.id)} disabled={readOnly || n.readonly || locked(n.id) || !object(content.page).resource || props.assetsAvailable === false || props.visualizeLibraryAvailable === false || savingVisualizeAssets.has(n.id)} onClick={() => act(() => saveVisualizeAsset(n.id))}><FolderPlus size={16}/></button>}
-            {n.type === "text" && !isProjectFileReference(content) && <button className="icon-button" aria-label={t("Save to asset library (independent copy)")} title={savingTextAssets.has(n.id) ? t("Saving text asset…") : textAssetJobs.current.has(n.id) ? t("Retry saving original text copy") : t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false || savingTextAssets.has(n.id)} onClick={() => act(() => saveTextAsset(n.id))}><FolderPlus size={16}/></button>}
-            {n.type !== "text" && !isProjectFileReference(content) && typeof content.resourceId === "string" && <button className="icon-button" aria-label={t("Save to asset library (independent copy)")} title={t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(async () => {
-              const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
-            })}><FolderPlus size={16}/></button>}
-            {n.type === 'group' && <button className="icon-button" aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16}/></button>}
-            <button className="icon-button" aria-label={t("Delete selected node")} title={t("Delete selected node")} disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16}/></button>
+            {renderNodeTools(n)}
           </div>}
           zoomControlsNavigationExtra={
             <button className="icon-button" aria-label={t("Change Work Graph background")} title={t("Change Work Graph background")} onClick={() => setBackground(background === "lines" ? "dots" : background === "dots" ? "blank" : "lines")}><Grid2X2 size={18}/></button>

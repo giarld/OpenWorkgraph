@@ -62,6 +62,8 @@
   overflow-wrap: anywhere;
 }
 .execution-submitted-prompt-text:not([data-expanded="true"]) {
+  /* A wrapping inline-flex chip can itself be taller than two line boxes. */
+  max-height: 3em;
   overflow: hidden;
   display: -webkit-box;
   -webkit-box-orient: vertical;

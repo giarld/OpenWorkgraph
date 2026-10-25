@@ -1,3 +1,4 @@
+import { tokenUsage } from './backend/token-usage.js';
 import type { ImageProviderModel, ImageRoute, ResourceEnvelope } from '@openworkgraph/protocol';
 import sharp from 'sharp';
 import { ServiceError } from './errors.js';
@@ -238,7 +239,7 @@ export async function discoverOpenAiModels(endpoint:string,secret:string,signal:
 }
 
 /** Caller supplies a frozen registered API base URL and a protected credential version. */
-export async function executeOpenAiImage(plan: PlannedImageRequest, endpoint: string, secret: string, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<{ bytes: Buffer; mime: 'image/png' | 'image/jpeg' | 'image/webp'; requestId?: string }> {
+export async function executeOpenAiImage(plan: PlannedImageRequest, endpoint: string, secret: string, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<{ bytes: Buffer; mime: 'image/png' | 'image/jpeg' | 'image/webp'; requestId?: string; tokenUsage?: import('@openworkgraph/protocol').TokenUsage }> {
   const {target,base}=apiTarget(endpoint);
   if (!secret || /[\r\n]/.test(secret)) throw new ServiceError('INVALID_REQUEST', '服务商凭据不可用。');
   let response: Response;
@@ -260,5 +261,7 @@ export async function executeOpenAiImage(plan: PlannedImageRequest, endpoint: st
   catch { throw new ServiceError('MODEL_UNAVAILABLE', '服务商返回无效 JSON。'); }
   const image = await enforceOpenAiImageSize(decodeOpenAiImage(value),plan.outputSize);
   const requestId = response.headers.get('x-request-id');
-  return { ...image, ...(requestId && /^[a-zA-Z0-9_-]{1,100}$/.test(requestId) ? { requestId } : {}) };
+  const nativeUsage = value && typeof value === 'object' && 'usage' in value ? value.usage as Record<string, unknown> | null : null;
+  const usage = tokenUsage(nativeUsage?.input_tokens, nativeUsage?.output_tokens);
+  return { ...image, ...(usage ? {tokenUsage: usage} : {}), ...(requestId && /^[a-zA-Z0-9_-]{1,100}$/.test(requestId) ? { requestId } : {}) };
 }

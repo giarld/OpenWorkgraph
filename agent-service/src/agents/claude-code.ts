@@ -1,3 +1,4 @@
+import { tokenUsage, sumTokens } from '../backend/token-usage.js';
 import { modelProviderGroup } from './model-groups.js';
 import { AGENT_PLUGIN_API_VERSION, SERVICE_VERSION } from '@openworkgraph/protocol';
 import type { AgentDescriptor, AgentAvailability, ResourceEnvelope, ProjectFileInput, FrozenSkill, VisualizeFeatureSelection, Json } from '@openworkgraph/protocol';
@@ -81,6 +82,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
   private nativeReady?: Promise<void>;
   private mcp: ClaudeHostMcp | undefined;
   private snapshot: RuntimeSnapshot;
+  private tokenUsageBase = { input: 0, output: 0 };
   private callbacks?: BackendCallbacks;
   private callbackQueue: Promise<void> = Promise.resolve();
   private finish?: Promise<void>;
@@ -342,6 +344,10 @@ class ClaudeAgentAdapter implements AgentAdapter {
       if (Array.isArray(event.permission_denials) && event.permission_denials.length) this.snapshot.failureReason = 'permission_denied';
       const fingerprint = JSON.stringify([success, answer]);
       if (this.result && this.result.fingerprint !== fingerprint && !this.turnActive) { this.protocolFailure(); return; }
+      // Native result usage is cumulative for the CLI query, including its tools.
+      const usage = tokenUsage(sumTokens(event.usage?.input_tokens, event.usage?.cache_read_input_tokens ?? 0, event.usage?.cache_creation_input_tokens ?? 0), event.usage?.output_tokens);
+      const totalUsage = usage && tokenUsage(sumTokens(this.tokenUsageBase.input, usage.input), sumTokens(this.tokenUsageBase.output, usage.output));
+      if (totalUsage) this.snapshot.tokenUsage = totalUsage;
       this.result = { success, answer: redactSkillValues(answer, this.secrets), fingerprint };
       this.turnActive = false; this.endInput();
     }
@@ -441,6 +447,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
     this.launchSignal?.removeEventListener('abort', this.abort!);
     delete this.child; delete this.transport; delete this.closing; delete this.finish; delete this.nativeClosed; delete this.result;
     delete this.nativeReady;
+    this.tokenUsageBase = { ...(this.snapshot.tokenUsage ?? this.tokenUsageBase) };
     this.started = false; this.starting = false; this.active = false; this.wireFailed = false; delete this.sessionState; this.messages.clear(); this.messageCount = 0; this.resumeId = resumed;
     this.snapshot.state = 'starting'; this.snapshot.answer = ''; delete this.snapshot.progress;
     delete this.snapshot.failureReason;
