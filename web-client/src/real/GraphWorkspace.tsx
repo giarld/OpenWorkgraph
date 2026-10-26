@@ -765,11 +765,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if(node?.type!=='image'||isProjectFileReference(node.content)||!props.online){setImagePreview(null);return;}
     let live=true;
     setImagePreview(null);
-    void props.request<{resources:{kind:string;resource?:unknown}[];issues:{reason:string}[]}>(graphPath(g.projectId,g.graphId)+'/input-preview',{nodeId:node.id,excludeFiles:object(editor.nodeContent(node.id).imageRoute).type==='api'},'POST').then(value=>{
+    const inputDraft = state.runInputs[node.id]?.fields;
+    void props.request<{resources:{kind:string;resource?:unknown}[];issues:{reason:string}[]}>(graphPath(g.projectId,g.graphId)+'/input-preview',{nodeId:node.id,...(inputDraft ? {inputDraft} : {}),excludeFiles:object(editor.nodeContent(node.id).imageRoute).type==='api'},'POST').then(value=>{
       if(live)setImagePreview({nodeId:node.id,hasImage:value.resources.some(item=>item.kind==='image'&&!!item.resource),issues:value.issues.map(item=>item.reason)});
     }).catch(()=>{if(live)setImagePreview({nodeId:node.id,hasImage:false,issues:[t('Failed to read frozen reference images. Refresh the Work Graph.')]});});
     return ()=>{live=false;};
-  },[node?.id,node?.type,node?.contentVersion,node ? object(editor.nodeContent(node.id).imageRoute).type : undefined,g.executionRevision,g.projectId,g.graphId,props.online,props.request]);
+  },[node?.id,node?.type,node?.contentVersion,node ? state.runInputs[node.id]?.id : undefined,node ? object(editor.nodeContent(node.id).imageRoute).type : undefined,g.executionRevision,g.projectId,g.graphId,props.online,props.request]);
   const graphRuns = useMemo(
     () => props.runs.filter(r => r.serviceId === g.serviceId && r.projectId === g.projectId && r.graphId === g.graphId),
     [props.runs, g.serviceId, g.projectId, g.graphId],
@@ -1779,7 +1780,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     }
     if (wire.schemaVersion === 1 && !c.resourceId && n.type === "execution") {
       const run = graphRuns.filter(r => r.nodeId === n.id).at(-1);
-      return <div className="node-content"><RunSummary interaction={run ? <NodeRunInteractions key={run.id} run={run} request={props.request} disabled={readOnly || !!n.readonly} onChanged={props.onChanged} onError={props.onError}/> : undefined} node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedInputs[run.id]?.prompt ?? n.prompt, skillNames: submittedInputs[run.id]?.skills?.map(skill => skill.name), skillReferences: submittedInputs[run.id] ? undefined : (Array.isArray(c.skillReferences) ? c.skillReferences : []) as unknown as SkillReference[] } : undefined}/></div>;
+      return <div className="node-content"><RunSummary onEdit={() => { selectNodes([n.id], false); setNodeEditorOpen(n.id, true); }} interaction={run ? <NodeRunInteractions key={run.id} run={run} request={props.request} disabled={readOnly || !!n.readonly} onChanged={props.onChanged} onError={props.onError}/> : undefined} node={n} statusLabel={run ? runStatusLabels[run.status] : undefined} run={run ? { status: run.status, summaries: progress[run.id]?.summaries ?? [], error: progress[run.id]?.error, prompt: submittedInputs[run.id]?.prompt ?? n.prompt, skillNames: submittedInputs[run.id]?.skills?.map(skill => skill.name), skillReferences: submittedInputs[run.id] ? undefined : (Array.isArray(c.skillReferences) ? c.skillReferences : []) as unknown as SkillReference[] } : undefined}/></div>;
     }
     if (wire.schemaVersion === 1 && n.type === "document") return <DocumentNodeContent node={n} wire={wire} request={props.request} imageRequest={props.serviceRequest ?? props.request} imageRevision={projectFilesRevision} onOpenLink={openMarkdownLink}/>;
     if (wire.schemaVersion === 1 && !c.resourceId && ["image", "video", "audio"].includes(n.type)) return <div className="node-content"><ContentPlaceholder node={n}/></div>;

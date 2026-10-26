@@ -28,10 +28,20 @@ export function NodeContextMenu({ screen, onClose, children }: {
   useLayoutEffect(() => {
     if (positioned) menu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }, [screen, positioned]);
-  return <>
-    <button type="button" className="dismiss-layer" aria-label={t('Close node menu')} onClick={onClose}
-      onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onClose(); }} />
-    <div ref={menu} className="create-menu node-context-menu panel" role="menu" aria-label={t('Node actions')}
+  useLayoutEffect(() => {
+    // Observe outside events without covering nodes: a new right-click must
+    // reach the canvas's selection and node-specific context-menu handlers.
+    const dismissOutside = (event: Event) => {
+      if (event.target instanceof Node && !menu.current?.contains(event.target)) onClose();
+    };
+    document.addEventListener('pointerdown', dismissOutside, true);
+    document.addEventListener('contextmenu', dismissOutside, true);
+    return () => {
+      document.removeEventListener('pointerdown', dismissOutside, true);
+      document.removeEventListener('contextmenu', dismissOutside, true);
+    };
+  }, [onClose]);
+  return <div ref={menu} className="create-menu node-context-menu panel" role="menu" aria-label={t('Node actions')}
       style={{ position: 'fixed', left: position?.left ?? 12, top: position?.top ?? 12, visibility: position ? 'visible' : 'hidden' }}
       onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}
       onKeyDown={event => {
@@ -44,6 +54,5 @@ export function NodeContextMenu({ screen, onClose, children }: {
         const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
           : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
         items[index]?.focus();
-      }}>{children}</div>
-  </>;
+      }}>{children}</div>;
 }

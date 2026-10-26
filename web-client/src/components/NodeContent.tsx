@@ -9,7 +9,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { ArrowDown, ChevronRight, File } from "lucide-react";
+import { ArrowDown, ChevronRight, File, Settings2 } from "lucide-react";
 import { forwardRef, type ReactNode, type UIEventHandler } from "react";
 import type {
   AssetRef,
@@ -120,7 +120,7 @@ export const RunProcessList = forwardRef<HTMLDivElement, {
   children?: ReactNode;
   onScroll?: UIEventHandler<HTMLDivElement>;
 }>(function RunProcessList({ items, status, className = "", ariaLabel, live = false, collapseLongItems = false, canvasDraggable = false, onScroll, children }, ref) {
-  return <div className={(className + " run-process-list").trim()} data-canvas-interactive data-canvas-draggable={canvasDraggable ? "" : undefined} ref={ref} tabIndex={0} role="log" aria-label={ariaLabel} aria-live={live ? "polite" : "off"} onScroll={onScroll}>
+  return <div className={(className + " run-process-list").trim()} data-canvas-interactive data-canvas-scrollable data-canvas-draggable={canvasDraggable ? "" : undefined} ref={ref} tabIndex={0} role="log" aria-label={ariaLabel} aria-live={live ? "polite" : "off"} onScroll={onScroll}>
     {items.map((text, index) => {
       const last = index === items.length - 1;
       const state = last && !completedRunStatuses.has(status) ? "running" : last && failedRunStatuses.has(status) ? "failed" : "succeeded";
@@ -203,7 +203,8 @@ export function RunSummary({
   run,
   node,
   interaction,
-}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string; skillReferences?: readonly SkillReference[]; skillNames?: readonly string[] }; statusLabel?: string; interaction?: ReactNode }) {
+  onEdit,
+}: Pick<NodeContentProps, "node"> & { run?: { status: string; summaries: string[]; error?: string; prompt?: string; skillReferences?: readonly SkillReference[]; skillNames?: readonly string[] }; statusLabel?: string; interaction?: ReactNode; onEdit?: () => void }) {
   const { t } = useI18n();
   const list = useRef<HTMLDivElement>(null);
   const [following, setFollowing] = useState(true);
@@ -223,7 +224,7 @@ export function RunSummary({
       list.current.scrollTop = list.current.scrollHeight;
   }, [following, run?.summaries.length, run?.status]);
   return (
-    <div className="execution-content">
+    <div className="execution-content" data-unsubmitted={!run ? "true" : undefined}>
       {run && hasSubmittedPrompt && <SubmittedPrompt text={submittedPrompt} skillReferences={run.skillReferences} skillNames={run.skillNames}/>}
       {run ? (
         <div className={`execution-process-wrap${hasSubmittedPrompt ? " has-submitted-prompt" : ""}`}>
@@ -249,6 +250,11 @@ export function RunSummary({
             : t("Enter a prompt to start, or connect content nodes as references.")}
         </p>
       )}
+      {onEdit && (!run || completedRunStatuses.has(run.status)) && <div className={run ? "execution-edit-actions" : "execution-initial-actions"}>
+        <button type="button" className={`${run ? "icon-button" : "secondary-button"} execution-edit-button`} aria-label={run ? t("Edit node") : undefined} title={run ? t("Edit node") : undefined} data-canvas-interactive onClick={event => { event.stopPropagation(); onEdit(); }}>
+          <Settings2 size={16} aria-hidden="true" />{!run && t("Edit execution content")}
+        </button>
+      </div>}
       {run?.error && (
         <p className="muted" role="status">
           {run.error}
@@ -357,6 +363,7 @@ export function NodeContent(props: NodeContentProps) {
         <RunSummary
           key={run?.id ?? node.id}
           node={node}
+          onEdit={() => onOpen(node)}
           run={
             run?.nodeId === node.id &&
             run.graphId === node.graphId &&

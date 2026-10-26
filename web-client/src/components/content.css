@@ -93,6 +93,14 @@
   overflow: auto;
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+.node-content .execution-process-wrap > .run-summaries::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.node-content .execution-process-wrap > .run-summaries::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 .node-content .execution-process-wrap > .run-summaries:focus {
   outline: none;
@@ -224,4 +232,32 @@
   max-height: 140px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+.node-content .execution-content[data-unsubmitted="true"] {
+  position: relative;
+}
+.execution-initial-actions {
+  position: absolute;
+  top: 60%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100% - 20px);
+}
+.execution-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+.execution-edit-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+}
+.execution-edit-button svg { flex-shrink: 0; }
+.execution-edit-button:focus-visible {
+  outline: 2px solid var(--active);
+  outline-offset: 2px;
 }

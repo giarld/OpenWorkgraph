@@ -10,7 +10,7 @@ export * from './agents.js';
 export * from './agent-forms.js';
 export * from './approval-permissions.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.5.15' as const;
+export const SERVICE_VERSION = '0.5.16' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;

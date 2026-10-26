@@ -58,7 +58,7 @@ export function NodeOutline({ nodes, selected, search, selectionRevision, onSele
     const definition = getNodeDefinition(node.type);
     const Icon = node.type === 'group' ? Square : definition.icon;
     return <button ref={element => { if (element) items.current.set(node.id, element); else items.current.delete(node.id); }} aria-label={node.title} aria-pressed={selected.includes(node.id)} className={'node-list-item ' + (selected.includes(node.id) ? 'active' : '')} onClick={() => onSelect(node.id)}>
-      <span className="node-list-icon"><Icon size={18} aria-hidden="true" /></span>
+      <span className="node-list-icon" style={{ color: node.borderColor }}><Icon size={18} aria-hidden="true" /></span>
       <span><strong>{node.title}</strong><small>{node.type === 'group' ? t('Group') : node.content || t(definition.title)}</small></span>
     </button>;
   };

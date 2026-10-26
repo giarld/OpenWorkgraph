@@ -34,6 +34,7 @@ export const workspaceZhCN: Record<string, string> = {
   "The visualization file version is unsupported by this Workspace.": "工作空间不支持此可视化文件版本。",
   "Node name": "节点名称",
   "Edit node": "编辑节点",
+  "Edit execution content": "编辑执行内容",
   "View node content": "查看节点内容",
   "View in a separate page": "独立页面查看",
   'Page information': '页面信息',
