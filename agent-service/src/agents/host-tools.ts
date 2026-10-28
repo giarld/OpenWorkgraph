@@ -4,6 +4,7 @@ import type { BackendCallbacks } from '../backend/types.js';
 import { ServiceError } from '../errors.js';
 
 export interface AgentHostTool { version: 1; name: string; description: string; inputSchema: Json }
+export const GENERATED_SKILL_TOOL: AgentHostTool = { version: 1, name: 'install_generated_skill', description: 'Validate and install a complete skill package from this Run Output directory into this Workspace. Read the bundled creator first. Existing manual skills require their current expectedRevision before replacement; other sources are never overwritten.', inputSchema: { type: 'object', properties: { path: { type: 'string', minLength: 1, maxLength: 512 }, expectedRevision: { type: 'integer', minimum: 0 } }, required: ['path'], additionalProperties: false } };
 export interface AgentToolCall { callId: string; runId: string; attemptId: string; name: string; arguments: unknown }
 export type AgentToolResult = { callId: string; success: true; content: string } | { callId: string; success: false; code: string; content: string };
 
@@ -44,6 +45,7 @@ export class AgentHostTools {
   }
   describe(): AgentHostTool[] {
     const tools: AgentHostTool[] = [];
+    if (this.callbacks.installGeneratedSkill) tools.push(GENERATED_SKILL_TOOL);
     if (this.callbacks.queryHistory) tools.push({ version: 1, name: 'query_run_history', description: 'Search retained history in this Run project.', inputSchema: { type: 'object', properties: { query: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['query'], additionalProperties: false } });
     if (this.callbacks.readRunContext) tools.push({ version: 1, name: 'read_run_context', description: 'Read exact Run content in this project: summary, snapshot, history, outputs, or an immutable published output. Pages contain up to 4000 JSON-text characters; continue with nextOffset. output requires outputKey; other sections forbid it.', inputSchema: { type: 'object', properties: { runId: { type: 'string', minLength: 1, maxLength: 200 }, section: { enum: ['summary', 'snapshot', 'history', 'outputs', 'output'] }, outputKey: { type: 'string', minLength: 1, maxLength: 1024 }, offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } }, required: ['runId', 'section'], additionalProperties: false, allOf: [{ if: { properties: { section: { const: 'output' } }, required: ['section'] }, then: { required: ['outputKey'] }, else: { not: { required: ['outputKey'] } } }] } });
     if (this.callbacks.validateVisualizeOutput) tools.push({ version: 1, name: 'validate_visualize_output', description: 'Read-only preflight of this Run Output; never publishes.', inputSchema: { type: 'object', properties: { path: { type: 'string', minLength: 1, maxLength: 512 } }, required: ['path'], additionalProperties: false } });
@@ -87,6 +89,9 @@ export class AgentHostTools {
             (data.section === 'output' ? typeof data.outputKey !== 'string' || !data.outputKey || data.outputKey.length > 1024 : data.outputKey !== undefined) ||
             (data.offset !== undefined && (!Number.isSafeInteger(data.offset) || Number(data.offset) < 0))) throw new ServiceError('INVALID_REQUEST', 'Invalid frozen context request');
         content = await this.callbacks.readRunContext(data as unknown as RunContextRequest);
+      } else if (call.name === 'install_generated_skill' && this.callbacks.installGeneratedSkill) {
+        if (Object.keys(data).some(key => !['path', 'expectedRevision'].includes(key)) || typeof data.path !== 'string' || !data.path.trim() || data.path.length > 512 || data.expectedRevision !== undefined && (!Number.isSafeInteger(data.expectedRevision) || Number(data.expectedRevision) < 0)) throw new ServiceError('INVALID_REQUEST', 'Invalid generated skill package path or revision');
+        content = JSON.stringify(await this.callbacks.installGeneratedSkill(data.path, Number(data.expectedRevision ?? 0)));
       } else if (call.name === 'validate_visualize_output' && this.callbacks.validateVisualizeOutput) {
         if (Object.keys(data).some(key => key !== 'path') || typeof data.path !== 'string' || !data.path.trim() || data.path.length > 512) throw new ServiceError('INVALID_REQUEST', 'Invalid Output preflight path');
         content = JSON.stringify(await this.callbacks.validateVisualizeOutput(data.path));
@@ -102,7 +107,7 @@ export class AgentHostTools {
       result = { callId: call.callId, success: true, content };
     } catch (error) {
       // Plugin/native raw errors are not public tool content.
-      result = { callId: call.callId, success: false, code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR', content: 'Host tool call failed' };
+      result = { callId: call.callId, success: false, code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR', content: call.name === 'install_generated_skill' && error instanceof ServiceError ? error.message : 'Host tool call failed' };
     }
     // Expired calls reject instead of delivering even a failure result to a new
     // attempt. Check both successful and failed callbacks at the delivery boundary.

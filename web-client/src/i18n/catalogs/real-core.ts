@@ -1,6 +1,9 @@
 import { zhCN } from '../messages';
 
 export const realCoreZhCN: Record<string, string> = {
+  'Drag a file or folder in, or click': '拖入文件或目录，或点击',
+  'Directory references cannot be pasted across Workspaces or projects. No nodes or resources were created.': '目录引用不能跨工作空间或项目粘贴，未创建任何节点或资源。',
+  'The directory reference clipboard is untrusted. Copy the nodes again.': '目录引用剪贴板不可信，请重新复制节点。',
   'Other answer': '其他答案',
   'The visualization configuration changed. Review the latest content before saving.': '可视化交互节点的配置已变化，请核对最新内容后再保存。',
   'Connect a Workspace and import the temporary Work Graph, then explicitly submit visualization generation.': '请连接工作空间并导入临时工作图，再手动提交交互页面生成。',

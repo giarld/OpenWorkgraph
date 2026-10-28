@@ -1,7 +1,7 @@
 {
   "name": "openworkgraph-workspace",
   "private": true,
-  "version": "0.5.16",
+  "version": "0.5.17",
   "type": "module",
   "workspaces": [
     "packages/protocol",
@@ -16,7 +16,8 @@
     "build": "npm run version:check && npm run build -w @openworkgraph/protocol && npm run build -w openworkgraph",
     "typecheck": "npm run build -w @openworkgraph/protocol && npm run typecheck -w openworkgraph",
     "test": "npm run test:versions && npm run build && npm run test -w openworkgraph",
-    "dev:service": "npm run build && npm run start -w openworkgraph --",
+    "dev:service": "npm run build && npm run start -w openworkgraph -- serve",
+    "dev:web": "npm --prefix web-client run dev",
     "build:web": "npm run version:check && npm --prefix web-client run build",
     "test:web": "npm --prefix web-client test"
   },

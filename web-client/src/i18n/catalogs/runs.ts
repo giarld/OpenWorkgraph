@@ -1,6 +1,8 @@
 import { zhCN } from '../messages';
 
 export const runsZhCN = {
+  'Automatically authorize later CLI operations in this run':'自动授权本次运行后续 CLI 操作',
+  'Revoke CLI auto authorization for this run':'撤销本次运行 CLI 自动授权',
   'Workspace queue': '工作空间队列',
   'Close Workspace queue': '关闭工作空间队列',
   'A task queue can only contain tasks from the currently connected Workspace.': '任务队列只能包含当前关联工作空间的任务。',

@@ -19,6 +19,16 @@ export class SkillsManagementApi {
     const pathname = rawPath.split('?')[0]!;
     if (pathname !== '/v1/skills' && !pathname.startsWith('/v1/skills/')) return {handled:false};
     this.auth.withSession(token,origin,()=>undefined);
+    if (pathname === '/v1/skills/library') {
+      if (rawPath.includes('?')) throw new ServiceError('INVALID_REQUEST', '技能库设置不接受查询参数。');
+      if (request.method === 'GET') return { handled: true, body: this.runtime.skills.librarySettings() };
+      if (request.method !== 'POST') throw new ServiceError('NOT_FOUND', '技能库设置接口不存在。');
+      const body = await readJson(request, 16 * 1024);
+      if (Object.keys(body).some(key => !['repository', 'expectedRevision'].includes(key)) || body.repository !== null && (typeof body.repository !== 'string' || body.repository.length > 2048) || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0) throw new ServiceError('INVALID_REQUEST', '技能库设置需要仓库链接和有效修订号。');
+      const result = await this.runtime.skills.saveLibrarySettings(body.repository as string | null, body.expectedRevision as number);
+      this.auth.withSession(token,origin,()=>undefined);
+      return { handled: true, body: result };
+    }
     const url = new URL(rawPath,'http://localhost');
     const match = /^\/v1\/skills(?:\/([^/]+)(?:\/(install|update|uninstall|config|files))?)?$/.exec(pathname);
     if (!match) throw new ServiceError('NOT_FOUND','技能管理接口不存在。');

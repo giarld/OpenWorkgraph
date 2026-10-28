@@ -224,7 +224,7 @@ export function RunSummary({
       list.current.scrollTop = list.current.scrollHeight;
   }, [following, run?.summaries.length, run?.status]);
   return (
-    <div className="execution-content" data-unsubmitted={!run ? "true" : undefined}>
+    <div className="execution-content">
       {run && hasSubmittedPrompt && <SubmittedPrompt text={submittedPrompt} skillReferences={run.skillReferences} skillNames={run.skillNames}/>}
       {run ? (
         <div className={`execution-process-wrap${hasSubmittedPrompt ? " has-submitted-prompt" : ""}`}>
@@ -250,9 +250,9 @@ export function RunSummary({
             : t("Enter a prompt to start, or connect content nodes as references.")}
         </p>
       )}
-      {onEdit && (!run || completedRunStatuses.has(run.status)) && <div className={run ? "execution-edit-actions" : "execution-initial-actions"}>
-        <button type="button" className={`${run ? "icon-button" : "secondary-button"} execution-edit-button`} aria-label={run ? t("Edit node") : undefined} title={run ? t("Edit node") : undefined} data-canvas-interactive onClick={event => { event.stopPropagation(); onEdit(); }}>
-          <Settings2 size={16} aria-hidden="true" />{!run && t("Edit execution content")}
+      {onEdit && (!run || completedRunStatuses.has(run.status)) && <div className="execution-edit-actions">
+        <button type="button" className="icon-button execution-edit-button" aria-label={run ? t("Edit node") : t("Edit execution content")} title={run ? t("Edit node") : t("Edit execution content")} data-canvas-interactive onClick={event => { event.stopPropagation(); onEdit(); }}>
+          <Settings2 size={16} aria-hidden="true" />
         </button>
       </div>}
       {run?.error && (

@@ -9,7 +9,7 @@ import { getPreviewRegistryVersion, subscribePreviewRegistry, resolvePreviewRend
 import './preview-node.css';
 import { PreviewLayout } from './PreviewLayout';
 import { File as FileIcon } from 'lucide-react';
-import { formatFileSize, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
+import { fileDownloadName, formatFileSize, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
 import { useI18n } from '../i18n/I18nProvider';
 import { translate } from '../i18n/translate';
 import { StreamingVideoPreview } from './VideoPreview';
@@ -115,7 +115,7 @@ function ProjectFileTextPreview({request,projectId,relativePath,name,mime,downlo
     {state?.status==='too-large'&&<p role="status">{t('The file exceeds 50 MiB and cannot be previewed. Reduce its size and try again.')} <button onClick={()=>setRetry(value=>value+1)}>{t('Check again')}</button></p>}
     {state?.status==='unavailable'&&<p role="status">{state.error?t('The project file is currently unavailable: {error}', {error:state.error}):t('The project file is currently unavailable.')} <button onClick={()=>setRetry(value=>value+1)}>{t('Retry preview')}</button></p>}
     {state?.blob&&<FileContent blob={state.blob} name={name} mime={mime||state.blob.type} preferredMode={preferredMode} onModeChange={onModeChange} showName={showName}/>}
-    {state?.stream&&<StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} showName={showName} download={download}/>}
+    {state?.stream&&<StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} mime={mime} showName={showName} download={download}/>}
     {download&&state?.blob&&<FileDownload blob={state.blob} name={name} mime={mime}/>}
   </div>;
 }
@@ -141,7 +141,7 @@ function FileDownload({blob,name,mime,children}: {blob:Blob;name:string;mime?:st
   }, [blob]);
   return <footer className="ow-preview-download"><FilePreviewMetadata blob={blob} name={name} mime={mime}/><PreviewActionButton action="download" disabled={!url} onClick={() => {
     const anchor = document.createElement('a');
-    anchor.href=url; anchor.download=name.replaceAll(/[\\/]/g,'_');
+    anchor.href=url; anchor.download=fileDownloadName(name,mime,blob.type);
     document.body.append(anchor); anchor.click(); anchor.remove();
   }}/>{children}</footer>;
 }
@@ -172,20 +172,20 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
     {!state && <p role="status">{t('Reading predecessor resource…')}</p>}
     {state?.error && <p role="status">{t('Preview failed: {error}', {error:state.error})} <button onClick={() => setRetry(n => n + 1)}>{t('Retry preview')}</button></p>}
     {state?.blob && <FileContent blob={state.blob} name={name} mime={mime || state.blob.type} preferredMode={preferredMode} onModeChange={onModeChange} showName={showName}/>}
-    {state?.stream && <StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} showName={showName} download={download}/>}
+    {state?.stream && <StreamVideoContent request={request} path={state.stream.path} bytes={state.stream.bytes} name={name} mime={mime} showName={showName} download={download}/>}
     {download && state?.blob && <FileDownload blob={state.blob} name={name} mime={mime}/>}
   </div>;
 }
 
-function StreamVideoContent({request,path,bytes,name,showName,download}: {request:Request;path:string;bytes:number;name:string;showName:boolean;download:boolean}) {
+function StreamVideoContent({request,path,bytes,name,mime,showName,download}: {request:Request;path:string;bytes:number;name:string;mime?:string;showName:boolean;download:boolean}) {
   return <>
     {showName && <header className="ow-preview-controls"><span title={name} data-canvas-draggable>{name}</span></header>}
     <PreviewLayout scrollable={false}><StreamingVideoPreview request={request} path={path} bytes={bytes} name={name}/></PreviewLayout>
-    {download && <StreamFileDownload request={request} path={path} bytes={bytes} name={name}/>}
+    {download && <StreamFileDownload request={request} path={path} bytes={bytes} name={name} mime={mime}/>}
   </>;
 }
 
-function StreamFileDownload({request,path,bytes,name,children}: {request:Request;path:string;bytes:number;name:string;children?:ReactNode}) {
+function StreamFileDownload({request,path,bytes,name,mime,children}: {request:Request;path:string;bytes:number;name:string;mime?:string;children?:ReactNode}) {
   const {t} = useI18n();
   const [progress,setProgress] = useState<number>();
   const [error,setError] = useState('');
@@ -195,14 +195,16 @@ function StreamFileDownload({request,path,bytes,name,children}: {request:Request
     setProgress(0); setError('');
     try {
       const chunks: Blob[]=[];
+      let downloadName=fileDownloadName(name,mime);
       for (let start=0;start<bytes;) {
         const end=Math.min(start+1024*1024-1,bytes-1);
-        const result=await request<{blob:Blob;start:number;end:number;total:number}>(path,undefined,'RANGE',{range:{start,end}});
+        const result=await request<{blob:Blob;start:number;end:number;total:number;mime?:string}>(path,undefined,'RANGE',{range:{start,end}});
         if (result.start!==start || result.end!==end || result.total!==bytes || result.blob.size!==end-start+1) throw Error(t('The video changed while downloading.'));
+        downloadName=fileDownloadName(downloadName,result.mime,result.blob.type);
         chunks.push(result.blob); start=end+1; setProgress(start/bytes);
       }
       const url=URL.createObjectURL(new Blob(chunks,{type:'application/octet-stream'}));
-      const anchor=document.createElement('a'); anchor.href=url; anchor.download=name.replaceAll(/[\\/]/g,'_');
+      const anchor=document.createElement('a'); anchor.href=url; anchor.download=downloadName;
       document.body.append(anchor); anchor.click(); anchor.remove();
       setTimeout(() => URL.revokeObjectURL(url),1000);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }

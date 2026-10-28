@@ -1,5 +1,40 @@
 import { translate } from "../i18n/translate";
 import { audioMimeByExtension } from './audio-formats';
+
+const downloadExtensionByMime: Readonly<Record<string, string>> = {
+  'application/pdf': 'pdf',
+  'text/plain': 'txt', 'text/markdown': 'md', 'text/html': 'html', 'text/csv': 'csv',
+  'application/json': 'json', 'application/xml': 'xml', 'text/xml': 'xml',
+  'application/yaml': 'yaml', 'application/x-yaml': 'yaml', 'text/yaml': 'yaml', 'text/x-yaml': 'yaml',
+  'text/javascript': 'js', 'application/javascript': 'js', 'text/css': 'css', 'text/x-python': 'py',
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
+  'image/svg+xml': 'svg', 'image/avif': 'avif', 'image/bmp': 'bmp', 'image/x-icon': 'ico',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+  'video/x-matroska': 'mkv', 'video/x-msvideo': 'avi', 'video/mpeg': 'mpeg', 'video/ogg': 'ogv',
+  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav',
+  'audio/mp4': 'm4a', 'audio/aac': 'aac', 'audio/ogg': 'ogg', 'audio/opus': 'opus',
+  'audio/flac': 'flac', 'audio/x-flac': 'flac', 'audio/webm': 'weba', 'audio/aiff': 'aiff', 'audio/x-aiff': 'aiff',
+  'application/zip': 'zip', 'application/x-zip-compressed': 'zip',
+  'application/gzip': 'gz', 'application/x-gzip': 'gz', 'application/x-tar': 'tar',
+  'application/x-7z-compressed': '7z', 'application/vnd.rar': 'rar', 'application/x-rar-compressed': 'rar',
+  'application/msword': 'doc', 'application/vnd.ms-excel': 'xls', 'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+};
+
+/** Titles can omit extensions. Preserve existing suffixes and only infer known types. */
+export function fileDownloadName(name: string, ...mimeTypes: Array<string | undefined>): string {
+  const safeName = name.replaceAll(/[\\/]/g, '_');
+  if (safeName.lastIndexOf('.') > 0 && !safeName.endsWith('.')) return safeName;
+  for (const mime of mimeTypes) {
+    const type = (mime ?? '').split(';')[0].trim().toLowerCase();
+    const extension = Object.hasOwn(downloadExtensionByMime, type) ? downloadExtensionByMime[type] : undefined;
+    if (extension) return safeName.replace(/[.]+$/, '') + '.' + extension;
+  }
+  return safeName;
+}
+
 /** Browser File.type may be empty (notably Markdown and WAV on some systems). */
 export function fileMime(file: { name: string; type: string }): string {
   if (/[.]svg$/i.test(file.name)) return 'image/svg+xml';

@@ -58,6 +58,7 @@ export class VisualizeInputs {
     let total = [...new Map(inputs.flatMap(input => input.resources).map(resource => [canonicalJson(resource as unknown as Json), resource])).values()].reduce((bytes, resource) => bytes + Buffer.byteLength(resource.text ?? ''), 0);
     for (const input of inputs) {
       for (const file of input.projectFiles ?? []) {
+        if (file.entryKind === 'directory') throw new ServiceError('INPUT_BLOCKED', '交互页面的固定输入不支持目录引用，请引用所需文件。');
         const key = canonicalJson({ kind: file.kind, path: file.relativePath });
         if (files.has(key)) continue;
         const mime = classifyProjectFile(file.relativePath).mime;

@@ -1,7 +1,7 @@
 import { translate } from "../i18n/translate";
 import { PROTOCOL_VERSION, GRAPH_BINARY_MIME, graphBinaryParts, readGraphBinary } from "../../../packages/protocol/src/index";
 import type { GraphBundle } from "../../../packages/protocol/src/index";
-import type { SkillCatalog, SkillCatalogQuery, SkillCatalogItem, SkillDetail, SkillConfiguration } from "../../../packages/protocol/src/skills";
+import type { SkillCatalog, SkillCatalogQuery, SkillCatalogItem, SkillDetail, SkillConfiguration, SkillLibrarySettings } from "../../../packages/protocol/src/skills";
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import {
@@ -427,6 +427,12 @@ export class Transport {
     this.begin(entry);
     try { return await this.send<T>(entry.path, entry.payload ?? entry.body, entry.method, entry); }
     finally { this.end(entry); }
+  }
+  readSkillLibrarySettings(): Promise<SkillLibrarySettings> {
+    return this.request('/v1/skills/library');
+  }
+  writeSkillLibrarySettings(repository: string | null, expectedRevision: number): Promise<SkillLibrarySettings> {
+    return this.request('/v1/skills/library', { repository, expectedRevision });
   }
   listSkills(refresh = false, options: SkillCatalogQuery = {}): Promise<SkillCatalog> {
     const params = new URLSearchParams();

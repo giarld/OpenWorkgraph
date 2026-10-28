@@ -5,6 +5,7 @@ import { Auth } from "./auth.js";
 import { ServiceError } from "./errors.js";
 import { atomic } from "./persistence/database.js";
 import { subscribeDatabaseChanges } from './persistence/changes.js';
+import { silentLogger, type Logger } from './logger.js';
 export class Events {
   private readonly closers = new Map<() => void, string>();
   private readonly flushers = new Set<() => void>();
@@ -13,6 +14,7 @@ export class Events {
     readonly db: DatabaseSync,
     readonly serviceId: string,
     readonly auth: Auth,
+    private readonly logger: Logger = silentLogger,
   ) {}
   connectedClientCount(): number {
     return new Set(this.closers.values()).size;
@@ -135,6 +137,7 @@ export class Events {
       stopped = true;
       clearInterval(timer);
       this.closers.delete(close);
+      this.logger.write('info', 'client.disconnected', { clients: this.connectedClientCount() });
       this.flushers.delete(flush);
       if (!this.flushers.size) { this.stopNotifications?.(); this.stopNotifications = undefined; }
       response.end();
@@ -167,6 +170,7 @@ export class Events {
           lastHeartbeat = Date.now();
         }
       } catch (error) {
+        this.logger.write('warn', 'client.stream_failed', { code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR' });
         if (!response.destroyed) {
           response.write(
             "event: stream-error\ndata: " +
@@ -186,6 +190,7 @@ export class Events {
     const timer = setInterval(flush, 1000);
     timer.unref();
     this.closers.set(close, session.id);
+    this.logger.write('info', 'client.connected', { clients: this.connectedClientCount() });
     this.flushers.add(flush);
     this.stopNotifications ??= subscribeDatabaseChanges(this.db, () => { for (const flush of [...this.flushers]) flush(); });
     response.on("close", close);

@@ -9,8 +9,9 @@ export * from './graph-binary.js';
 export * from './agents.js';
 export * from './agent-forms.js';
 export * from './approval-permissions.js';
+export * from './workgraph-cli.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.5.16' as const;
+export const SERVICE_VERSION = '0.5.17' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -30,7 +31,7 @@ export interface Capability { status: 'available' | 'unavailable' | 'unknown'; r
 export interface ImageRouteCapability { route: {type:'codex'} | {type:'api';providerId:string;modelId:string}; modes: Record<ImageInputMode,Capability> }
 export type CoreCapabilityName = 'pairing' | 'projects' | 'graphs' | 'assets' | 'execution' | 'imageGeneration' | 'events' | 'backups';
 export type ProjectFileCapabilityName = 'projectFiles' | 'projectFileReferences';
-export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName | 'visualizeLibrary', Capability>>; imageRoutes?: ImageRouteCapability[]; visualizeCompatibility?: import('./visualize-library.js').VisualizeCompatibility }
+export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName | 'visualizeLibrary' | 'workgraphCli', Capability>>; imageRoutes?: ImageRouteCapability[]; visualizeCompatibility?: import('./visualize-library.js').VisualizeCompatibility }
 export interface Health { status: 'ok'; version: string; protocolVersion: string }
 export function isProtocolCompatible(version: string): boolean { return /^1\.\d+$/.test(version); }
 export interface Session { id: string; browserName: string; pairedAt: string; lastUsedAt: string; expiresAt: string; current: boolean; origin: string; state: 'active' | 'expired' }
@@ -51,9 +52,9 @@ export interface ModelOption { id: string; reasoningEfforts: string[]; defaultRe
 export interface ModelDefaults { revision: number; selection: ModelSelection | null; available: ModelOption[] }
 export { NODE_BORDER_COLORS, isNodeBorderColor } from './node-appearance.js';
 export interface Node { id: string; type: string; schemaVersion: number; contentVersion: number; content: Json; x: number; y: number; width?: number; height?: number; borderColor?: string; memberIds?: string[]; readOnly: boolean }
-export interface ProjectFileSource { kind: 'project-file'; serviceId: string; projectId: string; relativePath: string }
+export interface ProjectFileSource { kind: 'project-file'; serviceId: string; projectId: string; relativePath: string; entryKind?: 'directory' }
 export interface EmptyProjectFileSource { kind: 'project-file-empty'; relativePath: string }
-export interface ProjectFileObservation { state: 'available' | 'missing' | 'unavailable'; name: string; mime: string | null; bytes: number | null; changeToken: string | null }
+export interface ProjectFileObservation { state: 'available' | 'missing' | 'unavailable'; name: string; mime: string | null; bytes: number | null; changeToken: string | null; absolutePath?: string }
 export interface Edge { id: string; sourceId: string; targetId: string; kind: 'reference' | 'execution' | 'delivery' }
 export interface GraphDocumentHistory { cursor: string | null; canUndo: boolean; canRedo: boolean; expiresAt: number | null; undoRunIds?: string[] }
 export interface GraphHistoryTravel extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; expectedCursor: string; direction: 'undo' | 'redo' }
@@ -65,6 +66,7 @@ export type CopiedProvenance = {kind:'copied-delivery';sourceId:string;targetId:
 export interface ImportedGraphSnapshot extends GraphSnapshot { copiedProvenance: CopiedProvenance[] }
 export interface GraphBundle { format: 'openworkgraph.graph'; version: 1; graph: { title: string; nodes: Node[]; edges: Edge[] }; resources: BundleResource[]; pluginRequirements: BundlePluginRequirement[]; copiedProvenance?: CopiedProvenance[] }
 export type GraphOperation =
+  | import('./workgraph-cli.js').BasicNodeCreate | import('./workgraph-cli.js').NodePatch
   | { type: 'execution.output.restore'; executionNodeId: string; nodeId: string; x: number; y: number }
   | { type: 'node.create'; node: Node } | { type: 'node.content'; nodeId: string; expectedContentVersion: number; content: Json }
   | { type: 'node.project-file.associate'; nodeId: string; expectedContentVersion: number; nodeType: 'text' | 'image' | 'file'; content: Json }
@@ -79,7 +81,7 @@ export type GraphOperation =
 export interface DeleteGraph extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; confirmTitle: string }
 export interface GraphLifecycleRequest extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number }
 export interface PurgeGraph extends GraphLifecycleRequest { confirmationTitle: string }
-export interface GraphCommand extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; operations: GraphOperation[] }
+export interface GraphCommand extends GraphScope { idempotencyKey: string; expectedExecutionRevision: number; expectedLayoutRevision: number; operations: GraphOperation[]; responseMode?: 'compact' }
 export interface VisualizeAssetPresentation { kind: 'visualize'; title: string; logoSha256: string; inputNames: string[]; usesCdn: boolean }
 export interface AssetVersion { presentation?: VisualizeAssetPresentation; assetId: string; version: number; mime: string; bytes: number; sha256: string; state: 'processing' | 'ready' | 'failed'; representationVersion: number | null }
 export interface CanvasResourceVersion { resourceId: string; version: number; mime: string; bytes: number; sha256: string; representationVersion: number | null }
@@ -87,7 +89,7 @@ export interface CanvasResource extends GraphScope { id: string; name: string; c
 export interface LibraryAsset extends Scope { id: string; name: string; shared: boolean; deleted: boolean; current: AssetVersion }
 export interface CanvasResourceCreated { resource: CanvasResource; referenceId: string }
 export interface ResourceEnvelope { kind: 'text' | 'image' | 'document' | 'video' | 'file'; sourceNodeIds: string[]; text: string | null; resource: CanvasResourceVersion | null }
-export interface ProjectFileInput { kind: ResourceEnvelope['kind']; relativePath: string; sourceNodeIds: string[]; edgeIds: string[] }
+export interface ProjectFileInput { kind: ResourceEnvelope['kind']; relativePath: string; entryKind?: 'directory'; sourceNodeIds: string[]; edgeIds: string[] }
 /** Resource copies have no source asset binding. Upload IDs come from a future validated upload pipeline. */
 export interface CanvasUploadRequest extends GraphScope { uploadId: string; name: string; idempotencyKey: string }
 export type LibraryUploadRequest = Scope & { uploadId: string; name: string; idempotencyKey: string } & ({ mode: 'new' } | { mode: 'update'; assetId: string; expectedVersion: number });
@@ -105,7 +107,7 @@ export type ImageInputMode = 'text' | 'image' | 'text_image';
 export type FrozenApiImageRoute = Extract<ImageRoute, { type: 'api' }> & { configRevision: number; credentialRevision: number };
 export interface ImageProviderModel { id: string; name: string; modes: ('text' | 'image' | 'text_image')[]; formats: ('png' | 'jpeg' | 'webp')[]; sizes: string[]; qualities: string[]; isDefault: boolean; verifiedAt: string | null }
 export interface ImageProvider { id: string; name: string; driver: 'openai'; endpoint: string; enabled: boolean; revision: number; credentialConfigured: boolean; credentialRevision: number | null; models: ImageProviderModel[] }
-export interface InputSnapshotBase { inputDigest: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; agent?: import('./agents.js').FrozenAgentSelection; projectFiles?: ProjectFileInput[]; skills?: import('./skills.js').FrozenSkill[]; features?: import('./visualize.js').VisualizeFeatureSelection[]; visualizeGeneration?: import('./visualize.js').VisualizeGenerationContext; visualizeBindings?: import('./visualize.js').VisualizeRunInputBinding[]; frozenVisualizeInputs?: import('./visualize.js').FrozenVisualizeInput[] }
+export interface InputSnapshotBase { skillAuthoring?: 'create' | 'convert'; inputDigest: string; executionRevision: number; prompt: string; resources: ResourceEnvelope[]; agent?: import('./agents.js').FrozenAgentSelection; projectFiles?: ProjectFileInput[]; skills?: import('./skills.js').FrozenSkill[]; features?: import('./visualize.js').VisualizeFeatureSelection[]; visualizeGeneration?: import('./visualize.js').VisualizeGenerationContext; visualizeBindings?: import('./visualize.js').VisualizeRunInputBinding[]; frozenVisualizeInputs?: import('./visualize.js').FrozenVisualizeInput[] }
 export type InputSnapshot = InputSnapshotBase & (
   { model: ModelSelection; imageRoute?: Extract<ImageRoute, { type: 'codex' }>; inputMode?: ImageInputMode }
   | { imageRoute: FrozenApiImageRoute; inputMode: ImageInputMode; model?: never }

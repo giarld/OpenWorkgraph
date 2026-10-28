@@ -100,6 +100,7 @@ export interface CanvasProps {
    */
   nodeRenderKey?(node: WorkNode): unknown;
   renderTitlePrefix?(node: WorkNode): ReactNode;
+  nodeTooltip?(node: WorkNode): string | undefined;
   renderToolbar?(node: WorkNode): ReactNode;
   renderPanel?(node: WorkNode): ReactNode;
   onCreateMenu?(position: Point, screenPosition: Point): void;
@@ -257,6 +258,7 @@ const CanvasNode = memo(function CanvasNode({ node, canvasProps: props, nodeRend
         '--owg-node-border-color': node.borderColor,
       } as CSSProperties}
       aria-label={node.title}
+      title={props.nodeTooltip?.(node)}
     >
       <div className="owg-node-title" title={node.title}>
         {node.type === 'execution' && props.graph.edges.some(edge => edge.kind === 'execution' && edge.target === node.id) && !props.graph.edges.some(edge => edge.kind === 'execution' && edge.source === node.id) && <span className="owg-chain-master-mark" title={t("Chain primary node")}><Crown size={16} aria-label={t("Chain primary node")} role="img" /></span>}
@@ -940,17 +942,13 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
       if (g.kind === "resize") updateResizeDraft(g);
       if (g.kind === "box") {
         const box = rectFromPoints(world(g.start), world(g.current));
-        props.onSelect([
-          ...new Set([
-            ...g.initial,
-            ...props.graph.nodes
-              // A partial frame intersection must not select all of its members.
-              .filter((n) => n.type === 'group'
-                ? n.x >= box.x && n.y >= box.y && n.x + n.width <= box.x + box.width && n.y + n.height <= box.y + box.height
-                : intersects(box, n))
-              .map((n) => n.id),
-          ]),
-        ]);
+        // Drag selection replaces the selection; only modifier clicks add nodes.
+        props.onSelect(props.graph.nodes
+          // A partial frame intersection must not select all of its members.
+          .filter((n) => n.type === 'group'
+            ? n.x >= box.x && n.y >= box.y && n.x + n.width <= box.x + box.width && n.y + n.height <= box.y + box.height
+            : intersects(box, n))
+          .map((n) => n.id));
       }
     }
     function linkDropTarget(

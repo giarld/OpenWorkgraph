@@ -1,15 +1,17 @@
 import { isSkillName } from '@openworkgraph/protocol';
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, relative as relativePath, isAbsolute, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseDocument } from 'yaml';
-import type { SkillCatalog, SkillCatalogItem, SkillConfigSchema, SkillDetail, SkillSource } from '@openworkgraph/protocol';
+import type { SkillCatalog, SkillCatalogItem, SkillConfigSchema, SkillDetail, SkillSource, SkillLibrarySettings } from '@openworkgraph/protocol';
 import type { DataDirectories } from './directories.js';
 import { ServiceError } from './errors.js';
 import { parseSkillConfig } from './skill-schema.js';
-import { DEFAULT_SKILL_SOURCE, GitHubSkillSource, SKILL_LIMITS, gitBlobSha, packageDigest, validatePackageFiles, safeSkillPath, type SkillSourcePackage, type SkillSourceProvider, type SkillSourceFile } from './skill-source.js';
+import { DEFAULT_SKILL_SOURCE, SKILL_LIMITS, gitBlobSha, packageDigest, validatePackageFiles, safeSkillPath, type SkillSourcePackage, type SkillSourceProvider, type SkillSourceFile } from './skill-source.js';
+import { GitSkillSource, skillSourceFromUrl } from './git-skill-source.js';
 
 export interface BuiltinSkillsOptions { root?: string; source?: SkillSource; provider?: SkillSourceProvider }
 interface RemotePackage extends SkillSourcePackage { item: SkillCatalogItem; config?: SkillConfigSchema }
@@ -46,14 +48,42 @@ export function parseSkillFrontmatter(text: string): {name: string; description:
 /** Shared packages, workspace-independent installation pointers, immutable versions. */
 export class BuiltinSkills {
   readonly root: string;
-  readonly source: SkillSource;
+  private readonly defaultSource: SkillSource;
+  private readonly settingsPath: string;
   private readonly provider: SkillSourceProvider;
   private ready?: Promise<void>;
-  private refreshing: Promise<CatalogCache> | undefined;
+  private readonly refreshing = new Map<string, Promise<CatalogCache>>();
   constructor(_directories: DataDirectories, _serviceId: string, options: BuiltinSkillsOptions = {}) {
     this.root = resolve(options.root ?? join(homedir(), '.openworkgraph', 'skills'));
-    this.source = {...(options.source ?? DEFAULT_SKILL_SOURCE)};
-    this.provider = options.provider ?? new GitHubSkillSource();
+    this.defaultSource = {...(options.source ?? DEFAULT_SKILL_SOURCE)};
+    this.settingsPath = join(_directories.config ?? this.root, 'skill-library.json');
+    this.provider = options.provider ?? new GitSkillSource(join(this.root, 'git-sources'));
+  }
+  get source(): SkillSource { return this.librarySettings().source; }
+  librarySettings(): SkillLibrarySettings {
+    try {
+      const value = JSON.parse(readFileSync(this.settingsPath, 'utf8')) as SkillLibrarySettings;
+      if (!Number.isSafeInteger(value.revision) || value.revision < 0 || !value.source || value.source.directory !== 'skills') throw Error('settings');
+      const source = value.source.repository === this.defaultSource.repository ? this.defaultSource : skillSourceFromUrl(value.source.repository);
+      return { source: { ...source }, defaultSource: { ...this.defaultSource }, revision: value.revision };
+    } catch (error) {
+      if (!isMissing(error)) throw new ServiceError('INVALID_REQUEST', '技能库设置不可用，请检查工作空间设置文件。');
+      return { source: { ...this.defaultSource }, defaultSource: { ...this.defaultSource }, revision: 0 };
+    }
+  }
+  async saveLibrarySettings(repository: string | null, expectedRevision: number): Promise<SkillLibrarySettings> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new ServiceError('INVALID_REQUEST', '技能库设置需要有效修订号。');
+    const source = repository === null || repository.trim().replace(/\/$/, '').replace(/\.git$/, '') === this.defaultSource.repository ? { ...this.defaultSource } : skillSourceFromUrl(repository);
+    // Do not publish settings before the remote root structure has been checked.
+    await new SkillDeadline(SKILL_LIMITS.catalogMs).wait(() => this.provider.snapshot(source));
+    return this.lock(async () => {
+      if (this.librarySettings().revision !== expectedRevision) throw new ServiceError('REVISION_CONFLICT', '技能库设置已改变，请重新打开设置后保存。');
+      const value = { source, revision: expectedRevision + 1 };
+      const temporary = this.settingsPath + '.' + randomUUID() + '.tmp';
+      try { await fs.writeFile(temporary, JSON.stringify(value), { flag: 'wx', mode: 0o600 }); await fs.rename(temporary, this.settingsPath); }
+      finally { await fs.rm(temporary, { force: true }); }
+      return { ...value, defaultSource: { ...this.defaultSource } };
+    });
   }
   private initialize(): Promise<void> {
     return this.ready ??= (async () => {
@@ -170,45 +200,49 @@ export class BuiltinSkills {
       await fs.rm(await this.checked(retired),{recursive:true,force:true});
     }
   }
-  private async download(pkg: SkillSourcePackage, commitSha: string, file: SkillSourceFile, deadline?: SkillDeadline): Promise<Buffer> {
-    const read = () => this.provider.read(this.source,commitSha,this.source.directory + '/' + pkg.directory + '/' + file.path);
+  private async download(pkg: SkillSourcePackage, commitSha: string, file: SkillSourceFile, deadline?: SkillDeadline, source = this.source): Promise<Buffer> {
+    const read = () => this.provider.read(source,commitSha,source.directory + '/' + pkg.directory + '/' + file.path);
     const bytes = Buffer.from(await (deadline ? deadline.wait(read) : read()));
     if (bytes.length !== file.size || bytes.length > SKILL_LIMITS.fileBytes || gitBlobSha(bytes) !== file.sha) throw new ServiceError('INVALID_REQUEST','技能文件大小或内容摘要校验失败。');
     return bytes;
   }
-  private async metadata(pkg: SkillSourcePackage, commitSha: string, deadline: SkillDeadline): Promise<{name:string;description:string;config:SkillConfigSchema}> {
+  private async metadata(pkg: SkillSourcePackage, commitSha: string, deadline: SkillDeadline, source: SkillSource): Promise<{name:string;description:string;config:SkillConfigSchema}> {
     validatePackageFiles(pkg);
     const read = async (name: string) => {
       const file = pkg.files.find(file => file.path === name)!;
       if (file.size > SKILL_LIMITS.metadataBytes) throw new ServiceError('INVALID_REQUEST','技能说明或配置超过大小限制。');
-      return (await this.download(pkg,commitSha,file,deadline)).toString('utf8');
+      return (await this.download(pkg,commitSha,file,deadline,source)).toString('utf8');
     };
     const [skill,config,readme] = await Promise.all([read('SKILL.md'),read('config.json'),read('README.md')]);
     if (!readme.trim()) throw new ServiceError('INVALID_REQUEST','技能包 README.md 不能为空。');
     return {...parseSkillFrontmatter(skill),config:parseSkillConfig(config)};
   }
-  private refresh(): Promise<CatalogCache> {
-    return this.refreshing ??= (async () => {
+  private refresh(source: SkillSource): Promise<CatalogCache> {
+    const sourceKey = key(JSON.stringify(source));
+    const existing = this.refreshing.get(sourceKey);
+    if (existing) return existing;
+    const result = (async () => {
       const deadline = new SkillDeadline(SKILL_LIMITS.catalogMs);
-      const snapshot = await deadline.wait(()=>this.provider.snapshot(this.source));
+      const snapshot = await deadline.wait(()=>this.provider.snapshot(source));
       if (!/^[a-f0-9]{40}$/.test(snapshot.commitSha) || snapshot.packages.length > 500) throw new ServiceError('INVALID_REQUEST','技能来源目录无效。');
       const packages: RemotePackage[] = []; const seen = new Set<string>();
       for (const pkg of snapshot.packages) {
         deadline.check();
         if (seen.has(pkg.directory)) throw new ServiceError('INVALID_REQUEST','技能来源含重复目录。'); seen.add(pkg.directory);
-        const item: SkillCatalogItem = {skillId:this.source.id + ':' + pkg.directory,source:this.source,directory:pkg.directory,name:pkg.directory,description:'',installed:false,revision:0,packageVersion:packageDigest(pkg.files),commitSha:snapshot.commitSha,updateAvailable:false,configuration:'none'};
-        try { const metadata = await this.metadata(pkg,snapshot.commitSha,deadline); item.name = metadata.name; item.description = metadata.description; item.configuration = metadata.config.environment.length ? 'required' : 'none'; packages.push({...pkg,item,config:metadata.config}); }
+        const item: SkillCatalogItem = {skillId:source.id + ':' + pkg.directory,source,directory:pkg.directory,name:pkg.directory,description:'',installed:false,revision:0,packageVersion:packageDigest(pkg.files),commitSha:snapshot.commitSha,updateAvailable:false,configuration:'none'};
+        try { const metadata = await this.metadata(pkg,snapshot.commitSha,deadline,source); item.name = metadata.name; item.description = metadata.description; item.configuration = metadata.config.environment.length ? 'required' : 'none'; packages.push({...pkg,item,config:metadata.config}); }
         catch (error) { item.error = error instanceof ServiceError ? error.message : '无法读取技能包，请刷新重试。'; packages.push({...pkg,item}); }
       }
       deadline.check();
-      const cache = {source:this.source,fetchedAt:Date.now(),packages};
-      await this.atomicJson('catalog-' + key(JSON.stringify(this.source)) + '.json',cache); return cache;
-    })().finally(() => { this.refreshing = undefined; });
+      const cache = {source,fetchedAt:Date.now(),packages};
+      await this.atomicJson('catalog-' + sourceKey + '.json',cache); return cache;
+    })().finally(() => { this.refreshing.delete(sourceKey); });
+    this.refreshing.set(sourceKey, result); return result;
   }
-  private async cached(refresh = false): Promise<{cache:CatalogCache | undefined;error?:string}> {
-    await this.initialize(); const cache = await this.readJson<CatalogCache>('catalog-' + key(JSON.stringify(this.source)) + '.json');
+  private async cached(refresh = false, source = this.source): Promise<{cache:CatalogCache | undefined;error?:string}> {
+    await this.initialize(); const cache = await this.readJson<CatalogCache>('catalog-' + key(JSON.stringify(source)) + '.json');
     if (!refresh && cache && Date.now()-cache.fetchedAt < 5*60_000) return {cache};
-    try { return {cache:await this.refresh()}; }
+    try { return {cache:await this.refresh(source)}; }
     catch (error) { return {cache,error:error instanceof ServiceError ? error.message : '技能来源暂时不可用，请检查网络后重试。'}; }
   }
   async catalog(refresh = false): Promise<SkillCatalog> {
@@ -289,7 +323,7 @@ export class BuiltinSkills {
     validatePackageFiles(pkg);
     const file = pkg.files.find(file=>file.path===path);
     if (!file) throw new ServiceError('NOT_FOUND','技能包资源不存在。');
-    return this.download(pkg,pkg.item.commitSha!,file);
+    return this.download(pkg,pkg.item.commitSha!,file,undefined,pkg.item.source);
   }
   async detail(skillId: string, locale = 'en'): Promise<SkillDetail> {
     if (!/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(locale)) throw new ServiceError('INVALID_REQUEST','技能说明语言无效。');
@@ -308,14 +342,14 @@ export class BuiltinSkills {
     if (pkg.item.error || !pkg.config) throw new ServiceError('INVALID_REQUEST',pkg.item.error ?? '技能包配置无效。');
     const file = pkg.files.find(file=>file.path === names.find(name=>pkg.files.some(file=>file.path===name)))!;
     if (file.size > SKILL_LIMITS.metadataBytes) throw new ServiceError('PAYLOAD_TOO_LARGE','技能说明超过大小限制。');
-    return {item:{...pkg.item,revision:(await this.state()).items[skillId]?.revision ?? 0},config:pkg.config,readme:(await this.download(pkg,pkg.item.commitSha!,file)).toString('utf8')};
+    return {item:{...pkg.item,revision:(await this.state()).items[skillId]?.revision ?? 0},config:pkg.config,readme:(await this.download(pkg,pkg.item.commitSha!,file,undefined,pkg.item.source)).toString('utf8')};
   }
   async install(skillId: string, expectedRevision: number): Promise<SkillCatalogItem> {
     const deadline = new SkillDeadline(SKILL_LIMITS.installMs);
     return this.lock(async () => {
       deadline.check();
       const state = await this.state(); const current = state.items[skillId]; this.checkRevision(current,expectedRevision);
-      const {cache,error} = await deadline.wait(()=>this.cached(true));
+      const {cache,error} = await deadline.wait(()=>this.cached(true, current?.source ?? this.source));
       // A stale catalog may be shown, but must never be used to publish an installation.
       if (error) throw new ServiceError('NOT_FOUND',error,{retryable:true});
       const pkg = cache?.packages.find(pkg=>pkg.item.skillId===skillId);
@@ -327,7 +361,7 @@ export class BuiltinSkills {
       await this.directory(staging + '/package');
       try {
         for (const file of pkg.files) {
-          const bytes = await this.download(pkg,item.commitSha!,file,deadline); deadline.check(); const path = await this.checked(staging + '/package/' + file.path);
+          const bytes = await this.download(pkg,item.commitSha!,file,deadline,item.source); deadline.check(); const path = await this.checked(staging + '/package/' + file.path);
           await fs.mkdir(dirname(path),{recursive:true,mode:0o700}); await fs.writeFile(path,bytes,{flag:'wx',mode:file.mode === '100755' ? 0o700 : 0o600});
         }
         parseSkillFrontmatter(await fs.readFile(await this.checked(staging + '/package/SKILL.md'),'utf8'));
@@ -351,6 +385,85 @@ export class BuiltinSkills {
       if (!current.installed) return current;
       const item = {...current,installed:false,revision:current.revision+1,updateAvailable:false}; state.items[skillId]=item;
       await this.atomicJson('installed.json',state); return item;
+    });
+  }
+  /** Import a complete generated package through the same immutable version store. */
+  async installLocal(outputRoot: string, relative: string, expectedRevision = 0, check: () => void = () => {}): Promise<SkillCatalogItem> {
+    safeSkillPath(relative);
+    const deadline = new SkillDeadline(SKILL_LIMITS.installMs);
+    const root = await fs.realpath(outputRoot);
+    let directory = root;
+    for (const part of relative.split('/')) {
+      directory = join(directory, part);
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new ServiceError('INVALID_REQUEST', '技能包必须是本次运行输出中的真实目录。');
+    }
+    const files: SkillSourceFile[] = [];
+    const content = new Map<string, Buffer>();
+    let total = 0, entries = 0;
+    const collect = async (path: string, prefix = ''): Promise<void> => {
+      for (const entry of await fs.readdir(path, { withFileTypes: true })) {
+        check(); deadline.check();
+        if (++entries > SKILL_LIMITS.files * 2) throw new ServiceError('PAYLOAD_TOO_LARGE', '技能包目录数量超过限制。');
+        const name = prefix + entry.name; safeSkillPath(name);
+        const file = join(path, entry.name), stat = await fs.lstat(file);
+        if (stat.isSymbolicLink()) throw new ServiceError('INVALID_REQUEST', '技能包不能包含符号链接。');
+        if (stat.isDirectory()) { await collect(file, name + '/'); continue; }
+        if (!stat.isFile() || stat.size > SKILL_LIMITS.fileBytes || files.length >= SKILL_LIMITS.files) throw new ServiceError('PAYLOAD_TOO_LARGE', '技能包包含非普通文件或超过文件限制。');
+        const resolved = relativePath(root, await fs.realpath(file));
+        if (resolved === '..' || resolved.startsWith('..' + sep) || isAbsolute(resolved)) throw new ServiceError('INVALID_REQUEST', '技能包文件超出本次运行输出目录。');
+        const handle = await fs.open(file, 'r');
+        let bytes: Buffer;
+        try {
+          const opened = await handle.stat();
+          if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw new ServiceError('INVALID_REQUEST', '技能包文件在读取时发生变化。');
+          const chunks: Buffer[] = []; let length = 0;
+          for await (const chunk of handle.createReadStream({ autoClose: false })) {
+            check(); deadline.check(); length += chunk.length;
+            if (length > SKILL_LIMITS.fileBytes || total + length > SKILL_LIMITS.packageBytes) throw new ServiceError('PAYLOAD_TOO_LARGE', '技能包超过大小限制。');
+            chunks.push(Buffer.from(chunk));
+          }
+          bytes = Buffer.concat(chunks);
+        } finally { await handle.close(); }
+        total += bytes.length;
+        if (bytes.length > SKILL_LIMITS.fileBytes || total > SKILL_LIMITS.packageBytes) throw new ServiceError('PAYLOAD_TOO_LARGE', '技能包超过大小限制。');
+        content.set(name, bytes);
+        files.push({ path: name, size: bytes.length, sha: gitBlobSha(bytes), mode: stat.mode & 0o111 ? '100755' : '100644' });
+      }
+    };
+    await collect(directory);
+    if (['SKILL.md', 'README.md', 'config.json'].some(name => (content.get(name)?.length ?? 0) > SKILL_LIMITS.metadataBytes)) throw new ServiceError('PAYLOAD_TOO_LARGE', '技能说明或配置超过大小限制。');
+    const metadata = parseSkillFrontmatter(content.get('SKILL.md')?.toString('utf8') ?? '');
+    const pkg = { directory: metadata.name, files }; validatePackageFiles(pkg);
+    if (!content.get('README.md')!.toString('utf8').trim()) throw new ServiceError('INVALID_REQUEST', '技能包 README.md 不能为空。');
+    const config = parseSkillConfig(content.get('config.json')!.toString('utf8'));
+    const skillId = 'manual:' + metadata.name, packageVersion = packageDigest(files);
+    return this.lock(async () => {
+      check(); deadline.check();
+      const state = await this.state(), current = state.items[skillId];
+      if (current?.installed && current.packageVersion === packageVersion) return current;
+      if (current && current.revision !== expectedRevision) throw new ServiceError('REVISION_CONFLICT', '同名手动技能已存在，当前修订号为 ' + current.revision + '。替换前请取得用户确认，并传入 expectedRevision。');
+      this.checkRevision(current, expectedRevision);
+      const source: SkillSource = { id: 'manual', repository: 'manual', branch: '', directory: 'skills' };
+      const item: SkillCatalogItem = { skillId, source, directory: metadata.name, ...metadata, installed: true, revision: (current?.revision ?? 0) + 1, packageVersion, updateAvailable: false, configuration: config.environment.length ? 'required' : 'none' };
+      const target = this.versionDirectory(skillId, packageVersion), staging = 'staging/import-' + randomUUID();
+      await this.directory(staging + '/package');
+      try {
+        for (const file of files) {
+          check(); deadline.check();
+          const path = await this.checked(staging + '/package/' + file.path);
+          await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+          await fs.writeFile(path, content.get(file.path)!, { flag: 'wx', mode: file.mode === '100755' ? 0o700 : 0o600 });
+        }
+        await this.atomicJson(staging + '/manifest.json', { version: 1, item, files, installedAt: new Date().toISOString() });
+        await this.directory('versions/' + key(skillId));
+        check(); deadline.check();
+        if (!await this.readJson<Manifest>(target + '/manifest.json')) await fs.rename(await this.checked(staging), await this.checked(target));
+        else await this.readPackageEntry(skillId, packageVersion, true);
+        check(); deadline.check();
+        state.items[skillId] = item; await this.atomicJson('installed.json', state);
+        return item;
+      } finally { await fs.rm(await this.checked(staging), { recursive: true, force: true }); }
     });
   }
   private checkRevision(item: SkillCatalogItem | undefined, expected: number): void {

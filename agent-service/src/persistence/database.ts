@@ -48,6 +48,7 @@ export function migrate(db: DatabaseSync, migrations: readonly Migration[] = MIG
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new ServiceError('SCHEMA_UNSUPPORTED', `Missing schema table ${table}`);
     }
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_version_presentations'").get()) throw new ServiceError('SCHEMA_UNSUPPORTED','Missing asset version presentations');
+    for(const table of ['cli_run_sessions','cli_authorizations','cli_auto_grants','resource_upload_ids'])if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))throw new ServiceError('SCHEMA_UNSUPPORTED','Missing CLI authorization or upload identity storage');
     if (db.prepare('PRAGMA foreign_key_check').get()) throw new ServiceError('SCHEMA_UNSUPPORTED', 'Database has foreign key violations');
     if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_version_schemas'").get())throw new ServiceError('SCHEMA_UNSUPPORTED','Missing node version schema history');
     for (const table of ['image_providers','image_provider_models','image_provider_config_versions','image_provider_revoked_credentials']) if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new ServiceError('SCHEMA_UNSUPPORTED', 'Missing image provider directory');

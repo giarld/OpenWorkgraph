@@ -315,6 +315,8 @@
 .owg-project-reference-mark { display: inline-flex; align-items: center; flex: none; color: #f59e0b; }
 .owg-project-reference-icon { color: #f59e0b; }
 .owg-node-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ow-project-directory-reference > svg { flex: none; color: #e6b94a; }
+.ow-project-directory-reference > span { max-width: 100%; overflow-wrap: anywhere; }
 .owg-node-toolbar {
   position: absolute;
   z-index: 10;

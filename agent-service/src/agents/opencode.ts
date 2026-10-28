@@ -142,6 +142,13 @@ class OpenCodeAdapter implements AgentAdapter {
       await this.prepare({ runId: context.runId, attemptId: this.dependencies.attemptId, signal, context, callbacks });
       await validateRunPaths(context); signal.throwIfAborted();
       const device = await openCodeDevice(this.options);
+      if (callbacks.withSkillEnvironment) {
+        const privateEnvironment = (await callbacks.withSkillEnvironment(null, (environment, secrets) => {
+          for (const value of Object.values(secrets)) if (value) this.secrets[hash(value)] = value;
+          return { ...environment };
+        })).value;
+        device.environment = { ...(device.environment ?? process.env), ...privateEnvironment };
+      }
       const privateRoot = join(context.serviceRoot, 'config', 'agent-sessions', 'opencode'); await mkdir(privateRoot, { recursive: true, mode: 0o700 });
       if (!within(await realpath(context.serviceRoot), await realpath(privateRoot))) throw new AgentError('invalid_configuration');
       const directory = join(privateRoot, hash([context.runId, context.attemptId]));

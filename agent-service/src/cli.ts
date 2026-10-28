@@ -18,9 +18,19 @@ import { createInterface } from 'node:readline/promises';
 import { acquireServiceSingleton, rememberServiceDirectory, selectedServiceDirectory } from './operations/cli-context.js';
 import { formatCliError, formatPairingResult, printOutput } from './cli-output.js';
 import { updateAgentService } from './operations/update.js';
+import { BUSINESS_GROUPS, runBusinessCli } from './business-cli.js';
 const rawOutputJson = process.argv.slice(2).some(argument => argument === '--output-json' || argument === '--json');
 function printPairingResult(value: unknown, outputJson = false) { console.log(formatPairingResult(value, outputJson)); }
 async function main() {
+  const args = process.argv.slice(2);
+  const separator = args.indexOf('--');
+  const options = separator < 0 ? args : args.slice(0, separator);
+  if (args.length === 0 || args[0] === 'help' || options.includes('--help') || options.includes('-h')) {
+    console.log(formatHelp());
+    return;
+  }
+  if(process.env.OPENWORKGRAPH_RUN_CREDENTIAL!==undefined&&!BUSINESS_GROUPS.includes(process.argv[2]??''))throw new ServiceError('HOST_DENIED','Run instances cannot use local management commands.');
+  if(BUSINESS_GROUPS.includes(process.argv[2]??'')){await runBusinessCli(process.argv.slice(2));return;}
   const { values,positionals } = parseArgs({ allowPositionals: true, options: { 'data-dir': { type: 'string' }, origin: { type: 'string' }, 'client-code': { type: 'string' }, yes: { type: 'boolean' }, json: { type: 'boolean' }, 'output-json': { type: 'boolean' }, host: { type: 'string', default: '0.0.0.0' }, port: { type: 'string', default: '14317' }, sha256: { type: 'string' }, output: { type: 'string' }, 'idempotency-key': { type: 'string' }, 'interrupt-and-stop': { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean' } } });
   const outputJson = values['output-json'] || values.json || false;
   if (values.version) { console.log(SERVICE_VERSION); return; }

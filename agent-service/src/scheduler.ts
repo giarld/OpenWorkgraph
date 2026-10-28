@@ -3,6 +3,7 @@ import { isTerminalRunStatus } from '@openworkgraph/protocol';
 import type { InputSnapshot, Interaction, Json, Run } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
 import { Runs } from './runs.js';
+import { expireCliAuthorizations } from './cli-authorization.js';
 import type { RunToken } from './runs.js';
 
 export type BackendEvent =
@@ -213,6 +214,9 @@ export class Scheduler {
     return acquisition;
   }
   private async deliverReply(run: Run, interaction: Interaction, answer: Json): Promise<void> {
+    if(interaction.payload&&typeof interaction.payload==='object'&&!Array.isArray(interaction.payload)&&interaction.payload.cliAuthorization){
+      this.runs.acknowledgeReply(run.id,interaction.epoch,interaction.id);return;
+    }
     if (!this.backend.reply || this.pendingReplies.has(interaction.id)) return;
     this.pendingReplies.add(interaction.id);
     const token = this.runs.runtime(run.id);
@@ -237,6 +241,7 @@ export class Scheduler {
     const now = this.options.now?.() ?? Date.now();
     for (const [id, nextAt] of this.contendedProjects) if (nextAt <= now) this.contendedProjects.delete(id);
     try {
+      expireCliAuthorizations(this.runs, this.epoch);
       // Terminal history is never scheduling work. Reconcile the small set of
       // locks/retries we actually own, including externally cancelled runs.
       for (const [path, release] of this.releases) if (!this.activeProjectRuns(path)) { release(); this.releases.delete(path); }

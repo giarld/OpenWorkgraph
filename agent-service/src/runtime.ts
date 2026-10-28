@@ -66,6 +66,7 @@ import type { AgentExecutionSelection } from './agents/contracts.js';
 interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean; availabilityRevision?: number; modelPolicy?: import('@openworkgraph/protocol').AgentModelOption }
 
 export interface WorkflowRuntimeOptions {
+  logger?: import('./logger.js').Logger;
   backend?: SchedulerBackend; models?: BackendModel[];
   /** Default: discover on model reads/submission. True also probes at startup; false disables execution and discovery. */
   enableBackend?: boolean; backendOptions?: AdapterOptions; claudeOptions?: ClaudePluginOptions; opencodeOptions?: OpenCodePluginOptions;
@@ -466,7 +467,7 @@ export class WorkflowRuntime {
     const unsupportedProjectFile = preview.issues.find(item => item.reason.startsWith('API 生图不能读取项目文件引用'));
     if (unsupportedProjectFile) throw new ServiceError(unsupportedProjectFile.code, unsupportedProjectFile.reason);
     if (preview.projectFiles.length) {
-      const states = await new ProjectFiles(this.db).stat(request.projectId, preview.projectFiles.map(item => item.relativePath));
+      const states = await new ProjectFiles(this.db).statReferences(request.projectId, preview.projectFiles);
       const unavailable = states.find(item => item.state !== 'available');
       if (unavailable) throw new ServiceError(unavailable.state === 'missing' ? 'INPUT_BLOCKED' : 'PROJECT_UNAVAILABLE', '项目文件引用当前不可读：' + unavailable.path);
     }
@@ -553,7 +554,7 @@ export class WorkflowRuntime {
       },
       freeze: () => { const snapshot = scopedInputs.build(request.graphId, request.nodeId, apiRoute
         ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
-        : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
+        : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(request.kind === 'execution' && ['create','convert'].includes(String(nodeContent.skillAuthoring)) ? {skillAuthoring:nodeContent.skillAuthoring as 'create' | 'convert'} : {}),...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
     });
     return principal => { request.expectedExecutionRevision=input.expectedExecutionRevision+commitRevisionOffset; return agentPlan?.independent && !('legacy' in agentPlan.frozen) && agentPlan.frozen.settingsGeneration
       ? this.agentConfiguration!.withCurrent(agentPlan.frozen, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
@@ -590,7 +591,7 @@ export class WorkflowRuntime {
     const inspect = await this.probe.inspect([path]);
     if (inspect(path).canonicalPath !== path) throw new ServiceError('PROJECT_UNAVAILABLE', 'Restored project path no longer resolves to itself');
     if ((snapshot.projectFiles ?? []).length) {
-      const states = await new ProjectFiles(this.db).stat(run.projectId, snapshot.projectFiles!.map(item => item.relativePath));
+      const states = await new ProjectFiles(this.db).statReferences(run.projectId, snapshot.projectFiles!);
       const unavailable = states.find(item => item.state !== 'available');
       if (unavailable) throw new ServiceError(unavailable.state === 'missing' ? 'INPUT_BLOCKED' : 'PROJECT_UNAVAILABLE', '项目文件引用当前不可读：' + unavailable.path);
     }
@@ -635,7 +636,7 @@ export class WorkflowRuntime {
   private schedulePump(delayMs = 1000): void {
     if (this.closed) return;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = undefined; void this.pump().catch(() => { /* Durable state remains available for reconciliation. */ }); }, delayMs);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.pump().catch(() => { this.options.logger?.write('error', 'scheduler.pump_failed'); }); }, delayMs);
     this.timer.unref();
   }
   private wakePump(): void {
@@ -649,12 +650,12 @@ export class WorkflowRuntime {
     this.pumpAgain = false;
     const work = Promise.resolve().then(async () => {
       if (!this.closing && !this.chainPumpWork) {
-        const chains = this.executionChains.pump().catch(() => { /* Retry durable submissions on the next wake. */ }).finally(() => { if (this.chainPumpWork === chains) this.chainPumpWork = undefined; });
+        const chains = this.executionChains.pump().catch(() => { this.options.logger?.write('error', 'scheduler.chain_failed'); }).finally(() => { if (this.chainPumpWork === chains) this.chainPumpWork = undefined; });
         this.chainPumpWork = chains;
       }
       await this.scheduler.tick();
       // Plugin cleanup and input materialization must not hold up cancellation.
-      void this.agentRouter?.releaseFinished().catch(() => {});
+      void this.agentRouter?.releaseFinished().catch(() => { this.options.logger?.write('error', 'agent.cleanup_failed'); });
       if (this.closing && !this.active().length) this.finishClose();
     }).finally(() => {
       this.pumpWork = undefined;

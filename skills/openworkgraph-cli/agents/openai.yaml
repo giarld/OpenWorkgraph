@@ -1,0 +1,3 @@
+interface:
+  display_name: "OpenWorkgraph CLI"
+  short_description: "Use the CLI to read, edit and run OpenWorkgraph Work Graphs"

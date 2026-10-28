@@ -86,7 +86,7 @@ function GridThumbnail({ item, projectId, request }: { item: Entry; projectId: s
     : <EntryIcon item={item} size={30}/>}</span>;
 }
 
-export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { request: ResourceRequest; projectId?: string; ready: boolean; onPlace: (path: string, position?: { x: number; y: number }) => void }) {
+export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { request: ResourceRequest; projectId?: string; ready: boolean; onPlace: (path: string, position?: { x: number; y: number }, kind?: Entry['kind']) => void }) {
   const { t } = useI18n();
   const [view, setView] = useState<View>(readView);
   const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
@@ -171,8 +171,8 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
     return () => window.removeEventListener('openworkgraph:locate-project-directory', locate);
   });
   const drag = (event: React.DragEvent<HTMLButtonElement>, item: Entry) => {
-    if (!projectId || item.kind !== 'file') return;
-    const end = beginProjectFileDrag(event.dataTransfer, projectId, item.relativePath, position => onPlace(item.relativePath, position));
+    if (!projectId) return;
+    const end = beginProjectFileDrag(event.dataTransfer, projectId, item.relativePath, position => onPlace(item.relativePath, position, item.kind));
     event.currentTarget.addEventListener('dragend', end, { once: true });
   };
   const focusRelative = (current: HTMLElement, offset: number) => {
@@ -219,7 +219,7 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
     return <>
       <ul className="ow-project-file-tree-list">{page?.items.map(item => <li key={item.relativePath}>
         <div className={'ow-project-file-row' + (selected === item.relativePath ? ' is-selected' : '')}>
-          <button type="button" draggable={item.kind === 'file'} onDragStart={event => drag(event, item)}
+          <button type="button" draggable onDragStart={event => drag(event, item)}
             data-file-row={item.relativePath} title={item.relativePath} className="ow-project-file-name"
             aria-expanded={item.kind === 'directory' ? expanded.has(item.relativePath) : undefined}
             onKeyDown={event => rowKey(event, item)} onFocus={() => setSelected(item.relativePath)}
@@ -227,10 +227,10 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
             <span className="ow-project-file-chevron" aria-hidden="true">{item.kind === 'directory' && (expanded.has(item.relativePath) ? <ChevronDown size={13}/> : <ChevronRight size={13}/>)}</span>
             <EntryIcon item={item} open={expanded.has(item.relativePath)}/><span className="ow-project-file-label">{item.name}</span>
           </button>
-          {item.kind === 'file' && <div className="ow-project-file-row-end">
+          <div className="ow-project-file-row-end">
             {item.bytes !== undefined && <span className="ow-project-file-size">{formatFileSize(item.bytes)}</span>}
-            <button type="button" className="ow-project-file-add" title={t('Add to Work Graph')} aria-label={t('Add {name} to Work Graph', { name: item.name })} onClick={() => onPlace(item.relativePath)}><Plus size={15} aria-hidden="true"/></button>
-          </div>}
+            <button type="button" className="ow-project-file-add" title={t('Add to Work Graph')} aria-label={t('Add {name} to Work Graph', { name: item.name })} onClick={() => onPlace(item.relativePath, undefined, item.kind)}><Plus size={15} aria-hidden="true"/></button>
+          </div>
         </div>
         {item.kind === 'directory' && expanded.has(item.relativePath) && <div className="ow-project-file-branch">{renderTree(item.relativePath)}</div>}
       </li>)}</ul>
@@ -264,18 +264,18 @@ export function ProjectFilesPanel({ request, projectId, ready, onPlace }: { requ
       {view === 'tree' ? <div ref={tree} className="ow-project-file-tree" aria-label={t('Project directory')}>{renderTree('')}</div> : <div className="ow-project-file-grid">
         {location && <button type="button" className="ow-project-file-tile ow-project-file-parent" onClick={() => navigate(location.split('/').slice(0, -1).join('/'))}><span className="ow-project-file-tile-icon"><ArrowUp size={24}/></span><span className="ow-project-file-label">{t('Go up one level')}</span></button>}
         {current?.items.map(item => <div key={item.relativePath} className={'ow-project-file-tile-wrap' + (selected === item.relativePath ? ' is-selected' : '')}>
-          <button type="button" draggable={item.kind === 'file'} onDragStart={event => drag(event, item)} className="ow-project-file-tile" title={item.relativePath}
+          <button type="button" draggable onDragStart={event => drag(event, item)} className="ow-project-file-tile" title={item.relativePath}
             onClick={() => setSelected(item.relativePath)} onFocus={() => setSelected(item.relativePath)}
             onDoubleClick={() => item.kind === 'directory' ? navigate(item.relativePath) : onPlace(item.relativePath)}
             onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); if (item.kind === 'directory') navigate(item.relativePath); else onPlace(item.relativePath); } }}>
             <GridThumbnail key={projectId + ':' + generation.current + ':' + item.relativePath} item={item} projectId={projectId!} request={request}/><span className="ow-project-file-label">{item.name}</span>
             <span className="ow-project-file-tile-meta">{item.kind === 'directory' ? t('Folder') : item.bytes !== undefined ? formatFileSize(item.bytes) : t('File')}</span>
           </button>
-          {item.kind === 'file' && <button type="button" className="ow-project-file-add" title={t('Add to Work Graph')} aria-label={t('Add {name} to Work Graph', { name: item.name })} onClick={() => onPlace(item.relativePath)}><Plus size={15}/></button>}
+          <button type="button" className="ow-project-file-add" title={t('Add to Work Graph')} aria-label={t('Add {name} to Work Graph', { name: item.name })} onClick={() => onPlace(item.relativePath, undefined, item.kind)}><Plus size={15}/></button>
         </div>)}
         {pageStatus(location)}
       </div>}
-      <footer className="ow-project-file-footer"><Link2 size={14} aria-hidden="true"/><span>{t('Drag a file in, or click')} <Plus size={12} aria-label={t('plus')}/> {t('to add a reference')}{view === 'grid' && <small>{t('Double-click a folder to open it')}</small>}</span></footer>
+      <footer className="ow-project-file-footer"><Link2 size={14} aria-hidden="true"/><span>{t('Drag a file or folder in, or click')} <Plus size={12} aria-label={t('plus')}/> {t('to add a reference')}{view === 'grid' && <small>{t('Double-click a folder to open it')}</small>}</span></footer>
     </>}
   </section>;
 }

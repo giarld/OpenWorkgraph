@@ -12,7 +12,7 @@ import type {
 } from "./contracts";
 import { graphPath } from "./contracts";
 import type { CanvasCreated } from "./ResourcesPanel";
-import { emptyProjectFileContent } from './project-file-reference';
+import { emptyProjectFileContent, isProjectDirectoryReference } from './project-file-reference';
 import { FILE_NODE_MAX_BYTES, importedNodeType } from '../domain/file-types';
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
@@ -95,11 +95,15 @@ export function clipboardContent(
   // Never carry run history, outputs, resource identities or model overrides.
   if (node.type === "execution") {
     if (raw.features !== undefined && (!Array.isArray(raw.features) || raw.features.length > 1 || raw.features.some(feature => !isVisualizeFeatureSelection(feature)))) throw Error(translate('Invalid clipboard feature identity.'));
-    const features: Record<string, Json> = raw.features === undefined ? {} : { features: structuredClone(raw.features) as Json };
-    if (raw.prompt === undefined) return features;
+    if (raw.skillAuthoring !== undefined && raw.skillAuthoring !== 'create' && raw.skillAuthoring !== 'convert') throw Error(translate('The clipboard contains unsupported fields, resources, or provenance.'));
+    const taskContent: Record<string, Json> = {
+      ...(raw.features === undefined ? {} : { features: structuredClone(raw.features) as Json }),
+      ...(raw.skillAuthoring === undefined ? {} : { skillAuthoring: raw.skillAuthoring }),
+    };
+    if (raw.prompt === undefined) return taskContent;
     if (typeof raw.prompt !== "string")
       throw Error(translate("Clipboard text fields must be strings."));
-    return { prompt: raw.prompt, ...skillContent, ...features };
+    return { prompt: raw.prompt, ...skillContent, ...taskContent };
   }
   // A generated text node may retain its immutable Markdown output. Clipboard
   // copies are editable text copies, so leave that graph-scoped resource behind.
@@ -188,6 +192,7 @@ interface ProjectFilePasteCopy {
 
 export function assertResourcePasteTarget(raw: string, target: ClipboardScope): void {
   const payload = parseNodeClipboard(raw);
+  assertDirectoryPasteTarget(raw, payload, target);
   const hasResources = payload.nodes.some(
     (node) => typeof node.content.resourceId === "string",
   );
@@ -206,6 +211,14 @@ function validTrustedProjectSource(raw: string, payload: Payload, source: Record
     payload.source.serviceId === source.serviceId &&
     payload.source.projectId === source.projectId;
 }
+function assertDirectoryPasteTarget(raw: string, payload: Payload, target?: ClipboardScope): void {
+  for (const node of payload.nodes) if (isProjectDirectoryReference(node.content)) {
+    if (!target || target.serviceId !== payload.source.serviceId || target.projectId !== payload.source.projectId)
+      throw Error(translate('Directory references cannot be pasted across Workspaces or projects. No nodes or resources were created.'));
+    if (!validTrustedProjectSource(raw, payload, node.content.source as Record<string, Json>))
+      throw Error(translate('The directory reference clipboard is untrusted. Copy the nodes again.'));
+  }
+}
 export function contentWithResource(
   node: Pick<Node, "type" | "schemaVersion" | "content">,
   strict = false,
@@ -216,11 +229,14 @@ export function contentWithResource(
   const source = c.source === undefined ? undefined : object(c.source);
   if (source?.kind === 'project-file' || source?.kind === 'project-file-empty') {
     if (strict) fields(c, ['title','text','prompt','summary','modelOverride','skillReferences','mime','bytes','source','observation']);
-    fields(source, source.kind === 'project-file' ? ['kind','serviceId','projectId','relativePath'] : ['kind','relativePath']);
+    fields(source, source.kind === 'project-file' ? ['kind','serviceId','projectId','relativePath','entryKind'] : ['kind','relativePath']);
+    if (source.entryKind !== undefined && (source.entryKind !== 'directory' || node.type !== 'file')) throw Error(translate('The project file reference clipboard is invalid.'));
     if (typeof source.relativePath !== 'string' || (source.kind === 'project-file' && (typeof source.serviceId !== 'string' || typeof source.projectId !== 'string'))) throw Error(translate("The project file reference clipboard is invalid."));
     const plain = { ...c }; delete plain.source; delete plain.observation; delete plain.mime; delete plain.bytes;
     const result = clipboardContent({ ...node, content: plain as Json }, strict);
-    return { ...result, ...(typeof c.mime === 'string' ? { mime:c.mime } : {}), ...(typeof c.bytes === 'number' ? { bytes:c.bytes } : {}), source:structuredClone(source) as Json };
+    const rawObservation = c.observation && typeof c.observation === 'object' && !Array.isArray(c.observation) ? object(c.observation) : {};
+    const observation = source.entryKind === 'directory' && typeof rawObservation.absolutePath === 'string' ? { absolutePath:rawObservation.absolutePath } : undefined;
+    return { ...result, ...(typeof c.mime === 'string' ? { mime:c.mime } : {}), ...(typeof c.bytes === 'number' ? { bytes:c.bytes } : {}), ...(observation ? { observation } : {}), source:structuredClone(source) as Json };
   }
   if (c.resourceId === undefined && c.resourceVersion === undefined)
     return clipboardContent(node, strict);
@@ -458,6 +474,7 @@ export function planNodePaste(
   projectCopies?: Map<string, ProjectFilePasteCopy>,
 ): { operations: GraphOperation[]; nodeIds: string[] } {
   const payload = parseNodeClipboard(raw);
+  assertDirectoryPasteTarget(raw, payload, target);
   const ids = new Map(payload.nodes.map((n) => [n.id, newId()]));
   const edgeIds = new Map(payload.edges.map(edge => [edge.id, newId()]));
   const left = Math.min(...payload.nodes.map((n) => n.x)),
@@ -550,14 +567,15 @@ export function createResourcePasteJob(
   onProgress: (completed: number, total: number) => void = () => {},
 ) {
   const payload = parseNodeClipboard(raw);
+  assertDirectoryPasteTarget(raw, payload, target);
   const resources = payload.nodes.filter(
     (n) => typeof n.content.resourceId === "string",
   );
   const projectFiles = payload.nodes.filter((n) => {
     const source = n.content.source;
-    return source && typeof source === 'object' && !Array.isArray(source) && source.kind === 'project-file';
+    return source && typeof source === 'object' && !Array.isArray(source) && source.kind === 'project-file' && source.entryKind !== 'directory';
   });
-  if (!resources.length && !projectFiles.length && !payload.nodes.some(node => node.type === 'visualize' && validateVisualizeNodeContent(node.content).page)) throw Error(translate("This clipboard does not require the resource copy flow."));
+  if (!resources.length && !projectFiles.length && !payload.nodes.some(node => isProjectDirectoryReference(node.content) || node.type === 'visualize' && validateVisualizeNodeContent(node.content).page)) throw Error(translate("This clipboard does not require the resource copy flow."));
   if (resources.length) assertResourcePasteTarget(raw, target);
   if (projectFiles.some(n => {
     const source = n.content.source;

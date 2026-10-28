@@ -1,4 +1,4 @@
-import { VisualizeValidationError, type VisualizeFieldError } from '@openworkgraph/protocol';
+import { VisualizeValidationError, WORKGRAPH_UPLOAD_MAX_BYTES, type VisualizeFieldError } from '@openworkgraph/protocol';
 import { hashBytes } from './blob-store.js';
 import { ServiceError } from './errors.js';
 import { MAX_MANIFEST, parsePublicationManifest, readPublicationOutput, validatePublicationOutputBytes } from './publication.js';
@@ -24,7 +24,7 @@ export async function readValidatedVisualizeOutput(root: string, path: string, k
     const assets = new Map<string, { bytes: Buffer; mime: string }>();
     for (const item of manifest.outputs) {
       if (item.role === 'project-file' || !/^(image|video|audio)[/]/.test(item.mime)) continue;
-      const media = await readPublicationOutput(root, item.path, Math.min(item.bytes, 64 * 1024 * 1024));
+      const media = await readPublicationOutput(root, item.path, Math.min(item.bytes, WORKGRAPH_UPLOAD_MAX_BYTES));
       validatePublicationOutputBytes(item, media);
       // These identities exist only in this validation copy; no persistent IDs or
       // resource records are allocated before the real publication transaction.

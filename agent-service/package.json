@@ -1,6 +1,6 @@
 {
   "name": "openworkgraph",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -17,7 +17,8 @@
     "dist/**/*.d.ts",
     "README.md",
     "README.zh-CN.md",
-    "assets/readme/"
+    "assets/readme/",
+    "assets/skill-creator/"
   ],
   "scripts": {
     "prebuild": "node ../scripts/check-versions.mjs --quiet",

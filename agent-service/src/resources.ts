@@ -17,7 +17,7 @@ export interface ResourceScope { projectId: string; serviceId?: string }
 export interface CanvasScope extends ResourceScope { graphId: string }
 export type LibraryTarget = ResourceScope & {name: string} & ({mode: 'new'} | {mode: 'update'; assetId: string; expectedVersion: number});
 export type UploadTarget = LibraryTarget | (CanvasScope & {name: string; mode: 'canvas'});
-export interface UploadStart extends ResourceScope { name: string; bytes: number; mime: string; sha256?: string }
+export interface UploadStart extends ResourceScope { name: string; bytes: number; mime: string; sha256?: string; uploadId?:string }
 export interface UploadStatus { uploadId: string; projectId: string; name: string; bytes: number; received: number; mime: string; state: string; sha256: string | null }
 export interface PreparedAppend {readonly uploadId: string; readonly projectId: string; readonly offset: number; readonly bytes: number; readonly sha256: string; readonly path: string}
 export interface PreparedFinish {readonly uploadId: string; readonly projectId: string; readonly blob: PreparedBlob}
@@ -92,7 +92,10 @@ export class Resources {
   if (typeof request.mime!=='string' || !/^[a-zA-Z0-9.+-]+[/][a-zA-Z0-9.+-]+$/.test(request.mime)) invalid('Invalid MIME');
   if (request.mime.toLowerCase()===VISUALIZE_ASSET_MIME && request.bytes>VISUALIZE_LIBRARY_MAX_JSON_BYTES) throw new ServiceError('PAYLOAD_TOO_LARGE','可视化资产内容包超过大小上限。');
   if (request.sha256!==undefined && !/^[a-f0-9]{64}$/.test(request.sha256)) invalid('Invalid SHA-256');
-  const id=randomUUID();
+  const id=request.uploadId??randomUUID();
+  if(typeof id!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id))invalid('Invalid upload ID');
+  if(this.db.prepare('SELECT 1 FROM resource_upload_ids WHERE id=?').get(id)||this.db.prepare('SELECT 1 FROM resource_uploads WHERE id=?').get(id))throw new ServiceError('CONFLICT','Upload ID was already used; resume it or replay the original request.');
+  this.db.prepare('INSERT INTO resource_upload_ids(id) VALUES(?)').run(id);
   this.db.prepare('INSERT INTO resource_uploads(id,project_id,name,mime,bytes,expected_sha256,created_at) VALUES(?,?,?,?,?,?,?)').run(id,request.projectId,name(request.name),request.mime,request.bytes,request.sha256 ?? null,this.now());
   return this.uploadStatus(request,id);
  }
@@ -136,6 +139,9 @@ export class Resources {
   const original=await this.blobs.prepare(stable,'application/json',sha256);
   const result=Object.freeze({...original,mime:VISUALIZE_ASSET_MIME});
   this.visualizePrepared.set(result,{original,cache});return result;
+ }
+ async prepareStream(chunks: AsyncIterable<Uint8Array>, mime: string, expected: {bytes: number; sha256: string}): Promise<PreparedBlob> {
+  this.outside();return this.blobs.prepareStream(chunks,mime,expected);
  }
  async prepareProjectFile(scope: ResourceScope, path: string, mime='application/octet-stream'): Promise<PreparedBlob> {
   this.outside();this.project(scope);const registeredRoot=String(this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(scope.projectId)!['canonical_path']);const root=await realpath(registeredRoot);

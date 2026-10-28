@@ -19,18 +19,32 @@ Open the [official OpenWorkgraph editor](https://canvas.giarld.com) and follow t
 
 ### Agent Service
 
-Build the protocol package and Agent Service from the repository root:
+Install dependencies and start the development service from the repository root:
 
 ```sh
 npm ci --include=dev
-npm run build
+npm run dev:service
 ```
 
-After the build completes, run Agent Service in the foreground:
+`dev:service` runs `npm run build` each time, then starts the service in the foreground after a successful build. Press Ctrl+C to stop it. Pass options after `--`, for example `npm run dev:service -- --host 127.0.0.1`.
+
+To build separately and run in the background:
 
 ```sh
+npm run build
 node agent-service/dist/cli.js start
 ```
+
+Check the status or stop the background service:
+
+```sh
+node agent-service/dist/cli.js status
+node agent-service/dist/cli.js stop
+```
+
+With an existing build, use `node agent-service/dist/cli.js serve` to start in the foreground without rebuilding. Choose either `start` for background operation or `serve` for foreground operation.
+
+Foreground logs go to the terminal. Background logs append to `logs/service-YYYY-MM-DD.log` inside the data directory (default: `~/.openworkgraph/logs/`), keeping the current UTC date and the preceding six days. Background operation defaults to key events, warnings and errors only. `NODE_ENV=production` enables this reduced logging in either mode; `NODE_ENV=development` enables detailed logs. Foreground operation keeps detailed logs when the environment is unset.
 
 ### OpenCode Agent
 
@@ -42,7 +56,16 @@ After a crash, unresolved independent work retains the project lock and executio
 
 ### Web Client
 
-Build Web Client from the repository root, then serve the production build with Vite Preview at `http://127.0.0.1:4173`:
+In a separate terminal, start the Web development server from the repository root:
+
+```sh
+npm --prefix web-client ci --include=dev
+npm run dev:web
+```
+
+`dev:web` runs `npm --prefix web-client run dev`. Open the address printed in the terminal and press Ctrl+C to stop it.
+
+To preview a production build with Vite Preview at `http://127.0.0.1:4173`:
 
 ```sh
 npm --prefix web-client ci --include=dev

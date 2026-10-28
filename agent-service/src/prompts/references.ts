@@ -29,8 +29,10 @@ export function referenceGuidance(context: BackendRunContext, options: { command
   }
   for (const [index, input] of (context.projectFiles ?? []).entries()) {
     const path = join(context.projectPath, ...input.relativePath.split('/'));
-    lines.push('Live project file ' + (index + 1) + ' (' + input.kind + '; source nodes: ' + input.sourceNodeIds.join(', ') + '): ' + path);
-    lines.push('Read this file from the current project when needed. Its contents are live and were not copied into the frozen input directory.');
+    lines.push('Live project ' + (input.entryKind === 'directory' ? 'directory ' : 'file ') + (index + 1) + ' (' + input.kind + '; source nodes: ' + input.sourceNodeIds.join(', ') + '): ' + path);
+    lines.push(input.entryKind === 'directory'
+      ? 'Inspect this directory and read relevant files from the current project when needed. Its contents are live and were not copied into the frozen input directory.'
+      : 'Read this file from the current project when needed. Its contents are live and were not copied into the frozen input directory.');
   }
   if (context.kind === 'image_generation') lines.push('In the Markdown description, state how the supplied references informed the resulting image.');
   lines.push('End of reference data. The user request follows separately below.');

@@ -174,13 +174,40 @@ export class Auth {
       return { serviceId: this.serviceId, token, session: this.toSession({id,browser_name:input.browserName.trim(),paired_at:now,last_used_at:now,revoked_at:null,origin},id) };
     });
   }
+  /** Only authenticated local IPC may bootstrap an independent native identity. */
+  issueNativeSession(name = 'Native CLI'): PairResponse {
+    const now=this.now(),token='wg1_'+randomBytes(32).toString('base64url'),id=randomUUID(),origin='native:cli';
+    transaction(this.db,()=>this.db.prepare('INSERT INTO sessions(id,token_hash,browser_name,paired_at,last_used_at,origin) VALUES(?,?,?,?,?,?)').run(id,this.hash('session',token),name,now,now,origin));
+    return {serviceId:this.serviceId,token,session:this.toSession({id,browser_name:name,origin,paired_at:now,last_used_at:now,revoked_at:null},id)};
+  }
+  nativeOrigin(token:string):string {
+    const row=this.db.prepare('SELECT origin FROM sessions WHERE token_hash=?').get(this.hash('session',token));
+    if(row&&row.origin!=='native:cli'&&row.origin!=='native:run')throw new ServiceError('ORIGIN_DENIED','Browser sessions require their paired Origin.');
+    if(row?.origin!=='native:cli' && row?.origin!=='native:run')throw new ServiceError('UNAUTHENTICATED','A native business session is required.');
+    this.active(token,String(row.origin));return String(row.origin);
+  }
+  issueRunSession(runId:string,attemptId:string):PairResponse {
+    const now=this.now(),token='wg1_'+randomBytes(32).toString('base64url'),id=randomUUID(),origin='native:run';
+    return transaction(this.db,()=>{
+      const row=this.db.prepare('SELECT n.type,r.status,t.epoch FROM runs r JOIN nodes n ON n.id=r.node_id JOIN run_runtime t ON t.run_id=r.id WHERE r.id=?').get(runId);
+      if(!row||row.epoch!==attemptId||!['preparing','running','waiting_answer','waiting_approval'].includes(String(row.status)))throw new ServiceError('CONFLICT','Run identity is unavailable.');
+      this.db.prepare("UPDATE sessions SET revoked_at=? WHERE id IN (SELECT session_id FROM cli_run_sessions WHERE run_id=?) AND revoked_at IS NULL").run(now,runId);
+      this.db.prepare('INSERT INTO sessions(id,token_hash,browser_name,paired_at,last_used_at,origin) VALUES(?,?,?,?,?,?)').run(id,this.hash('session',token),'Run CLI',now,now,origin);
+      this.db.prepare('INSERT INTO cli_run_sessions(session_id,run_id,attempt_id,source_type) VALUES(?,?,?,?)').run(id,runId,attemptId,String(row.type));
+      return {serviceId:this.serviceId,token,session:this.toSession({id,browser_name:'Run CLI',origin,paired_at:now,last_used_at:now,revoked_at:null},id)};
+    });
+  }
   private active(token: string, origin: string): SessionRow {
-    this.requireOrigin(origin);
+    if(origin!=='native:cli'&&origin!=='native:run')this.requireOrigin(origin);
     if (!/^wg1_[A-Za-z0-9_-]{43}$/.test(token)) throw new ServiceError('UNAUTHENTICATED', '需要有效的 Bearer 会话凭据；请重新配对。');
     const row = this.db.prepare('SELECT id,browser_name,origin,paired_at,last_used_at,revoked_at FROM sessions WHERE token_hash=?').get(this.hash('session',token)) as SessionRow | undefined;
     if (!row) throw new ServiceError('UNAUTHENTICATED', '会话不存在或不属于此服务；请重新配对。');
     if (row.origin !== origin) throw new ServiceError('ORIGIN_DENIED', '会话仅允许从配对时的网页来源访问。');
     if (row.revoked_at !== null) throw new ServiceError('SESSION_REVOKED', '此浏览器会话已撤销，请重新配对；已接受任务不受影响。');
+    if(origin==='native:run'){
+      const binding=this.db.prepare('SELECT c.attempt_id,r.status,t.epoch FROM cli_run_sessions c JOIN runs r ON r.id=c.run_id JOIN run_runtime t ON t.run_id=r.id WHERE c.session_id=?').get(row.id);
+      if(!binding||binding.attempt_id!==binding.epoch||!['preparing','running','waiting_answer','waiting_approval'].includes(String(binding.status)))throw new ServiceError('SESSION_REVOKED','Run CLI identity is no longer active.');
+    }
     if (this.now() >= row.last_used_at + SESSION_IDLE_MS) throw new ServiceError('SESSION_EXPIRED', '此会话已连续 30 天未使用，请重新配对。');
     return row;
   }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { prepareSkillCreator } from './skill-authoring.js';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AgentApprovalDetails, AgentMessageIdentity, InputSnapshot, Interaction, Json, Run } from '@openworkgraph/protocol';
@@ -21,6 +22,8 @@ import type { VisualizePreviews } from './visualize-preview.js';
 import { validateAgentForm, validateAgentFormAnswer } from './agents/forms.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { atomic } from './persistence/database.js';
+import { Auth } from './auth.js';
+import { Repositories } from './persistence/repositories.js';
 
 const identifier = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -84,8 +87,15 @@ export class RuntimeBackend implements SchedulerBackend {
     if (identity !== undefined && (!identifier(identity.backendId) || !identifier(identity.attemptId) || !identifier(identity.messageId) || identity.backendId !== backendId || identity.attemptId !== context.epoch || identity.sessionId !== undefined && !identifier(identity.sessionId) || identity.turnId !== undefined && !identifier(identity.turnId))) return false;
     return true;
   }
+  /** Apply host completion requirements before callbacks or reconciliation use the native state. */
+  private completionSnapshot(snapshot: RuntimeSnapshot, context: BackendContext): RuntimeSnapshot {
+    if (snapshot.state === 'completed' && this.runs.snapshot(snapshot.runId).skillAuthoring && !this.runs.db.prepare("SELECT 1 FROM run_process_records WHERE run_id=? AND kind='skill.installed' AND json_extract(payload,'$.attemptId')=? LIMIT 1").get(snapshot.runId, context.epoch))
+      return { ...snapshot, state: 'failed', reason: '技能尚未完成校验与安装，请检查执行结果后重试。' };
+    return snapshot;
+  }
   private snapshot(snapshot: RuntimeSnapshot, context: BackendContext, expectedRunId: string): void {
     if (!this.accepts(snapshot, context, expectedRunId)) return;
+    snapshot = this.completionSnapshot(snapshot, context);
     const run = this.runs.get(snapshot.runId);
     if (snapshot.tokenUsage) this.runs.observeTokenUsage(run.id, context.epoch, snapshot.tokenUsage);
     if (snapshot.state === 'starting') return;
@@ -203,6 +213,7 @@ export class RuntimeBackend implements SchedulerBackend {
     let directories: ReturnType<typeof runDirectories>;
     let inputFiles: Awaited<ReturnType<typeof materializeInputs>>['files'];
     let upstreamContext: RunLineage | undefined;
+    let authoringGuidance = '';
     try {
       if (snapshot.skills?.length) {
         if (!this.skillSessions) throw new ServiceError('INPUT_BLOCKED', '冻结技能上下文不可用。');
@@ -213,7 +224,7 @@ export class RuntimeBackend implements SchedulerBackend {
       if (inspect(path).canonicalPath !== path) throw new ServiceError('PROJECT_UNAVAILABLE', 'Project canonical path changed');
       const projectFiles = snapshot.projectFiles ?? [];
       if (projectFiles.length) {
-        const states = await new ProjectFiles(this.runs.db).stat(run.projectId, projectFiles.map(item => item.relativePath));
+        const states = await new ProjectFiles(this.runs.db).statReferences(run.projectId, projectFiles);
         const unavailable = states.find(item => item.state !== 'available');
         if (unavailable) throw new ServiceError(unavailable.state === 'missing' ? 'INPUT_BLOCKED' : 'PROJECT_UNAVAILABLE', '项目文件引用当前不可读：' + unavailable.path);
       }
@@ -224,6 +235,7 @@ export class RuntimeBackend implements SchedulerBackend {
         return String(row.path);
       } });
       inputFiles = inputs.files;
+      if (snapshot.skillAuthoring && runtime.details.kind === 'execution') authoringGuidance = await prepareSkillCreator(directories.input);
       // Keep the materialized snapshot self-contained. Agents are told to inspect
       // this file, so omitting the frozen prompt makes an input with no references
       // look like an empty task even though the prompt is supplied to turn/start.
@@ -244,8 +256,12 @@ export class RuntimeBackend implements SchedulerBackend {
       return;
     }
     if (this.runs.runtime(run.id).epoch !== context.epoch) return;
+    const listener=new Repositories(this.runs.db).setting('listener') as {localEndpoint?:string}|null;
+    const nativeSession=listener?.localEndpoint?new Auth(this.runs.db,run.serviceId).issueRunSession(run.id,context.epoch):undefined;
+    const cliEnvironment:Record<string,string>=nativeSession?{OPENWORKGRAPH_RUN_CREDENTIAL:JSON.stringify({...nativeSession,endpoint:listener!.localEndpoint}),OPENWORKGRAPH_CLI_HOME:join(directories.output,'.workgraph-cli')}:{};
+    const cliSecrets=nativeSession?{...cliEnvironment,OPENWORKGRAPH_RUN_TOKEN:nativeSession.token}:{};
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
-    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.agent?.model ?? snapshot.model, attemptId: context.epoch, ...(snapshot.agent ? { agent: structuredClone(snapshot.agent) } : {}), skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), ...(!snapshot.agent || snapshot.agent.backendId === 'codex' ? { sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') } : {}) }, {
+    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: authoringGuidance ? authoringGuidance + String.fromCharCode(10, 10) + snapshot.prompt : snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.agent?.model ?? snapshot.model, attemptId: context.epoch, ...(snapshot.agent ? { agent: structuredClone(snapshot.agent) } : {}), skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), ...(!snapshot.agent || snapshot.agent.backendId === 'codex' ? { sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') } : {}) }, {
       onSnapshot: value => this.callback(run.id, context, 'onSnapshot', () => this.snapshot(value, context, run.id)),
       ...(this.runs.shouldGenerateNodeTitle(run.id) ? { setNodeTitle: (title: string) => {
         const token = this.runs.runtime(run.id);
@@ -259,6 +275,11 @@ export class RuntimeBackend implements SchedulerBackend {
         this.runs.expireInteraction(run.id, this.runs.runtime(run.id), hostId);
       }),
       queryHistory: query => this.asyncCallback(run.id, context, 'queryHistory', () => this.queryHistory(run.id, query)),
+      ...(snapshot.skillAuthoring && runtime.details.kind === 'execution' && this.skillSessions ? { installGeneratedSkill: (path: string, expectedRevision: number) => this.asyncCallback(run.id, context, 'installGeneratedSkill', async check => {
+        const item = await this.skillSessions!.packages.installLocal(directories.output, path, expectedRevision, check);
+        check(); this.runs.record(run.id, 'skill.installed', { attemptId: context.epoch, skillId: item.skillId, packageVersion: item.packageVersion! });
+        return item;
+      }) } : {}),
       readRunContext: request => this.asyncCallback(run.id, context, 'readRunContext', () => this.runContexts.read(run.id, request)),
       ...(this.visualizePreviews && (runtime.details.kind === 'visualize_generation' || runtime.details.kind === 'execution' && hasVisualizeFeature(snapshot.features)) ? {
         previewVisualizeOutput: (pagePath: string) => this.asyncCallback(run.id, context, 'previewVisualizeOutput', check => this.visualizePreviews!.create(run.id, context.epoch, pagePath, check)),
@@ -274,7 +295,10 @@ export class RuntimeBackend implements SchedulerBackend {
         return result;
       }) } : {}),
       ...(this.skillSessions ? { skillEnvironment: (skillId: string) => this.asyncCallback(run.id, context, 'skillEnvironment', () => this.skillSessions!.forSkill(snapshot.skills ?? [], skillId)) } : {}),
-      ...(this.skillSessions ? { withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.asyncCallback(run.id, context, 'withSkillEnvironment', check => this.skillSessions!.withEnvironment(snapshot.skills ?? [], skillId, (environment, secrets) => { check(); return dispatch(environment, secrets); })) } : {}),
+      withSkillEnvironment: <T>(skillId: string | null, dispatch: (environment: Record<string,string>, secrets: Record<string,string>) => T) => this.asyncCallback(run.id, context, 'withSkillEnvironment', async check => {
+        if(this.skillSessions)return this.skillSessions.withEnvironment(snapshot.skills ?? [], skillId, (environment,secrets)=>{check();return dispatch({...environment,...cliEnvironment},{...secrets,...cliSecrets});});
+        check();return {value:dispatch(cliEnvironment,cliSecrets)};
+      }),
     });
     this.snapshot(result, context, run.id);
   }
@@ -299,8 +323,9 @@ export class RuntimeBackend implements SchedulerBackend {
   }
   async reconcile(run: Run, context: BackendContext): Promise<ReconcileResult> {
     try {
-      const result = await this.adapter.reconcile(run.id);
-      if (!this.accepts(result, context, run.id)) return 'unknown';
+      const observed = await this.adapter.reconcile(run.id);
+      if (!this.accepts(observed, context, run.id)) return 'unknown';
+      const result = this.completionSnapshot(observed, context);
       this.snapshot(result, context, run.id);
       if (result.state === 'cancelled' || result.state === 'failed' || result.state === 'interrupted') return 'interrupted';
       if (result.state === 'completed') {

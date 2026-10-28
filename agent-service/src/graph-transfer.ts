@@ -93,6 +93,8 @@ export class GraphTransfer {
       const source = content && record(content.source) ? content.source : undefined;
       return source?.kind === 'project-file';
     });
+    if (projectNodes.some(node => record(node.content) && record(node.content.source) && node.content.source.entryKind === 'directory'))
+      throw new ServiceError('INVALID_REQUEST', '目录引用不能跨项目复制，无法导出包含目录引用的工作图。');
     if (bundle.graph.nodes.length > this.limits.maxNodes || bundle.resources.length + projectNodes.length > this.limits.maxResources)
       throw new ServiceError('PAYLOAD_TOO_LARGE','Graph exceeds export budget');
     const projectPlans: Array<{ node: Node; relativePath: string; classified: ReturnType<typeof classifyProjectFile>; bytes: number }> = [];

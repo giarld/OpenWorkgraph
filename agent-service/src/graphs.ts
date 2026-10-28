@@ -1,3 +1,5 @@
+import { basicNode, patchContent } from './graph-node-factory.js';
+import type { GraphCommandReceipt } from '@openworkgraph/protocol';
 import { isNodeBorderColor } from '@openworkgraph/protocol';
 import { GraphDocumentVersions } from './graph-document-history.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -291,6 +293,7 @@ export class Graphs {
   private validateContent(node:Record<string,unknown>,content:Json):void {
     if(content&&typeof content==='object'&&!Array.isArray(content)&&content['source']!==undefined){
       const source=content['source'];
+      if(source && typeof source==='object' && !Array.isArray(source) && source['entryKind'] !== undefined && (source['entryKind'] !== 'directory' || node['type'] !== 'file')) throw new ServiceError('INVALID_REQUEST','目录引用必须使用文件节点。');
       if(!source||typeof source!=='object'||Array.isArray(source)||typeof source['relativePath']!=='string')throw new ServiceError('INVALID_REQUEST','项目文件来源无效。');
       if(source['kind']==='project-file') {
         if(source['serviceId']!==this.serviceId||typeof source['projectId']!=='string'||!source['relativePath'])throw new ServiceError('INVALID_REQUEST','项目文件来源无效。');
@@ -415,6 +418,7 @@ export class Graphs {
     if(!content||typeof content!=='object'||Array.isArray(content))throw new ServiceError('INVALID_REQUEST','文件节点正文无效。');
     const data=content as Record<string,Json>;
     const source=data.source;
+    if(source && typeof source==='object' && !Array.isArray(source) && source['entryKind'] !== undefined && source['entryKind'] !== 'directory') throw new ServiceError('INVALID_REQUEST','项目引用路径类型无效。');
     if(source!==undefined){
       if(data.resourceId!==undefined||data.resourceVersion!==undefined)throw new ServiceError('INVALID_REQUEST','项目文件来源与工作图资源来源必须互斥。');
       if(!source||typeof source!=='object'||Array.isArray(source)||typeof source.relativePath!=='string')throw new ServiceError('INVALID_REQUEST','项目文件来源无效或不属于当前项目。');
@@ -442,6 +446,7 @@ export class Graphs {
     if(this.db.prepare('SELECT 1 FROM nodes WHERE id=?').get(node.id))throw new ServiceError('CONFLICT','节点标识已存在。');
     if(node.type==='group'&&this.db.prepare('SELECT 1 FROM graph_groups WHERE id=?').get(node.id))throw new ServiceError('CONFLICT','分组标识已存在。');
     const plugin=new PluginRegistry(this.db).inspect(node.type,node.schemaVersion,node.content);
+    if(node.content&&typeof node.content==='object'&&!Array.isArray(node.content)){const source=node.content.source;if(source&&typeof source==='object'&&!Array.isArray(source)&&source.entryKind!==undefined&&(source.entryKind!=='directory'||node.type!=='file'||node.schemaVersion!==1))throw new ServiceError('INVALID_REQUEST','目录引用必须使用文件节点。');}
     if(node.content&&typeof node.content==='object'&&!Array.isArray(node.content)){const source=node.content['source'];if(source&&typeof source==='object'&&!Array.isArray(source)&&source['kind']==='project-file'&&source['projectId']!==scope.projectId)throw new ServiceError('INVALID_REQUEST','项目文件引用不属于当前项目。');}
     if(node.type==='file'&&node.schemaVersion===1)this.validateFileNode(scope,node.content);
     if(node.type==='group'&&(plugin.state!=='available'||node.readOnly))throw new ServiceError('INVALID_REQUEST','分组必须使用内置 schema 1，仅允许标题和布局。');
@@ -490,9 +495,12 @@ export class Graphs {
   command(command:GraphCommand,principal='local',preserveDeletedOutputs?:()=>ReadonlyMap<string,string>|void):GraphSnapshot {
     return this.executeCommand(command,principal,preserveDeletedOutputs,true) as unknown as GraphSnapshot;
   }
+  commandReceipt(command:GraphCommand,principal='local',preserveDeletedOutputs?:()=>ReadonlyMap<string,string>|void):GraphCommandReceipt {
+    return this.executeCommand({...command,responseMode:'compact'},principal,preserveDeletedOutputs,'compact') as unknown as GraphCommandReceipt;
+  }
   /** Internal callers already return their own entity DTO; do not build/store a full graph receipt. */
   applyWithoutSnapshot(command:GraphCommand,principal='local',cause?:NodeSignalCause):void { this.executeCommand(command,principal,undefined,false,cause); }
-  private executeCommand(command:GraphCommand,principal:string,preserveDeletedOutputs:(()=>ReadonlyMap<string,string>|void)|undefined,includeSnapshot:boolean,cause?:NodeSignalCause):Json {
+  private executeCommand(command:GraphCommand,principal:string,preserveDeletedOutputs:(()=>ReadonlyMap<string,string>|void)|undefined,includeSnapshot:boolean|'compact',cause?:NodeSignalCause):Json {
     if(!Array.isArray(command.operations)||!command.operations.length||command.operations.length>1000)throw new ServiceError('INVALID_REQUEST','命令需要 1～1000 个操作。');
     for(const op of command.operations){
       if(!op||typeof op!=='object'||typeof op.type!=='string')throw new ServiceError('INVALID_REQUEST','无效图操作。');
@@ -505,7 +513,9 @@ export class Graphs {
     const lifecycle=command.operations.some(op=>['graph.archive','graph.trash'].includes(op.type));
     if(lifecycle&&command.operations.length!==1)throw new ServiceError('INVALID_REQUEST','生命周期转换必须单独提交。');
     return this.repo.idempotent(principal+(includeSnapshot?':graph.command:':':graph.command.entity:')+command.graphId,command.idempotencyKey,command as unknown as Json,()=>{
-      command={...command,operations:limitNodeTitleOperations(command.operations)};
+      const ordinal=Number(this.db.prepare('SELECT COUNT(*) n FROM nodes WHERE graph_id=? AND deleted=0').get(command.graphId)!.n);
+      let created=0;
+      command={...command,operations:limitNodeTitleOperations(command.operations.map(op=>op.type==='node.create-basic'?{type:'node.create' as const,node:basicNode(op,ordinal+created++)}:op))};
       const graph=lifecycle?this.scope(command):this.writable(command);
       // Page saves remain durable node versions, without scanning/copying the whole graph history.
       const interactionOnly=command.operations.every(op=>{
@@ -533,11 +543,17 @@ export class Graphs {
       if(retiring.length&&!preserveDeletedOutputs)throw new ServiceError('CONFLICT','删除执行节点前需要准备保留输出产物。');
       const preservedCopies=preserveDeletedOutputs?.();
       const signalBefore = new Map<string,string>();
-      for (const op of command.operations) if ((op.type === 'node.content' || op.type === 'node.project-file.associate') && !signalBefore.has(op.nodeId)) {
+      for (const op of command.operations) if ((op.type === 'node.content' || op.type === 'node.patch' || op.type === 'node.project-file.associate') && !signalBefore.has(op.nodeId)) {
         const row = this.db.prepare('SELECT n.type,v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=? AND n.deleted=0').get(op.nodeId,command.graphId);
         if (row) signalBefore.set(op.nodeId,signalOutput(String(row.type),JSON.parse(String(row.content))));
       }
-      for(const op of command.operations){
+      for(let op of command.operations){
+        if(op.type==='node.patch'){
+          const target=this.node(command,op.nodeId);
+          if(target['current_version']!==op.expectedContentVersion)throw new ServiceError('REVISION_CONFLICT','Node content changed; reread before patching.');
+          const previous=JSON.parse(String(this.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(op.nodeId,op.expectedContentVersion)!.content)) as Json;
+          op={type:'node.content',nodeId:op.nodeId,expectedContentVersion:op.expectedContentVersion,content:limitNodeContentTitle(patchContent(op,String(target.type),previous))};
+        }
         if(op.type==='node.content'){const target=this.node(command,op.nodeId);if(target['type']==='group')throw new ServiceError('INVALID_REQUEST','分组无正文，请使用 group.rename 或布局命令。');this.assertContentEditable(target,op.content);if(!target['read_only'])this.validateContent(target,op.content);if(target['type']==='file')this.validateFileNode(command,op.content);}
         if(op.type==='node.project-file.associate'){
           const target=this.node(command,op.nodeId);
@@ -595,6 +611,14 @@ export class Graphs {
         nodeChanges.push({nodeId,contentVersion:Number(row.current_version),outputsChanged:previous!==signalOutput(String(row.type),content),...(typeof formVersion === 'number' ? {formVersion} : {}),...(cause ? {cause:cause as unknown as Json} : {})});
       }
       this.event(command,nodeChanges);
+      if (includeSnapshot==='compact') {
+        const ids=new Set(command.operations.flatMap(op=>op.type==='node.create'?[op.node.id]:('nodeId' in op?[op.nodeId]:[])));
+        const current=this.scope(command);
+        return {...{serviceId:command.serviceId,projectId:command.projectId,graphId:command.graphId},executionRevision:Number(current.execution_revision),layoutRevision:Number(current.layout_revision),
+          nodes:[...ids].flatMap(id=>{const n=this.db.prepare('SELECT current_version FROM nodes WHERE id=? AND graph_id=? AND deleted=0').get(id,command.graphId);return n?[{id,contentVersion:Number(n.current_version)}]:[];}),
+          createdNodeIds:command.operations.flatMap(op=>op.type==='node.create'?[op.node.id]:[]),createdEdgeIds:command.operations.flatMap(op=>op.type==='edge.create'?[op.edge.id]:[]),
+          deletedNodeIds:command.operations.flatMap(op=>op.type==='node.delete'?[op.nodeId]:[]),deletedEdgeIds:command.operations.flatMap(op=>op.type==='edge.delete'?[op.edgeId]:[])};
+      }
       if (includeSnapshot) return this.snapshot(command) as unknown as Json;
       const current = this.scope(command);
       return {executionRevision:Number(current['execution_revision']),layoutRevision:Number(current['layout_revision'])};

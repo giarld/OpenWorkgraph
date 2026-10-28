@@ -2,6 +2,8 @@ import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DeleteGraph, GraphCommand, GraphHistoryTravel } from '@openworkgraph/protocol';
 import { Auth } from './auth.js';
+import { GraphQueries } from './graph-queries.js';
+import { RunOutputsApi } from './run-outputs-api.js';
 import { Graphs } from './graphs.js';
 import { Events } from './events.js';
 import { readJson } from './http.js';
@@ -30,6 +32,8 @@ import type { Json } from '@openworkgraph/protocol';
 export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; headers?:Record<string,string> }
 export class BusinessApi {
   readonly graphs:Graphs;
+  private queries?:GraphQueries;
+  private outputsApi?:RunOutputsApi;
   readonly resources:ResourceApi; readonly runApi:RunApi;
   readonly backups:Backups; readonly backupApi:BackupApi;
   private transferApi?:TransferApi;
@@ -43,6 +47,20 @@ export class BusinessApi {
   private agentConfigurationApi?: AgentConfigurationApi;
   constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
+    this.outputsApi??=new RunOutputsApi(this.runtime,this.auth);
+    const outputs=await this.outputsApi.handle(request,path,token,origin);if(outputs.handled)return outputs;
+    const query=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs(?:[/]([a-zA-Z0-9_-]+))?[/](query|summary|subgraph|nodes-query|node-content)$/.exec(path);
+    if(query&&request.method==='POST'){
+      this.auth.assertActive(token,origin);
+      const body=await readJson(request,16*1024);
+      this.queries??=new GraphQueries(this.graphs);
+      return this.auth.withSession(token,origin,current=>{
+        if(!query[2]&&query[3]==='query')return {handled:true,body:this.queries!.list(query[1]!,body,current.id)};
+        if(!query[2]||query[3]==='query')throw new ServiceError('NOT_FOUND','Query route not found.');
+        const kind=query[3]==='nodes-query'?'nodes':query[3]==='node-content'?'content':query[3] as 'summary'|'subgraph';
+        return {handled:true,body:this.queries!.read({serviceId:this.serviceId,projectId:query[1]!,graphId:query[2]},kind,body,current.id)};
+      });
+    }
     this.visualizeLibraryApi??=new VisualizeLibraryApi(new VisualizeLibrary(this.graphs,this.runtime.resources),this.auth);
     const library=await this.visualizeLibraryApi.handle(request,path,token,origin);if(library.handled)return library;
     this.visualizeApi??=new VisualizeApi(this.runtime.visualize,this.auth,this.runtime.visualizeInputs,this.runtime.visualizeBridge);
@@ -87,7 +105,8 @@ export class BusinessApi {
     this.auth.withSession(token,origin,()=>undefined);
     const body=request.method==='POST'?await readJson(request,16*1024*1024):undefined;
     if(request.method==='POST'&&match[2]&&match[3]==='commands'&&body){
-      if(Object.keys(body).some(key=>!['idempotencyKey','expectedExecutionRevision','expectedLayoutRevision','operations'].includes(key)))throw new ServiceError('INVALID_REQUEST','图命令包含未知字段。');
+      if(Object.keys(body).some(key=>!['idempotencyKey','expectedExecutionRevision','expectedLayoutRevision','operations','responseMode'].includes(key)))throw new ServiceError('INVALID_REQUEST','图命令包含未知字段。');
+      if(body.responseMode!==undefined&&body.responseMode!=='compact')throw new ServiceError('INVALID_REQUEST','Invalid responseMode.');
       const command={...body,serviceId:this.serviceId,projectId:match[1]!,graphId:match[2]} as unknown as GraphCommand;
       if(typeof command.idempotencyKey!=='string'||!Number.isSafeInteger(command.expectedExecutionRevision)||!Number.isSafeInteger(command.expectedLayoutRevision)||!Array.isArray(command.operations)||!command.operations.length||command.operations.length>1000||command.operations.some(op=>!op||typeof op!=='object'))throw new ServiceError('INVALID_REQUEST','图命令需要幂等键、整数版本和有效操作。');
       const replay=()=>this.auth.withSession(token,origin,current=>new Repositories(this.db).replay(current.id+':graph.command:'+command.graphId,command.idempotencyKey,command as unknown as Json));
@@ -101,7 +120,7 @@ export class BusinessApi {
         const preserve=command.operations.some(op=>op.type==='node.delete')
           ?await prepareDeletedOutputHistory(this.graphs,this.runtime.resources,command,cleanups):undefined;
         const snapshot=this.auth.withSession(token,origin,current=>{
-          const result=this.graphs.command(command,current.id,preserve);
+          const result=command.responseMode==='compact'?this.graphs.commandReceipt(command,current.id,preserve):this.graphs.command(command,current.id,preserve);
           this.runtime.resources.collectGarbage();return result;
         });
         return {handled:true,body:snapshot};

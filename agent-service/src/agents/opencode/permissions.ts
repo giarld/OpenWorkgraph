@@ -15,6 +15,6 @@ export function openCodePermissionRules(mode: SandboxMode, projectPath: string, 
   rules.push(rule('edit', '*', mode === 'read-only' ? 'deny' : 'ask'));
   if (mode === 'workspace-write') rules.push(rule('edit', projectPath + '/*', 'allow'), rule('shell', '*', 'ask'), rule('subagent', '*', 'allow'));
   rules.push(rule('edit', runsPath + '/*', 'allow'));
-  for (const name of ['query_run_history', 'read_run_context', 'validate_visualize_output', 'preview_visualize_output', 'inspect_visualize_preview', 'close_visualize_preview', 'run_skill_command']) rules.push(rule(name, '*', 'allow'));
+  for (const name of ['query_run_history', 'read_run_context', 'validate_visualize_output', 'preview_visualize_output', 'inspect_visualize_preview', 'close_visualize_preview', 'run_skill_command', 'install_generated_skill']) rules.push(rule(name, '*', 'allow'));
   return rules;
 }

@@ -234,17 +234,8 @@
   white-space: pre-wrap;
 }
 
-.node-content .execution-content[data-unsubmitted="true"] {
-  position: relative;
-}
-.execution-initial-actions {
-  position: absolute;
-  top: 60%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  max-width: calc(100% - 20px);
-}
 .execution-edit-actions {
+  margin-top: auto;
   display: flex;
   justify-content: flex-end;
   flex: 0 0 auto;

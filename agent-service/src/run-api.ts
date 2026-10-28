@@ -55,7 +55,7 @@ function imageRoute(body:Record<string,unknown>):ImageRoute|undefined{
 export class RunApi {
   constructor(readonly runtime:WorkflowRuntime,readonly auth:Auth){}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
-    const graph=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs[/]([a-zA-Z0-9_-]+)[/](runs|input-preview)$/.exec(path);
+    const graph=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs[/]([a-zA-Z0-9_-]+)[/](runs|runs-current|input-preview)$/.exec(path);
     const run=/^[/]v1[/]runs(?:[/]([a-zA-Z0-9_-]+))?(?:[/](cancel|cancel-chain|reply|history|snapshot|public-metadata|interactions|active-interaction|candidate|continue|input-changes|execution-plan|start|agent-operation))?$/.exec(path);
     const notifications=path==='/v1/notifications';
     const notificationRead=/^[/]v1[/]notifications[/]([a-zA-Z0-9_-]+)[/]read$/.exec(path);
@@ -181,8 +181,19 @@ export class RunApi {
       const scope={serviceId:rt.serviceId,projectId:graph[1]!,graphId:graph[2]!};read(()=>rt.graphs.scope(scope));
       if(graph[3]==='input-preview'&&request.method==='POST'){fields(body,['nodeId','excludeFiles','inputDraft']);if(body.excludeFiles!==undefined&&typeof body.excludeFiles!=='boolean')throw new ServiceError('INVALID_REQUEST','无效输入预检选项');return ok(read(()=>{ const nodeId=text(body.nodeId); if(body.inputDraft===undefined)return rt.inputs.inputPreview(scope.graphId,nodeId,body.excludeFiles===true); rt.graphs.runInputContent(scope,nodeId,body.inputDraft); return rt.previewRunInput(scope.graphId,nodeId,parseRunInput(body.inputDraft),body.excludeFiles===true); }));}
       if(graph[3]==='runs'&&request.method==='GET')return ok(read(()=>rt.runs.list(scope.projectId).filter(value=>value.graphId===scope.graphId)));
-      if(graph[3]==='runs'&&request.method==='POST'){
+      if(['runs','runs-current'].includes(graph[3]!)&&request.method==='POST'){
         fields(body,['nodeId','kind','idempotencyKey','expectedExecutionRevision','modelOverride','imageRoute','preserveHistoricalOutputs','agent','inputDraft','nodeInputDrafts']);
+        const currentRequest=graph[3]==='runs-current'?structuredClone(body) as Json:undefined;
+        const currentNamespace=principal+':run.current:'+scope.graphId;
+        if(currentRequest){const prior=read(()=>repo.replay(currentNamespace,text(body.idempotencyKey),currentRequest));if(prior!==undefined)return ok(prior);}
+        if(graph[3]==='runs-current'){
+          if('agent' in body||'modelOverride' in body||body.kind==='image_generation')throw new ServiceError('INVALID_REQUEST','Current Agent submission does not accept legacy or explicit Agent overrides.');
+          const configuration=read(()=>rt.agentConfiguration?.get()),selection=configuration?.default.selection;
+          const backend=configuration?.backends.find(value=>value.backendId===selection?.backendId);
+          if(!configuration||!selection)throw new ServiceError('MODEL_UNAVAILABLE','No current Agent default is configured.');
+          if(!backend?.enabled)throw new ServiceError('PLUGIN_UNAVAILABLE','The current Agent is unavailable.');
+          body.agent={settingsGeneration:configuration.settingsGeneration,permissions:configuration.permissions,backendId:backend.backendId,configRevision:backend.revision,schemaVersion:backend.schemaVersion,model:{model:selection.model,reasoningEffort:selection.reasoningEffort}};
+        }
         if('agent' in body&&(body.kind==='image_generation'||'imageRoute' in body||'modelOverride' in body))throw new ServiceError('INVALID_REQUEST','执行器选择不能与图片或旧模型选项混用。');
         const route=imageRoute(body);
         const input={...body,...scope,...(route?{imageRoute:route}:{})} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
@@ -197,7 +208,12 @@ export class RunApi {
         }
         if(prior!==undefined)return ok(prior && typeof prior==='object' && !Array.isArray(prior) && 'executionStart' in prior ? read(()=>rt.runs.get(String(prior.id))) : prior);
         const cleanups: (() => unknown)[] = [];
-        try { const commit=await rt.prepareSubmission(input, cleanups, principal);return ok(read(()=>{rt.graphs.scope(scope);return commit(principal);})); }
+        try { const commit=await rt.prepareSubmission(input, cleanups, principal);return ok(read(()=>{
+          rt.graphs.scope(scope);
+          if(currentRequest){const prior=repo.replay(currentNamespace,input.idempotencyKey,currentRequest);if(prior!==undefined)return prior;}
+          const result=commit(principal);
+          return currentRequest?repo.idempotent(currentNamespace,input.idempotencyKey,currentRequest,()=>result as unknown as Json):result;
+        })); }
         finally { if (cleanups.length) atomic(rt.db, () => { for (const cleanup of cleanups) cleanup(); }); }
       }
     }

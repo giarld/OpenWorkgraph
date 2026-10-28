@@ -1,3 +1,4 @@
+import { validateCliApproval } from './cli-authorization.js';
 import { randomUUID } from 'node:crypto';
 import { tokenUsage } from './backend/token-usage.js';
 import type { DatabaseSync } from 'node:sqlite';
@@ -449,7 +450,8 @@ export class Runs {
         if (interaction.version !== request.expectedVersion) throw new ServiceError('REVISION_CONFLICT', 'Interaction version changed');
         if (this.activeInteraction(run.id)?.id !== interaction.id) throw new ServiceError('CONFLICT', 'An earlier independent action must be acknowledged first');
         if (run.status !== (interaction.kind === 'question' ? 'waiting_answer' : 'waiting_approval')) throw new ServiceError('ALREADY_HANDLED', 'Run is no longer waiting');
-        if (this.dependencies.validateReply) sync(this.dependencies.validateReply(interaction, request.answer));
+        if(interaction.payload&&typeof interaction.payload==='object'&&!Array.isArray(interaction.payload)&&interaction.payload.cliAuthorization)validateCliApproval(this,interaction,request.answer,sessionId);
+        else if (this.dependencies.validateReply) sync(this.dependencies.validateReply(interaction, request.answer));
         else {
           const answer = request.answer;
           const structured = answer !== null && typeof answer === 'object' && !Array.isArray(answer) ? answer : null;

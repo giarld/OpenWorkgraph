@@ -47,6 +47,7 @@ export interface ProjectFileObservation {
   mime: string | null;
   bytes: number | null;
   changeToken: string | null;
+  absolutePath?: string;
 }
 
 export function classifyProjectFile(name: string): { mime: string; type: 'text' | 'image' | 'file' } {
@@ -155,7 +156,7 @@ export class ProjectFiles {
     } catch (cause) { throw new ServiceError('PROJECT_UNAVAILABLE', '项目目录不可访问；请修复路径。', { cause }); }
   }
 
-  async resolve(projectId: string, path: string, kind: 'file' | 'directory'): Promise<{ path: string; relativePath: string }> {
+  async resolve(projectId: string, path: string, kind: 'file' | 'directory' | 'entry'): Promise<{ path: string; relativePath: string; kind: 'file' | 'directory' }> {
     const relativePath = normalizeProjectPath(path);
     const root = await this.root(projectId);
     let target: string;
@@ -168,8 +169,8 @@ export class ProjectFiles {
     let stat;
     try { stat = await fs.stat(target); }
     catch (cause) { throw new ServiceError('PROJECT_UNAVAILABLE', '项目文件不可访问。', { cause }); }
-    if (kind === 'file' ? !stat.isFile() : !stat.isDirectory()) throw new ServiceError('INVALID_REQUEST', '项目路径类型不匹配。');
-    return { path: target, relativePath };
+    if (kind === 'file' ? !stat.isFile() : kind === 'directory' ? !stat.isDirectory() : !stat.isFile() && !stat.isDirectory()) throw new ServiceError('INVALID_REQUEST', '项目路径类型不匹配。');
+    return { path: target, relativePath, kind: stat.isDirectory() ? 'directory' : 'file' };
   }
 
   async readRange(projectId: string, path: string, range?: { start: number; end?: number }, maxBytes = PROJECT_FILE_PREVIEW_MAX_BYTES): Promise<{ bytes: Buffer; start: number; end: number; total: number }> {
@@ -456,21 +457,30 @@ export class ProjectFiles {
     return { items, hasMore, nextCursor:hasMore ? token : null };
   }
 
-  async stat(projectId: string, paths: string[]): Promise<ProjectFileObservation[]> {
-    return projectFileIo.run(() => this.statImpl(projectId, paths));
+  async stat(projectId: string, paths: string[], kind: 'file' | 'directory' = 'file'): Promise<ProjectFileObservation[]> {
+    return projectFileIo.run(() => this.statImpl(projectId, paths, kind));
   }
 
-  private async statImpl(projectId: string, paths: string[]): Promise<ProjectFileObservation[]> {
+  async statReferences(projectId: string, inputs: Array<{ relativePath: string; entryKind?: 'directory' }>): Promise<ProjectFileObservation[]> {
+    const groups = await Promise.all((['file', 'directory'] as const).map(async kind => {
+      const paths = inputs.filter(input => (input.entryKind ?? 'file') === kind).map(input => input.relativePath);
+      return [kind, new Map((await this.stat(projectId, paths, kind)).map(item => [item.path, item]))] as const;
+    }));
+    const observations = new Map(groups);
+    return inputs.map(input => observations.get(input.entryKind ?? 'file')!.get(input.relativePath)!);
+  }
+
+  private async statImpl(projectId: string, paths: string[], kind: 'file' | 'directory'): Promise<ProjectFileObservation[]> {
     if (!Array.isArray(paths) || paths.length > 100) throw new ServiceError('INVALID_REQUEST', '最多校验 100 个路径。');
     const observations = await Promise.all(paths.map(async path => {
       const normalized = normalizeProjectPath(path);
       if (!normalized) throw new ServiceError('INVALID_REQUEST', '状态校验需要文件路径。');
       const name = normalized.split('/').at(-1)!;
-      const mime = classifyProjectFile(name).mime;
+      const mime = kind === 'directory' ? null : classifyProjectFile(name).mime;
       try {
-        const resolved = await this.resolve(projectId, normalized, 'file');
+        const resolved = await this.resolve(projectId, normalized, kind);
         const info = await fs.stat(resolved.path, { bigint: true });
-        return { path:normalized, state:'available' as const, name, mime, bytes:Number(info.size), changeToken:[info.dev,info.ino,info.size,info.mtimeNs].join(':') };
+        return { path:normalized, state:'available' as const, name, mime, bytes:kind === 'directory' ? null : Number(info.size), changeToken:[info.dev,info.ino,info.size,info.mtimeNs].join(':'), ...(kind === 'directory' ? { absolutePath: resolved.path } : {}) };
       } catch (error) {
         if (error instanceof ServiceError && (error.code === 'NOT_FOUND' || error.code === 'INVALID_REQUEST' && error.message === '项目路径类型不匹配。')) return { path:normalized, state:'missing' as const, name, mime, bytes:null, changeToken:null };
         if (error instanceof ServiceError && error.code === 'INVALID_REQUEST') throw error;

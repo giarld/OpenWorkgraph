@@ -10,6 +10,10 @@ export function projectFileSource(content: Json): Record<string, Json> {
 export function isBoundProjectFileReference(content: Json): boolean {
   return projectFileSource(content).kind === 'project-file';
 }
+export function isProjectDirectoryReference(content: Json): boolean {
+  const source = projectFileSource(content);
+  return source.kind === 'project-file' && source.entryKind === 'directory';
+}
 export function isEmptyProjectFileReference(content: Json): boolean {
   return projectFileSource(content).kind === 'project-file-empty';
 }

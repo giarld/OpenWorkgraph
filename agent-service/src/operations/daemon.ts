@@ -6,6 +6,7 @@ import { listenerInfo } from '../network.js';
 import { localControl } from '../local-control.js';
 import { acquireOperationsLock } from './lifecycle.js';
 import { OperationsLog } from './logs.js';
+import { RuntimeLogger } from '../logger.js';
 import { waitForBackups, clearStaleResourceLeases } from './backups.js';
 import { localCapacity } from './capacity.js';
 import { registerLocalPlugin } from './plugins.js';
@@ -17,19 +18,24 @@ export function activeRunCount(db: DatabaseSync): number {
 }
 /** Public host wrapper: the lock is acquired BEFORE opening SQLite or listeners. */
 export async function serveManaged(dataDir: string | undefined, host: string, port: number, onStopped?: () => Promise<void>) {
-  const lock = await acquireOperationsLock(dataDir), log = new OperationsLog(lock.root);
+  const lock = await acquireOperationsLock(dataDir);
+  let logger: RuntimeLogger;
+  try { logger = await RuntimeLogger.create(lock.root, process.env.OPENWORKGRAPH_BACKGROUND === '1'); }
+  catch (error) { await lock.release(); throw error; }
+  const log = new OperationsLog(lock.root, logger);
   let service: ReturnType<typeof createService>;
   const cliPath = fileURLToPath(new URL('../cli.js', import.meta.url));
   const npmInstallation = isGlobalNpmInstallation(cliPath);
   const npxInstallation = npmInstallation.then(global => global ? false : isNpxInstallation(cliPath));
   try { service = createService(lock.root, {
+    logger,
     npmInstallation: () => npmInstallation,
     npxInstallation: () => npxInstallation,
     updateRuntime: async onExit => {
       if (state !== 'running') throw new Error('Runtime is stopping.');
       await startWebUpdate(cliPath, undefined, onExit);
     },
-  }); } catch (error) { try { await log.append('startup_failed'); } finally { await lock.release(); } throw error; }
+  }); } catch (error) { try { await log.append('startup_failed'); } finally { logger.close(); await lock.release(); } throw error; }
   let state: 'running' | 'draining' | 'interrupting' | 'failed' = 'running';
   let stopping = false;
   const drains = new Set<Promise<void>>();
@@ -60,7 +66,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
       closing = (async () => {
         await service.close();
         removeSignals();
-        try { await log.append('stopped'); } finally { await lock.release(); await onStopped?.(); }
+        try { await log.append('stopped'); } finally { logger.close(); await lock.release(); await onStopped?.(); }
       })();
       try {
         await closing;
@@ -85,6 +91,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
       if (command === 'status') return status();
       if (command === 'capacity') return localCapacity(service.db, argument);
       if (command === 'plugin-register') return registerLocalPlugin(service.db, service.info.serviceId, argument ?? '');
+      if (command === 'native-session') return service.auth.issueNativeSession();
       if (command === 'sessions') return service.auth.list();
       if (command === 'resolve-client') return service.auth.resolveClientPairing(argument ?? '');
       if (command === 'pair-short') {
@@ -111,7 +118,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
     // Once recovery was attempted, retain the normal conservative drain path.
     if (!recoveryAttempted) await service.abortStartup();
     else await service.close();
-    try { await log.append('startup_failed'); } finally { await lock.release(); }
+    try { await log.append('startup_failed'); } finally { logger.close(); await lock.release(); }
     throw error;
   }
   process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal);

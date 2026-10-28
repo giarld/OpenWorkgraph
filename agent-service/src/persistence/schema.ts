@@ -255,5 +255,11 @@ CREATE INDEX runs_node_sequence ON runs(node_id,sequence);
 CREATE INDEX run_runtime_chain_batch ON run_runtime(json_extract(details,'$.chainBatch'),run_id);
 ` }, { version: 29, sql: `
 ALTER TABLE nodes ADD COLUMN border_color TEXT;
+` }, { version: 30, sql: `
+CREATE TABLE cli_run_sessions(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL,source_type TEXT NOT NULL) STRICT;
+CREATE TABLE cli_authorizations(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES cli_run_sessions(session_id) ON DELETE CASCADE,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL,request_key TEXT NOT NULL,request_hash TEXT NOT NULL,plan TEXT NOT NULL CHECK(json_valid(plan)),created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','approved','declined','expired','consumed')),consumed TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(consumed)),UNIQUE(session_id,request_key)) STRICT;
+CREATE TABLE cli_auto_grants(run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,decided_by TEXT NOT NULL REFERENCES sessions(id),created_at INTEGER NOT NULL) STRICT;
+CREATE TABLE resource_upload_ids(id TEXT PRIMARY KEY) STRICT;
+INSERT INTO resource_upload_ids(id) SELECT id FROM resource_uploads;
 ` }];
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;

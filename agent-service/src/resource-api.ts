@@ -66,9 +66,10 @@ export class ResourceApi {
    const [uploadId,action]=tail;
    if(method==='GET' && tail.length===1) return reply(read(()=>this.resources.uploadStatus(scope,uploadId!)));
    // Starting and appending uploads cannot release existing resource references.
-   if(method==='POST' && tail.length===0) return mutation(['name','mime','bytes'],['sha256'],b=>{
+   if(method==='POST' && tail.length===0) return mutation(['name','mime','bytes'],['sha256','uploadId'],b=>{
     const name=string(b['name']),mime=string(b['mime'],128),bytes=integer(b['bytes']);const sha256=b['sha256']===undefined?undefined:string(b['sha256'],64);
-    return ()=>this.resources.startUpload({...scope,name,mime,bytes,...(sha256===undefined?{}:{sha256})});
+    const uploadId=b.uploadId===undefined?undefined:id(b.uploadId);
+    return ()=>this.resources.startUpload({...scope,name,mime,bytes,...(sha256===undefined?{}:{sha256}),...(uploadId?{uploadId}:{})});
    },{collectGarbage:false});
    if(method==='POST' && tail.length===2 && action==='chunks') return mutation(['data','offset'],[],async b=>{
     const encoded=string(b['data'],Math.ceil(4*1024*1024/3)*4),offset=integer(b['offset']);const bytes=Buffer.from(encoded,'base64');

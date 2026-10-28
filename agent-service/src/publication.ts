@@ -1,4 +1,4 @@
-import { limitNodeTitle, limitNodeContentTitle, VISUALIZE_DEFAULT_SIZE } from '@openworkgraph/protocol';
+import { limitNodeTitle, limitNodeContentTitle, VISUALIZE_DEFAULT_SIZE, WORKGRAPH_UPLOAD_MAX_BYTES } from '@openworkgraph/protocol';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
@@ -21,6 +21,7 @@ import { hasVisualizeFeature } from './visualize-features.js';
 import { VisualizePublication, type PreparedVisualizePublication } from './visualize-publication.js';
 import { commitTransferResource } from './visualize-transfer.js';
 import { collectVisualizeAssetReferences } from '@openworkgraph/protocol';
+import { publicationFileChunks, preserveOversizedOutput } from './publication-files.js';
 
 type OutputRole = 'delivery-document' | 'project-file' | 'workgraph-node';
 type OutputNodeType = 'text' | 'document' | 'image' | 'file' | 'visualize';
@@ -29,13 +30,15 @@ interface Manifest { version?: 2; executionTitle?: string; outputs: Output[] }
 export interface CandidateDecision extends GraphScope { runId: string; expectedContentVersion: number; decision: 'accept' | 'discard' }
 function invalid(message: string): never { throw new ServiceError('INVALID_REQUEST', message); }
 function conflict(message: string): never { throw new ServiceError('REVISION_CONFLICT', message); }
-const MAX_TOTAL = 64 * 1024 * 1024;
+const MAX_FILE = WORKGRAPH_UPLOAD_MAX_BYTES;
+const MAX_DECODED_IMAGE = 64 * 1024 * 1024;
 const MAX_TEXT = 1024 * 1024;
 export const MAX_MANIFEST = 64 * 1024;
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const imageMime = (mime: string): boolean => IMAGE_MIMES.has(mime);
 // Binary project outputs remain live file references, not in-memory resources.
 const streamedProjectFile = (role: OutputRole | undefined, mime: string): boolean => role === 'project-file' && !supportsText(mime) && !imageMime(mime);
+const fileOutput = (role: OutputRole | undefined, nodeType: OutputNodeType | undefined, mime: string): boolean => role === 'project-file' || role === 'workgraph-node' && (nodeType === 'file' || nodeType === 'image') || role === undefined && mime !== 'text/markdown';
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 function generatedTextTitle(text: string): string {
   const firstLine = text.split(/\r?\n/).find(line => line.trim())?.trim() ?? '';
@@ -71,7 +74,7 @@ export function parsePublicationManifest(value: unknown, version: 1 | 2, visuali
   if (version === 2 ? value.version !== 2 : value.version !== undefined) invalid(version === 2 ? 'Execution publication requires manifest version 2' : 'Legacy publication does not accept manifest version 2');
   if (version === 1 && value.executionTitle !== undefined) invalid('Only execution publication accepts executionTitle');
   const taskTitle = executionTitle(value.executionTitle);
-  const keys = new Set<string>(), paths = new Set<string>(); let total = 0, markdown = 0, deliveries = 0;
+  const keys = new Set<string>(), paths = new Set<string>(); let markdown = 0, deliveries = 0;
   const outputs = value.outputs.map((item: unknown): Output => {
     if (!object(item) || typeof item.outputKey !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(item.outputKey) || keys.has(item.outputKey)) return invalid('Invalid or duplicate outputKey');
     const role = version === 2 && ['delivery-document','project-file','workgraph-node'].includes(String(item.role)) ? item.role as OutputRole : version === 2 ? invalid('Manifest version 2 requires an explicit output role') : undefined;
@@ -80,10 +83,6 @@ export function parsePublicationManifest(value: unknown, version: 1 | 2, visuali
     const mime = item.mime.toLowerCase();
     if (!Number.isSafeInteger(item.bytes) || Number(item.bytes) < (role === 'project-file' ? 0 : 1)) return invalid('Invalid output byte count: ' + item.outputKey);
     if (typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)) return invalid('Invalid output SHA-256: ' + item.outputKey);
-    const streaming = streamedProjectFile(role, mime);
-    if (!streaming && Number(item.bytes) > MAX_TOTAL) invalid('In-memory output exceeds 64 MiB: ' + item.outputKey);
-    if (!streaming && !supportsText(mime) && !imageMime(mime) && Number(item.bytes) > 50 * 1024 * 1024) return invalid('File output exceeds 50 MiB');
-    if (mime === 'text/markdown' && role !== 'project-file') { markdown++; if (Number(item.bytes) > MAX_TEXT || !item.path.toLowerCase().endsWith('.md')) invalid('Markdown output must be a bounded .md file'); }
     if (role === 'delivery-document') { deliveries++; if (mime !== 'text/markdown') invalid('delivery-document must be Markdown'); }
     let nodeType: OutputNodeType | undefined, title: string | undefined;
     if (role === 'workgraph-node') {
@@ -95,12 +94,17 @@ export function parsePublicationManifest(value: unknown, version: 1 | 2, visuali
       if (nodeType === 'image' && !imageMime(mime) && mime !== 'image/svg+xml') invalid('image workgraph-node requires an image MIME');
       if (nodeType === 'visualize' && (mime !== 'application/json' || Number(item.bytes) > 4_194_304)) invalid('visualize workgraph-node requires a bounded application/json page package');
     } else if (item.nodeType !== undefined || item.title !== undefined) invalid('Only workgraph-node accepts nodeType and title');
-    keys.add(item.outputKey); paths.add((role ?? 'legacy') + ':' + item.path); if (!streaming) total += Number(item.bytes);
+    if (Number(item.bytes) > MAX_FILE && !fileOutput(role, nodeType, mime)) invalid('File output exceeds 300 MB: ' + item.outputKey);
+    if (mime === 'text/markdown' && role !== 'project-file') {
+      markdown++;
+      if (nodeType !== 'file' && (Number(item.bytes) > MAX_TEXT || !item.path.toLowerCase().endsWith('.md'))) invalid('Markdown output must be a bounded .md file');
+    }
+    keys.add(item.outputKey); paths.add((role ?? 'legacy') + ':' + item.path);
     return { outputKey:item.outputKey, path:item.path, mime, bytes:Number(item.bytes), sha256:item.sha256, ...(role ? { role } : {}), ...(nodeType && title ? { nodeType, title } : {}) };
   });
   if (visualizeGeneration) {
-    if (version !== 1 || outputs.filter(output => output.mime === 'application/json').length !== 1 || outputs.some(output => output.mime !== 'application/json' && !/^(image|video|audio)[/]/.test(output.mime) && !(output.mime === 'text/markdown' && output.path === 'description.md')) || markdown > 1 || total > MAX_TOTAL) invalid('Visualize generation requires one JSON page package, optional description.md and separate media assets');
-  } else if ((version === 1 && markdown !== 1) || (version === 2 && deliveries !== 1) || total > MAX_TOTAL) return invalid(version === 2 ? 'Exactly one delivery-document and at most 64 MiB required' : 'Exactly one Markdown output and at most 64 MiB required');
+    if (version !== 1 || outputs.filter(output => output.mime === 'application/json').length !== 1 || outputs.some(output => output.mime !== 'application/json' && !/^(image|video|audio)[/]/.test(output.mime) && !(output.mime === 'text/markdown' && output.path === 'description.md')) || markdown > 1 || outputs.some(output => output.bytes > MAX_FILE)) invalid('Visualize generation requires one JSON page package, optional description.md and separate media assets of at most 300 MB each');
+  } else if ((version === 1 && markdown !== 1) || (version === 2 && deliveries !== 1)) return invalid(version === 2 ? 'Exactly one delivery-document required' : 'Exactly one Markdown output required');
   return { ...(version === 2 ? { version:2 as const } : {}), ...(taskTitle ? { executionTitle:taskTitle } : {}), outputs };
 }
 
@@ -154,7 +158,7 @@ export function validatePublicationOutputBytes(output: Output, bytes: Buffer): v
           const channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[color];
           if (!width || !height || width * height > 40000000 || !channels || ![1, 2, 4, 8, 16].includes(depth) || (color === 3 && depth === 16) || (![0, 3].includes(color) && depth < 8) || bytes[offset + 18] !== 0 || bytes[offset + 19] !== 0 || bytes[offset + 20] !== 0) invalid('Unsupported PNG dimensions/encoding (non-interlaced required)');
           rowBytes = Math.ceil(width * channels * depth / 8) + 1;
-          if (rowBytes * height > MAX_TOTAL) invalid('Decoded PNG exceeds limit');
+          if (rowBytes * height > MAX_DECODED_IMAGE) invalid('Decoded PNG exceeds limit');
         } else if (kind === 'IHDR') invalid('Duplicate PNG header');
         if (kind === 'IDAT' && size > 0) compressed.push(bytes.subarray(offset + 8, offset + 8 + size));
         offset += size + 12;
@@ -294,28 +298,46 @@ export class Publication {
     // result, never from a new graph snapshot or guessed completion message.
     const projectFiles = new ProjectFiles(this.db);
     const visualize = new VisualizePublication(this.graphs, this.resources);
-    const prepared: { output: Output; bytes: Buffer; blob?: PreparedBlob; text?: string; changeToken?: string; visualize?: PreparedVisualizePublication; pageValue?: unknown; reservedId?: string }[] = [];
+    const prepared: { output: Output; blob?: PreparedBlob; text?: string; changeToken?: string; visualize?: PreparedVisualizePublication; pageValue?: unknown; reservedId?: string }[] = [];
     const visualizeFeature = hasVisualizeFeature(this.runs.snapshot(run.id).features);
     if ((visualizeGeneration || selected.outputs.some(output => output.nodeType === 'visualize')) && !visualizeFeature) invalid('Visualize publication requires the frozen builtin visualize feature identity');
     if (runtime.details.kind === 'execution' && visualizeFeature && !selected.outputs.some(output => output.nodeType === 'visualize')) invalid('Selected visualize generation requires an explicit visualize page package output');
     try {
       for (const output of selected.outputs) {
+        if (output.bytes > MAX_FILE && fileOutput(output.role, output.nodeType, output.mime)) {
+          if (runtime.details.kind !== 'execution') invalid('File output exceeds 300 MB: ' + output.outputKey);
+          const saved = await preserveOversizedOutput(projectFiles, run.projectId, run.id, root, output);
+          // Use an ordinary delivery document so the path remains visible even
+          // when another explicit Work Graph output hides the audit document.
+          const fence = '`'.repeat(Math.max(3, ...Array.from(saved.path.matchAll(/`+/g), match => match[0].length + 1)));
+          const text = 'File exceeds 300 MB and was saved in the project directory.\n\n' + fence + 'text\n' + saved.path + '\n' + fence + '\n';
+          const bytes = Buffer.from(text);
+          const receipt: Output = { outputKey:output.outputKey, role:'workgraph-node', nodeType:'document', title:output.title ?? basename(output.path), path:output.path + '.md', mime:'text/markdown', bytes:bytes.length, sha256:hashBytes(bytes) };
+          const blob = await this.resources.prepareBytes(bytes, receipt.mime, receipt.sha256);
+          prepared.push({ output:receipt, blob, text });
+          continue;
+        }
         if (streamedProjectFile(output.role, output.mime)) {
           const verified = await projectFiles.fingerprint(run.projectId, output.path, output.bytes);
           if (verified.sha256 !== output.sha256) invalid('Project output SHA-256 mismatch: ' + output.outputKey);
           if (output.bytes && !mimeMatchesBytes(output.mime, sniffMime(verified.prefix))) invalid('Output MIME does not match bytes');
-          prepared.push({ output, bytes:Buffer.alloc(0), changeToken:verified.changeToken });
+          prepared.push({ output, changeToken:verified.changeToken });
+          continue;
+        }
+        if (output.role !== 'project-file' && !supportsText(output.mime) && !imageMime(output.mime)) {
+          const blob = await this.resources.prepareStream(publicationFileChunks(root, output.path, output.bytes), output.mime, output);
+          prepared.push({ output, blob });
           continue;
         }
         let bytes: Buffer;
         if (output.role === 'delivery-document' && executionAnswer) bytes = executionAnswer;
         else if (hostAnswer) bytes = hostAnswer;
         else if (output.role === 'project-file') {
-          const current = await projectFiles.readRange(run.projectId, output.path, undefined, Math.min(Math.max(output.bytes, 1), MAX_TOTAL));
+          const current = await projectFiles.readRange(run.projectId, output.path, undefined, Math.min(Math.max(output.bytes, 1), MAX_FILE));
           bytes = current.bytes;
         }
         else {
-          try { bytes = await readPublicationOutput(root, output.path, Math.min(output.bytes, MAX_TOTAL)); }
+          try { bytes = await readPublicationOutput(root, output.path, Math.min(output.bytes, MAX_FILE)); }
           catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || selected.outputs.length !== 1 || output.outputKey !== 'answer' || output.path !== 'answer.md' || !object(result) || typeof result.answer !== 'string') throw error;
             bytes = Buffer.from(result.answer);
@@ -325,16 +347,16 @@ export class Publication {
         if (output.nodeType === 'visualize' || visualizeGeneration && output.mime === 'application/json') {
           let page: unknown;
           try { page = JSON.parse(bytes.toString('utf8')); } catch { invalid('Visualize output must be a valid JSON page package'); }
-          prepared.push({ output, bytes, pageValue: page });
+          prepared.push({ output, pageValue: page });
           continue;
         }
         if (output.role === 'project-file') {
           const observation = (await projectFiles.stat(run.projectId, [output.path]))[0]!;
           if (observation.state !== 'available' || observation.bytes !== output.bytes) invalid('Project output changed during publication preflight');
-          prepared.push({ output, bytes, ...(observation.changeToken === null ? {} : { changeToken:observation.changeToken }), ...(supportsText(output.mime) ? { text:bytes.toString('utf8') } : {}) });
+          prepared.push({ output, ...(observation.changeToken === null ? {} : { changeToken:observation.changeToken }), ...(supportsText(output.mime) && bytes.length <= MAX_TEXT ? { text:bytes.toString('utf8') } : {}) });
         } else {
           const blob = await this.resources.prepareBytes(bytes, output.mime, output.sha256);
-          prepared.push({ output, bytes, blob, ...(supportsText(output.mime) ? { text: bytes.toString('utf8') } : {}) });
+          prepared.push({ output, blob, ...(supportsText(output.mime) && bytes.length <= MAX_TEXT ? { text: bytes.toString('utf8') } : {}) });
         }
       }
       const generated = new Map(prepared.filter(item => item.blob && /^(image|video|audio)[/]/.test(item.output.mime)).map(item => {

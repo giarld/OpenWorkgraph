@@ -84,6 +84,28 @@ export class BlobStore {
   const result=Object.freeze({sha256,bytes:stable.byteLength,mime,path:await this.write(stable,'objects'),text});
   this.prepared.add(result); return result;
  }
+ /** Binary publication avoids retaining entire files in memory. Text still uses
+  * prepare() so UTF-8 and structured JSON validation remain complete. */
+ async prepareStream(chunks: AsyncIterable<Uint8Array>, declaredMime: string, expected: {bytes: number; sha256: string}): Promise<PreparedBlob> {
+  if (supportsText(declaredMime) || !validMime(declaredMime) || !Number.isSafeInteger(expected.bytes) || expected.bytes < 1 || expected.bytes > this.maxBytes || !/^[a-f0-9]{64}$/.test(expected.sha256)) throw new ServiceError('INVALID_REQUEST','Invalid streamed resource');
+  const directory=await this.directory('objects'), path=join(directory,randomUUID());
+  const file=await open(path,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
+  let completed=false;
+  try {
+   const hash=createHash('sha256'), prefix=Buffer.alloc(Math.min(expected.bytes,64*1024));let bytes=0;
+   for await (const chunk of chunks) {
+    if (bytes+chunk.byteLength>expected.bytes) throw new ServiceError('INVALID_REQUEST','Output size/hash mismatch');
+    if (bytes<prefix.length) prefix.set(chunk.subarray(0,Math.min(chunk.byteLength,prefix.length-bytes)),bytes);
+    bytes+=chunk.byteLength;hash.update(chunk);await file.writeFile(chunk);
+   }
+   if (bytes!==expected.bytes || hash.digest('hex')!==expected.sha256) throw new ServiceError('INVALID_REQUEST','Output size/hash mismatch');
+   if (!mimeMatchesBytes(declaredMime,sniffMime(prefix))) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Output MIME does not match bytes');
+   const {mime}=validateResourceBytes(prefix,declaredMime);
+   await file.sync();await file.chmod(0o400);await file.close();await syncDirectory(directory);
+   const result=Object.freeze({sha256:expected.sha256,bytes,mime,path,text:null});
+   this.prepared.add(result);completed=true;return result;
+  } finally {await file.close();if(!completed)await unlink(path);}
+ }
  assertPrepared(blob: PreparedBlob): void { if (!this.prepared.has(blob)) throw new ServiceError('INVALID_REQUEST','Expected an immutable blob prepared by this store'); }
  async writeChunk(bytes: Uint8Array): Promise<string> {if(bytes.byteLength<1 || bytes.byteLength>Math.min(this.maxBytes,4*1024*1024)) throw new ServiceError('PAYLOAD_TOO_LARGE','Chunk exceeds maximum');return this.write(Buffer.from(bytes),'chunks');}
  private validatePath(path: string): void {

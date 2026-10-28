@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenWorkgraph Skill Creator"
+  short_description: "Create and convert skills for OpenWorkgraph"
+  default_prompt: "Use $openworkgraph-skill-creator to create a skill or convert an existing skill for OpenWorkgraph."

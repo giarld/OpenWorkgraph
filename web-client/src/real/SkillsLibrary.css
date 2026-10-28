@@ -78,3 +78,16 @@
 
 .ow-skills-more { min-height: 44px; padding: 8px 0; text-align: center; }
 .ow-skills-more p { margin: 8px 0; }
+.ow-skills-toolbar-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.ow-skills-library .ow-skills-add { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 40px; margin: 2px 0 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); color: var(--text); cursor: pointer; }
+.ow-skills-add > span { line-height: 1; }
+.ow-skills-add > svg { display: block; }
+.ow-skills-add:disabled { opacity: .5; cursor: default; }
+.ow-skills-library-field { display: grid; gap: 8px; margin: 16px 0 8px; }
+.ow-skills-library-field input { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.ow-skills-add-choices { display: grid; gap: 10px; margin: 18px 0; }
+.ow-skills-add-choices > button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px; border: 1px solid var(--stroke); border-radius: 10px; color: var(--text); background: var(--panel); text-align: start; cursor: pointer; }
+.ow-skills-add-choices > button > span { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.ow-skills-add-choices small { color: var(--muted); line-height: 1.5; }
+.ow-skills-add-choices button:disabled { opacity: .5; cursor: default; }
+.ow-skills-add:focus-visible, .ow-skills-library-field input:focus-visible, .ow-skills-add-choices button:focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }

@@ -46,6 +46,7 @@ import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePla
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES } from '../../../packages/protocol/src/visualize-library';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
 import { SkillsLibrary } from './SkillsLibrary';
+import { skillAuthoringGroup, SKILL_AUTHORING_SIZE, type SkillAuthoringMode } from './skill-authoring-workflow';
 import { RememberedSidebarContent } from './RememberedSidebarContent';
 import { runsForDetail, RunsPanel } from "./RunsPanel";
 import { createRunNotifications } from "./notifications";
@@ -699,6 +700,24 @@ export function RealApp() {
     const timer = window.setInterval(() => { void poll(); }, 3000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [updatingRuntime, registry, onError, t]);
+  const addSkillWorkflow = async (mode: SkillAuthoringMode) => {
+    if (!editor.current || !graph || !canvas.current) throw Error(t('Select and open the target Work Graph first'));
+    const owner = editor.current, handle = canvas.current, guard = captureCanvasSelection();
+    await owner.flush(); guard();
+    const current = owner.getSnapshot();
+    if (editor.current !== owner || current.graph.graphId !== graph.graphId || current.graph.serviceId !== graph.serviceId) throw new LifecycleCancelledError();
+    if (!current.online || current.graph.archived || current.graph.trashed) throw Error(t('The current Work Graph is read-only.'));
+    const visible = handle.getVisibleWorldBounds();
+    const plan = skillAuthoringGroup(current.graph, mode, language === 'zh-CN', handle.getPlacementPosition(SKILL_AUTHORING_SIZE), visible);
+    await owner.command(plan.operations); guard();
+    if (editor.current !== owner) return;
+    // Bring partially or fully off-screen groups into view after the graph renders.
+    const group = owner.getSnapshot().graph.nodes.find(node => node.id === plan.groupId);
+    if (group && (group.x < visible.x || group.y < visible.y || group.x + SKILL_AUTHORING_SIZE.width > visible.x + visible.width || group.y + SKILL_AUTHORING_SIZE.height > visible.y + visible.height)) {
+      requestAnimationFrame(() => { if (editor.current === owner) canvas.current?.locate(plan.groupId); });
+    }
+    canvasChanged();
+  };
   const place = (asset: LibraryAsset, dropPosition?: Point): ResourcePlacement => {
     if (!editor.current || !graph) throw Error(t('Select and open the target Work Graph first'));
     if (!canvas.current) throw Error(t('Cannot determine where to place the node. Open the target Work Graph first.'));
@@ -783,7 +802,7 @@ export function RealApp() {
       },
     };
   };
-  const placeProjectFile = async (path: string, dropPosition?: Point) => {
+  const placeProjectFile = async (path: string, dropPosition?: Point, kind?: 'file' | 'directory') => {
     if (!editor.current || !graph || !canvas.current || localMode) throw Error(t('Connect a Workspace and open the target Work Graph first.'));
     const placementEditor = editor.current;
     const target = placementEditor.getSnapshot().graph;
@@ -799,7 +818,7 @@ export function RealApp() {
       const nodeId = randomId();
       const created = placementEditor.prepareCommand([{ type: 'node.create', node: {
         id: nodeId,
-        type: importedNodeType(name, mime),
+        type: kind === 'directory' ? 'file' : importedNodeType(name, mime),
         schemaVersion: 1,
         contentVersion: 1,
         content: { title: name, text: '', prompt: '', mime, source: { kind: 'project-file-empty', relativePath: path }, projectFileImport: { state: 'loading' } },
@@ -1179,8 +1198,8 @@ export function RealApp() {
           </div>
           <RememberedSidebarContent viewKey={JSON.stringify([localMode ? 'local' : serviceId, tab === 'skills' ? '' : graph?.projectId ?? project?.projectId ?? '', tab === 'canvas' || tab === 'assets' ? graph?.graphId ?? '' : '', tab])}>
           <div ref={setNodeSidebar} className={tab !== "canvas" ? "real-hidden" : "real-node-sidebar"}/>
-          {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''}/>}
-          {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position) => { void placeProjectFile(path, position).catch(onError); }}/>}
+          {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''} onAddSkill={graph && page === 'editor' && canvasOnline && canvasProjectActive && !graph.archived && !graph.trashed && (localMode || graph.serviceId === serviceId) ? addSkillWorkflow : undefined}/>}
+          {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position, kind) => { void placeProjectFile(path, position, kind).catch(onError); }}/>}
                     {tab === "assets" && assetsAvailable &&
             (graph ? (
               <ResourcesPanel

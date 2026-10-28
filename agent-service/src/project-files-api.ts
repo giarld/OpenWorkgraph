@@ -78,12 +78,12 @@ export class ProjectFilesApi {
       if (!node || node.contentVersion !== body['expectedContentVersion'] || !node.content || typeof node.content !== 'object' || Array.isArray(node.content)) throw new ServiceError('REVISION_CONFLICT', '空引用节点已变化。');
       const source = node.content.source;
       if (!source || typeof source !== 'object' || Array.isArray(source) || source.kind !== 'project-file-empty') throw new ServiceError('INVALID_REQUEST', '目标节点不是空引用节点。');
-      const file = await this.files.resolve(associate[1]!, body['path'], 'file');
-      const observation = (await this.files.stat(associate[1]!, [file.relativePath]))[0]!;
+      const file = await this.files.resolve(associate[1]!, body['path'], 'entry');
+      const observation = (await this.files.stat(associate[1]!, [file.relativePath], file.kind))[0]!;
       if (observation.state !== 'available') throw new ServiceError('PROJECT_UNAVAILABLE', '项目文件当前不可读。');
       const name = file.relativePath.split('/').at(-1)!;
-      const classified = classifyProjectFile(name);
-      const content = { title:name, text:'', prompt:'', mime:classified.mime, bytes:observation.bytes, source:{ kind:'project-file', serviceId:this.graphs.serviceId, projectId:associate[1]!, relativePath:file.relativePath }, observation:{ state:'available', name, mime:classified.mime, bytes:observation.bytes, changeToken:observation.changeToken } };
+      const classified = file.kind === 'directory' ? { type:'file' as const, mime:'inode/directory' } : classifyProjectFile(name);
+      const content = { title:name, text:'', prompt:'', mime:classified.mime, bytes:observation.bytes, source:{ kind:'project-file', serviceId:this.graphs.serviceId, projectId:associate[1]!, relativePath:file.relativePath, ...(file.kind === 'directory' ? { entryKind:'directory' } : {}) }, observation:{ state:'available', name, mime:classified.mime, bytes:observation.bytes, changeToken:observation.changeToken, ...(observation.absolutePath ? { absolutePath:observation.absolutePath } : {}) } };
       const result = this.auth.withSession(token, origin, current => this.graphs.command({ ...scope, idempotencyKey:body['idempotencyKey'] as string, expectedExecutionRevision:Number(body['expectedExecutionRevision']), expectedLayoutRevision:Number(body['expectedLayoutRevision']), operations:[{ type:'node.project-file.associate', nodeId:node.id, expectedContentVersion:node.contentVersion, nodeType:classified.type, content }] }, current.id));
       return { handled:true, body:result };
     }
@@ -92,12 +92,12 @@ export class ProjectFilesApi {
       this.auth.withSession(token, origin, () => undefined);
       const body = await readJson(request, 16 * 1024);
       if (Object.keys(body).some(key => !['path','x','y','expectedExecutionRevision','expectedLayoutRevision','idempotencyKey'].includes(key)) || typeof body['path'] !== 'string' || typeof body['x'] !== 'number' || typeof body['y'] !== 'number' || typeof body['idempotencyKey'] !== 'string' || !Number.isSafeInteger(body['expectedExecutionRevision']) || !Number.isSafeInteger(body['expectedLayoutRevision'])) throw new ServiceError('INVALID_REQUEST', '创建项目文件引用需要路径、落点、版本和幂等键。');
-      const file = await this.files.resolve(create[1]!, body['path'], 'file');
-      const observation = (await this.files.stat(create[1]!, [file.relativePath]))[0]!;
+      const file = await this.files.resolve(create[1]!, body['path'], 'entry');
+      const observation = (await this.files.stat(create[1]!, [file.relativePath], file.kind))[0]!;
       if (observation.state !== 'available') throw new ServiceError('PROJECT_UNAVAILABLE', '项目文件当前不可读。');
       const name = file.relativePath.split('/').at(-1)!;
-      const classified = classifyProjectFile(name);
-      const result = this.auth.withSession(token, origin, current => this.graphs.command({ serviceId:this.graphs.serviceId, projectId:create[1]!, graphId:create[2]!, idempotencyKey:body['idempotencyKey'] as string, expectedExecutionRevision:Number(body['expectedExecutionRevision']), expectedLayoutRevision:Number(body['expectedLayoutRevision']), operations:[{ type:'node.create', node:{ id:randomUUID(), type:classified.type, schemaVersion:1, contentVersion:1, content:{ title:name, text:'', prompt:'', mime:classified.mime, bytes:observation.bytes, source:{ kind:'project-file', serviceId:this.graphs.serviceId, projectId:create[1]!, relativePath:file.relativePath }, observation:{ state:'available', name, mime:classified.mime, bytes:observation.bytes, changeToken:observation.changeToken } }, x:Number(body['x']), y:Number(body['y']), width:300, height:220, readOnly:false } }] }, current.id));
+      const classified = file.kind === 'directory' ? { type:'file' as const, mime:'inode/directory' } : classifyProjectFile(name);
+      const result = this.auth.withSession(token, origin, current => this.graphs.command({ serviceId:this.graphs.serviceId, projectId:create[1]!, graphId:create[2]!, idempotencyKey:body['idempotencyKey'] as string, expectedExecutionRevision:Number(body['expectedExecutionRevision']), expectedLayoutRevision:Number(body['expectedLayoutRevision']), operations:[{ type:'node.create', node:{ id:randomUUID(), type:classified.type, schemaVersion:1, contentVersion:1, content:{ title:name, text:'', prompt:'', mime:classified.mime, bytes:observation.bytes, source:{ kind:'project-file', serviceId:this.graphs.serviceId, projectId:create[1]!, relativePath:file.relativePath, ...(file.kind === 'directory' ? { entryKind:'directory' } : {}) }, observation:{ state:'available', name, mime:classified.mime, bytes:observation.bytes, changeToken:observation.changeToken, ...(observation.absolutePath ? { absolutePath:observation.absolutePath } : {}) } }, x:Number(body['x']), y:Number(body['y']), width:300, height:220, readOnly:false } }] }, current.id));
       return { handled:true, body:result };
     }
     const match = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]files(?:[/](search|stat|content|media|thumbnail|link-preview|link-content))?$/.exec(url.pathname);
@@ -128,8 +128,8 @@ export class ProjectFilesApi {
     }
     if (action === 'stat' && request.method === 'POST') {
       const body = await readJson(request, 16 * 1024);
-      if (Object.keys(body).length !== 1 || !Array.isArray(body['paths'])) throw new ServiceError('INVALID_REQUEST', '需要 paths 数组。');
-      const result = await this.files.stat(projectId, body['paths'] as string[]);
+      if (Object.keys(body).some(key => !['paths','kind'].includes(key)) || !Array.isArray(body['paths']) || body['kind'] !== undefined && body['kind'] !== 'file' && body['kind'] !== 'directory') throw new ServiceError('INVALID_REQUEST', '需要 paths 数组及有效的路径类型。');
+      const result = await this.files.stat(projectId, body['paths'] as string[], body['kind'] === 'directory' ? 'directory' : 'file');
       this.auth.withSession(token, origin, () => undefined);
       return { handled: true, body: result };
     }

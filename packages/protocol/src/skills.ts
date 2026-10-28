@@ -87,6 +87,7 @@ export interface FrozenPromptSelection { skills: FrozenSkill[]; features: Visual
 export interface SkillEnvironmentField { name: string; label: string; description: string; required: boolean; secret: boolean; default?: string; translations?: Record<string, { label: string; description: string }> }
 export interface SkillConfigSchema { version: 1; environment: SkillEnvironmentField[] }
 export interface SkillSource { id: string; repository: string; branch: string; directory: string }
+export interface SkillLibrarySettings { source: SkillSource; defaultSource: SkillSource; revision: number }
 export interface SkillCatalogItem { skillId: string; source: SkillSource; directory: string; name: string; description: string; installed: boolean; revision: number; packageVersion?: string; commitSha?: string; updateAvailable: boolean; configuration: 'none' | 'required' | 'ready'; error?: string }
 export interface SkillCatalogQuery { offset?: number; limit?: number; installedOnly?: boolean; query?: string }
 export interface SkillCatalog { items: SkillCatalogItem[]; stale: boolean; error?: string; total?: number; nextOffset?: number; installedSignature?: string }

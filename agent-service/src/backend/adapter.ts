@@ -1,5 +1,5 @@
 import { tokenUsage } from './token-usage.js';
-import type { AgentHostTools } from '../agents/host-tools.js';
+import { AgentHostTools } from '../agents/host-tools.js';
 import { APPROVAL_MAX_PATHS, normalizeApprovalPermissions, validApprovalPaths, type ApprovalPermissions } from '@openworkgraph/protocol';
 import { AgentOperations } from '../agents/operations.js';
 import { nodeGenerationGuidance, nodeTitleGuidance } from '../prompts/index.js';
@@ -112,6 +112,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       if (mode === 'read-only') throw new BackendError('INVALID_INPUT', 'Codex does not support a read-only project with writable Run directories');
     }
     const s: Session = { context: structuredClone(context), callbacks, snapshot: { runId: context.runId, threadId: null, turnId: null, state: 'starting', observedAt: new Date().toISOString(), model: { ...context.model }, reason: null, answer: '' }, rpc: null, interactions: new Map(), replies: new Map(), eventQueue: Promise.resolve(), cancelled: false, interruptRequested: false, launching: true, buffered: [], skillEnvironment: {...context.skillEnvironment}, skillSecrets: {...context.skillEnvironment}, skillQueue: Promise.resolve(), fileChanges: new Map(), wireInteractions: new Map(), hostCalls: new Map(), commandCalls: new Map(), operations: new AgentOperations(), work: new Set(), hostTools: native.hostTools, signal: native.signal };
+    if (!s.hostTools && callbacks.installGeneratedSkill) s.hostTools = new AgentHostTools(context.runId, context.attemptId ?? context.runId, callbacks, () => !s.cancelled && !terminal(s.snapshot) && s.snapshot.state !== 'unknown');
     this.sessions.set(context.runId, s);
     s.abort = () => {
       s.cancelled = true; s.operations.cancelPending(); s.titleRpc?.close();
@@ -295,7 +296,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       if (s.hostCalls.size >= 256 || Buffer.byteLength(fingerprint) > 16384) { this.unknown(s, 'Native tool request budget exceeded'); rpc?.close(); return; }
       // Host invocation and wire delivery each happen once for this native ID.
       s.hostCalls.set(id, fingerprint);
-      this.track(s, s.hostTools.call({ callId: JSON.stringify(id), runId: s.context.runId, attemptId: s.context.attemptId!, name: params.tool, arguments: params.arguments }).then(result => {
+      this.track(s, s.hostTools.call({ callId: JSON.stringify(id), runId: s.context.runId, attemptId: s.context.attemptId ?? s.context.runId, name: params.tool, arguments: params.arguments }).then(result => {
         if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && rpc && !rpc.isClosed) rpc.reply(id, { contentItems: [{ type: 'inputText', text: result.content }], success: result.success });
       }).catch(() => { if (!terminal(s.snapshot) && !s.cancelled && s.snapshot.state !== 'unknown' && rpc && !rpc.isClosed) rpc.reply(id, { contentItems: [{ type: 'inputText', text: 'Host tool call unavailable' }], success: false }); }));
       return;

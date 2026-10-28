@@ -14,6 +14,15 @@
 
 导入时在目标项目全部工作图（包括归档和回收站）中检查同名。名称未占用时保持原名；冲突时依次使用 `原名 (1)`、`原名 (2)`，直到找到首个可用名称。浏览器临时工作图与工作空间项目使用同一规则。
 
+启动 Web 开发服务时，在仓库根目录执行：
+
+```sh
+npm --prefix web-client ci --include=dev
+npm run dev:web
+```
+
+`dev:web` 等同于 `npm --prefix web-client run dev`。访问地址以终端输出为准，按 Ctrl+C 关闭。需要本地工作空间时，在另一个终端的仓库根目录执行 `npm ci --include=dev` 和 `npm run dev:service`；后者每次重新构建后以前台方式启动，也可按 Ctrl+C 关闭。
+
 仅构建 Web 时，在仓库根目录执行：
 
 ```sh
@@ -27,7 +36,6 @@ Web 使用独立依赖和锁文件，根目录的 `npm ci` 不会安装本目录
 
 ```sh
 npm ci --include=dev
-npm run dev
 npm run typecheck
 npm test
 npm run test:e2e

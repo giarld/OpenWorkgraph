@@ -55,6 +55,7 @@ export class GitHubSkillSource implements SkillSourceProvider {
     if (typeof commit.sha !== 'string' || !/^[a-f0-9]{40}$/.test(commit.sha)) throw new ServiceError('INVALID_REQUEST', '技能来源提交无效。');
     const tree = JSON.parse((await boundedFetch('https://api.github.com/repos/' + repo + '/git/trees/' + commit.sha + '?recursive=1', 16 * 1024 * 1024)).toString()) as {truncated?: boolean; tree?: Array<{path: string; sha: string; mode: string; size?: number; type: string}>};
     if (tree.truncated || !Array.isArray(tree.tree)) throw new ServiceError('INVALID_REQUEST', '技能来源目录不完整，不能安装截断的包。');
+    if (!tree.tree.some(file => file.path === source.directory && file.type === 'tree') && !tree.tree.some(file => file.path.startsWith(source.directory + '/'))) throw new ServiceError('INVALID_REQUEST', '技能库根目录必须包含 skills 子目录。');
     const packages = new Map<string, SkillSourceFile[]>();
     for (const file of tree.tree) {
       if (!file.path.startsWith(source.directory + '/') || file.type === 'tree') continue;

@@ -19,6 +19,8 @@ import { openDatabase } from "./persistence/database.js";
 import { prepareStorageDatabase } from './operations/storage.js';
 import { Repositories } from "./persistence/repositories.js";
 import { Auth, normalizeOrigin } from "./auth.js";
+import { CliAuthorization } from './cli-authorization.js';
+import { Readable } from 'node:stream';
 import { ServiceError } from "./errors.js";
 import { readJson } from "./http.js";
 import { visualizeCompatibility } from './visualize-compatibility.js';
@@ -30,6 +32,8 @@ import { BusinessApi } from "./api.js";
 import { Events } from "./events.js";
 import { WorkflowRuntime, type WorkflowRuntimeOptions } from "./runtime.js";
 import { compareSemVer, latestAgentServiceVersion } from './operations/update.js';
+import { silentLogger, type Logger } from './logger.js';
+import { logRunChanges } from './run-logging.js';
 const HTTP_STATUS: Partial<Record<ErrorCode, number>> = {
   INVALID_REQUEST: 400,
   UNAUTHENTICATED: 401,
@@ -58,6 +62,7 @@ export function createService(
   dataDir?: string,
   options: {
     now?: () => number;
+    logger?: Logger;
     codexHome?: string;
     projectProbe?: ProjectProbe;
     runtime?: WorkflowRuntimeOptions;
@@ -68,6 +73,7 @@ export function createService(
   } = {},
 ) {
   const directories = initializeDirectories(dataDir);
+  const logger = options.logger ?? silentLogger;
   const db = openDatabase(directories.database);
   let serviceId: string;
   try {
@@ -84,10 +90,12 @@ export function createService(
     db,
     serviceId,
     directories,
-    options.runtime,
+    { ...options.runtime, logger },
   );
   const api = new BusinessApi(db, serviceId, auth, runtime);
-  const events = new Events(db, serviceId, auth);
+  const cliAuthorization=new CliAuthorization(auth,runtime.runs);
+  const events = new Events(db, serviceId, auth, logger);
+  const stopRunLogging = options.logger ? logRunChanges(db, logger) : () => {};
   const instanceId = randomUUID();
   const npmInstallation = options.npmInstallation ?? (async () => false);
   const npxInstallation = options.npxInstallation ?? (async () => false);
@@ -103,6 +111,7 @@ export function createService(
     protocolVersion: PROTOCOL_VERSION,
     visualizeCompatibility,
     capabilities: {
+      workgraphCli:{status:'available',reason:'Native local business sessions, bounded graph queries, atomic edits, execution and resource access. Run access is credential-bound with user approvals; shared OS-user credential isolation is not guaranteed.',verifiedAt:null},
       pairing: {
         status: "available",
         reason: "Local pairing code and persistent revocable sessions",
@@ -166,6 +175,10 @@ export function createService(
       "Content-Range, Accept-Ranges, Content-Disposition",
     );
     const requestId = randomUUID();
+    const startedAt = performance.now();
+    response.once('finish', () => logger.write(response.statusCode >= 500 ? 'error' : response.statusCode >= 400 ? 'warn' : 'info', 'http.completed', {
+      requestId, method: request.method ?? 'UNKNOWN', statusCode: response.statusCode, durationMs: Math.round(performance.now() - startedAt),
+    }));
     const send = (body: unknown) => response.end(JSON.stringify(body));
     void (async () => {
       const address = server.address();
@@ -301,7 +314,9 @@ export function createService(
         send(auth.completeClientPairing(input.code, input.expectedServiceId, bearer.slice(7), originHeader));
         return;
       }
-      const origin = auth.requireOrigin(originHeader);
+      const nativeBearer = request.headers.authorization;
+      const origin = originHeader===undefined && nativeBearer?.startsWith('Bearer ')
+        ? auth.nativeOrigin(nativeBearer.slice(7)) : auth.requireOrigin(originHeader);
       if (!protocol)
         throw new ServiceError(
           "PROTOCOL_INCOMPATIBLE",
@@ -331,6 +346,17 @@ export function createService(
           "请提供 Authorization: Bearer 会话凭据。",
         );
       const token = authorization.slice(7);
+      const cliControl=await cliAuthorization.handle(request,path,token,origin);
+      if(cliControl.handled){send(cliControl.body);return;}
+      if(origin==='native:run'){
+        const sessionId=auth.withSession(token,origin,s=>s.id);
+        const body=request.method==='POST'?await readJson(request,16*1024*1024):undefined;
+        cliAuthorization.authorize(sessionId,request.headers['x-workgraph-cli-authorization'],{method:request.method as 'GET'|'POST',path:rawPath,...(body?{body}:{})});
+        if(body){
+          const original=request;
+          request=Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]),{headers:original.headers,method:original.method,url:original.url,socket:original.socket}) as unknown as typeof request;
+        }
+      }
       if (request.method === 'POST' && path === '/v1/runtime/update') {
         auth.withSession(token, origin, () => undefined);
         if (!await npmInstallation() || !options.updateRuntime)
@@ -515,6 +541,7 @@ export function createService(
         response.end();
       } else send(result);
     })().catch((error) => {
+      logger.write(error instanceof ServiceError ? 'warn' : 'error', 'http.failed', { requestId, code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR' });
       if (response.destroyed || response.writableEnded) return;
       const code: ErrorCode =
         error instanceof ServiceError ? error.code : "INTERNAL_ERROR";
@@ -557,6 +584,7 @@ export function createService(
   server.headersTimeout = 10_000;
   server.on("listening", () => {
     const address = server.address() as AddressInfo;
+    logger.write('info', 'service.listening', { port: address.port });
     db.prepare(
       "INSERT INTO settings(key,value) VALUES('listener',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     ).run(JSON.stringify(listenerInfo(address, serviceId, instanceId)));
@@ -582,6 +610,7 @@ export function createService(
     try {
       await closeHttpServer();
     } finally {
+      stopRunLogging();
       db.close();
     }
   }
@@ -597,6 +626,7 @@ export function createService(
           "DELETE FROM settings WHERE key='listener' AND json_extract(value,'$.instanceId')=?",
         ).run(instanceId);
       } finally {
+        stopRunLogging();
         db.close();
       }
     })();

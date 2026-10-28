@@ -23,6 +23,7 @@ export interface BackendCallbacks {
   /** Exact, paginated read; project scope is derived from the calling Run. */
   readRunContext?(request: RunContextRequest): Promise<string>;
   /** Read-only preflight of an actual page file in the calling Run Output directory. */
+  installGeneratedSkill?(path: string, expectedRevision: number): Promise<import('@openworkgraph/protocol').SkillCatalogItem>;
   validateVisualizeOutput?(path: string): Promise<import('../visualize-output-validation.js').VisualizeOutputValidation>;
   previewVisualizeOutput?(path: string): Promise<import('../visualize-preview.js').VisualizePreviewLink>;
   inspectVisualizePreview?(sessionId: string): Promise<unknown>;

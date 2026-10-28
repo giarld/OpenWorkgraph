@@ -253,6 +253,9 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
   const { t } = useI18n();
   const [answers, setAnswers] = useState<QuestionAnswers>(() => Object.create(null));
   const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>(() => Object.create(null));
+  const [autoAuthorize,setAutoAuthorize]=useState(false);
+  const cliApproval=object(object(interaction.payload).cliAuthorization);
+  useEffect(()=>setAutoAuthorize(false),[interaction.id,interaction.epoch]);
   const questions = interactionQuestions(interaction);
   const formId = useId();
   const approval = interactionApproval(interaction);
@@ -305,8 +308,9 @@ export function InteractionForm({ interaction, disabled, onReply, onError }: { i
         {!approval.canApprove && <p className="run-approval-note" role="status">{t('The Workspace does not allow this operation to be approved. You can still decline it.')}</p>}
       </div>
       <div className="run-approval-actions">
+        {cliApproval.allowAuto===true&&<label className="cli-auto-authorization"><input type="checkbox" checked={autoAuthorize} disabled={disabled} onChange={event=>setAutoAuthorize(event.target.checked)}/>{t('Automatically authorize later CLI operations in this run')}</label>}
         <button type="button" className="secondary-button" disabled={disabled} onClick={() => onReply({ kind: 'approval', decision: 'decline' })}><X size={16} aria-hidden="true" />{t('Decline')}</button>
-        <button type="button" className="primary-button" disabled={disabled || !approval.canApprove} onClick={() => { if (!disabled && approval.canApprove) onReply({ kind: 'approval', decision: 'accept' }); }}><Check size={16} aria-hidden="true" />{t('Approve this operation')}</button>
+        <button type="button" className="primary-button" disabled={disabled || !approval.canApprove} onClick={() => { if (!disabled && approval.canApprove) onReply({ kind: 'approval', decision: 'accept',...(cliApproval.allowAuto===true?{autoAuthorize}: {}) }); }}><Check size={16} aria-hidden="true" />{t('Approve this operation')}</button>
       </div>
     </>}
   </section>;
@@ -333,6 +337,12 @@ export function RunInteractionRecords({ interactions, active, disabled, onReply,
 }
 
 /** request is session-scoped to the same service as runs; remount on service switch. */
+function CliGrantControl({run,request,disabled,onError}:{run:Run;request:Request;disabled:boolean;onError:(error:unknown)=>void}){
+  const {t}=useI18n();const [enabled,setEnabled]=useState(false);const [revoking,setRevoking]=useState(false);
+  useEffect(()=>{let active=true;const refresh=()=>request<{enabled:boolean}>('/v1/cli/authorizations/status/'+run.id).then(value=>{if(active)setEnabled(value.enabled);}).catch(()=>{});void refresh();const timer=setInterval(refresh,2000);return ()=>{active=false;clearInterval(timer);};},[run.id,request]);
+  if(!enabled)return null;
+  return <button type="button" className="secondary-button" disabled={disabled||revoking} aria-busy={revoking} onClick={()=>{setRevoking(true);void request('/v1/cli/authorizations/revoke',{runId:run.id},'POST').then(()=>setEnabled(false)).catch(onError).finally(()=>setRevoking(false));}}>{t('Revoke CLI auto authorization for this run')}</button>;
+}
 export function RunsPanel(props: RunsPanelProps) {
   const { t } = useI18n();
   const { request, runs, graphId, onLocate, onChanged, onError, readOnly, mode = 'all' } = props;
@@ -476,6 +486,7 @@ export function RunsPanel(props: RunsPanelProps) {
       {busy && <p role="status">{t('Submitting. Waiting for Workspace confirmation…')}</p>}
       {!selected && <p>{t('There are no run records yet.')}</p>}
       {selected && <button className="secondary-button" onClick={() => onLocate(selected)}>{t('Locate this task')}</button>}
+      {selected&&!isTerminalRunStatus(selected.status)&&<CliGrantControl key={selectedKey} run={selected} request={request} disabled={readOnly||busy} onError={onError}/>}
       {selected?.status === 'accepted' && selected.executionStart && <ExecutionStartPanel key={selectedKey} run={selected} request={request} inputs={props.executionInputs} disabled={readOnly || busy} onChanged={() => { onChanged(); setRevision(n => n + 1); }} onError={onError} onEditNode={props.onEditExecutionNode ? nodeId=>props.onEditExecutionNode!(selected,nodeId) : undefined} />}
       {selected?.status === 'accepted' && ['manual','confirm'].includes(selected.executionStart ?? '') && <button className="secondary-button" disabled={readOnly || busy} onClick={() => void mutate(() => request(pathFor(selected, 'cancel'), {idempotencyKey:randomId()}, 'POST'))}>{t('Withdraw this submission')}</button>}
       {selected?.status === 'paused_restore' && <div className="interaction-box" role="group" aria-label={t('Paused after restore')}><p>{t('The Workspace will check the saved inputs before continuing this task.')}</p><button type="button" className="primary-button" disabled={readOnly || busy || loading} aria-busy={continuingKey === selectedKey} onClick={() => continueTask(selected)}>{t(continuingKey === selectedKey ? 'Continuing restored run…' : 'Continue restored run')}</button></div>}

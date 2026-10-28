@@ -41,7 +41,8 @@ import type { RecentGraph } from './recent-graphs';
 import { randomId } from "../adapter/random";
 import { canDropAsset, dropAsset } from './asset-drag';
 import { canDropProjectFile, dropProjectFile } from './project-file-drag';
-import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFileReference, projectFileSource } from './project-file-reference';
+import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFileReference, isProjectDirectoryReference, projectFileSource } from './project-file-reference';
+import { ProjectDirectoryReference } from './ProjectDirectoryReference';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Pencil, Info, Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
 import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
@@ -817,7 +818,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const hasContent = typeof targetContent.resourceId === 'string' || (target?.type === 'visualize'
         ? typeof object(targetContent.page).revision === 'number'
         : String(targetContent[target?.type === 'execution' ? 'prompt' : 'text'] ?? '').trim().length > 0);
-      const open = Boolean(target && editable && (nodeEditorOpen(target.id) ?? !hasContent));
+      const defaultOpen = target?.type === 'text' ? false : target?.type === 'execution'
+        ? !latestNodeRuns.has(target.id) && !submittedNodeKeys.current.has(JSON.stringify([g.serviceId, g.projectId, g.graphId, target.id]))
+        : !hasContent;
+      const open = Boolean(target && editable && (nodeEditorOpen(target.id) ?? defaultOpen));
       if (target && editable) setNodeEditorOpen(target.id, open);
       if (documentId && documentPreviewId !== documentId) {
         ++documentEpoch.current;
@@ -1277,7 +1281,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       ...(connection ? [{ type: "edge.create" as const, edge: { id: randomId(), sourceId: connection.port === "output" ? connection.nodeId : id, targetId: connection.port === "output" ? id : connection.nodeId, kind: "reference" as const } }] : []),
     ]);
     selectNodes([id]);
-    setNodeEditorOpen(id, true);
+    if (type !== 'text') setNodeEditorOpen(id, true);
     return id;
   };
   const resumeUpload = async (job: CanvasUploadJob, prepareOnly = false): Promise<Parameters<GraphEditor["command"]>[0] | undefined> => {
@@ -1509,7 +1513,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     if (!viewport || !rect) throw Error(t('Unable to determine the paste position.'));
     const offset = pasteQueue.getSnapshot().count * 32;
     const at = { x: (rect.width / 2 - viewport.x) / viewport.k + offset, y: (rect.height / 2 - viewport.y) / viewport.k + offset };
-    const needsResources = payload.nodes.some(n => typeof n.content.resourceId === "string" || (n.content.source && typeof n.content.source === 'object' && !Array.isArray(n.content.source) && n.content.source.kind === 'project-file'));
+    const needsResources = payload.nodes.some(n => typeof n.content.resourceId === "string" || (hasProjectFileSource(n.content) && !isProjectDirectoryReference(n.content)));
     if (!needsResources) {
       guardLayout([]);
       const plan = planNodePaste(raw, at, undefined, undefined, { serviceId:g.serviceId, projectId:g.projectId, graphId:g.graphId });
@@ -1759,6 +1763,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     const projectFileImport = object(c.projectFileImport);
     if (projectFileImport.state === 'loading' || projectFileImport.state === 'failed') return <div className="node-content ow-resource-import-state">{projectFileImport.state === 'loading' ? <LoaderCircle size={28} className="ow-resource-import-spinner" aria-hidden="true"/> : <CircleAlert size={28} aria-hidden="true"/>}<strong>{n.title}</strong><span>{projectFileImport.state === 'loading' ? t('Linking project file…') : t('Project file linking failed. Add the same file again to retry.')}</span></div>;
     const projectSource = object(c.source);
+    if (isProjectDirectoryReference(c)) return <ProjectDirectoryReference path={String(projectSource.relativePath)} absolutePath={typeof object(c.observation).absolutePath === 'string' ? String(object(c.observation).absolutePath) : undefined}/>;
     if (projectSource.kind === 'project-file-empty') return <div className="node-content ow-empty-reference-node" aria-label={t('Empty reference node. Drop any project file here to associate it.')}><Link2 size={32} aria-hidden="true"/></div>;
     if (wire.schemaVersion === 1 && wire.type === 'file' && (projectSource.kind === 'project-file' || typeof c.resourceId === 'string')) {
       const bytes = typeof c.bytes === 'number' && Number.isSafeInteger(c.bytes) && c.bytes >= 0 ? c.bytes : undefined;
@@ -1871,14 +1876,14 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const renderNodeTools = (n: WorkNode, menu = false) => <>
     <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} type="button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16} aria-hidden="true"/></NodeToolButton>
     {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16} aria-hidden="true"/></NodeToolButton>}
-    {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16} aria-hidden="true"/></NodeToolButton>}
+    {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && !isProjectDirectoryReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16} aria-hidden="true"/></NodeToolButton>}
     {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === 'file' && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file')} title={typeof content.resourceId === 'string' ? t('Upload again') : t('Upload file (maximum 300 MB)')} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16} aria-hidden="true"/></NodeToolButton>}
     {canCopyText && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Create editable text copy")} title={t("Create editable text copy")} disabled={readOnly} onClick={() => act(() => create(node!.type, String(content.text ?? ""), { x: n.x + 40, y: n.y + 40 }, textCopyContent(node!, content)))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
-    {n.type === "execution" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy execution task")} title={t("Copy execution task (prompt only)")} disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}) }))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
-    {hasProjectFileSource(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy as resource node")} title={props.temporary ? t('Temporary Work Graphs do not support copying project file resources yet') : t('Copy as resource node')} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
-    {hasProjectFileSource(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Add to asset library (independent copy)")} title={t("Add to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === "execution" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy execution task")} title={t("Copy execution task (prompt only)")} disabled={readOnly} onClick={() => act(() => create("execution", "", { x: n.x + 40, y: n.y + 40 }, { prompt: String(content.prompt ?? ""), ...(Array.isArray(content.skillReferences) ? { skillReferences: content.skillReferences } : {}), ...(Array.isArray(content.features) ? { features: content.features } : {}), ...(['create', 'convert'].includes(String(content.skillAuthoring)) ? { skillAuthoring: content.skillAuthoring } : {}) }))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
+    {hasProjectFileSource(content) && !isProjectDirectoryReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Copy as resource node")} title={props.temporary ? t('Temporary Work Graphs do not support copying project file resources yet') : t('Copy as resource node')} disabled={readOnly || props.temporary} onClick={() => act(() => copyProjectFileToResourceNode(n.id))}><Copy size={16} aria-hidden="true"/></NodeToolButton>}
+    {hasProjectFileSource(content) && !isProjectDirectoryReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Add to asset library (independent copy)")} title={t("Add to asset library")} disabled={readOnly || props.assetsAvailable === false} onClick={() => act(() => saveProjectFileAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === 'visualize' && visualizeSaveJobs.current.get(n.id)?.conflict && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} className="" aria-label={t('Read latest page and start a new save')} disabled={savingVisualizeAssets.has(n.id)} onClick={() => { visualizeSaveJobs.current.delete(n.id); act(() => saveVisualizeAsset(n.id)); }}>{menu ? <FolderPlus size={16} aria-hidden="true"/> : t('Read latest page and start a new save')}</NodeToolButton>}
     {n.type === 'visualize' && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t('Save interactive page to asset library')} title={!object(content.page).resource ? t('Generate an interactive page before saving it to the asset library.') : props.assetsAvailable === false ? t('Connect an available Workspace first.') : props.visualizeLibraryAvailable === false ? t('Upgrade the Workspace to save and install interactive visualizations.') : savingVisualizeAssets.has(n.id) ? t('Saving interactive page…') : visualizeSaveJobs.current.has(n.id) ? t('Retry original interactive page save') : t('Save interactive page to asset library')} aria-busy={savingVisualizeAssets.has(n.id)} disabled={readOnly || n.readonly || locked(n.id) || !object(content.page).resource || props.assetsAvailable === false || props.visualizeLibraryAvailable === false || savingVisualizeAssets.has(n.id)} onClick={() => act(() => saveVisualizeAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === "text" && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Save to asset library (independent copy)")} title={savingTextAssets.has(n.id) ? t("Saving text asset…") : textAssetJobs.current.has(n.id) ? t("Retry saving original text copy") : t("Save to asset library")} disabled={readOnly || props.assetsAvailable === false || savingTextAssets.has(n.id)} onClick={() => act(() => saveTextAsset(n.id))}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
@@ -2189,8 +2194,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           onError={props.onError}
           shouldOpenNodeOnDoubleClick={n => hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null)}
           canEditTextOnSpace={n => !hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null) && !locked(n.id) && !state.drafts.some(d => d.nodeId === n.id && ['conflict', 'recovery'].includes(d.state))}
-          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setNodeEditorOpen(n.id, true); }}
+          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (isProjectDirectoryReference(openedContent)) props.onOpenProjectDirectory?.(String(projectFileSource(openedContent).relativePath)); else if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setNodeEditorOpen(n.id, true); }}
           onActivateNode={n => {
+            const sourceContent = g.nodes.find(node => node.id === n.id)?.content ?? null;
+            if (isProjectDirectoryReference(sourceContent)) { props.onOpenProjectDirectory?.(String(projectFileSource(sourceContent).relativePath)); return; }
             if (n.type === 'execution') return;
             if (n.type === 'preview' && openImageNodePreview(n.id)) return;
             if (n.type === 'image') { if (!openImageNodePreview(n.id)) setReferenceId(n.id); return; }
@@ -2396,6 +2403,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
             </PromptEditor>) : null}
           renderNode={n => renderNodeContent(n, g.nodes.find(v => v.id === n.id)!)}
           nodeRenderKey={n => nodeRenderKeys.get(n.id)}
+          nodeTooltip={n => {
+            const c = object(g.nodes.find(item => item.id === n.id)?.content ?? null);
+            return isProjectDirectoryReference(c) ? String(object(c.observation).absolutePath ?? projectFileSource(c).relativePath) : undefined;
+          }}
           renderTitlePrefix={n => {
             const source = projectFileSource(g.nodes.find(node => node.id === n.id)?.content ?? null);
             const definition = getNodeDefinition(n.type);

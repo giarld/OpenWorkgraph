@@ -19,18 +19,32 @@
 
 ### Agent Service
 
-在仓库根目录构建协议包和 Agent Service：
+在仓库根目录安装依赖并启动开发服务：
 
 ```sh
 npm ci --include=dev
-npm run build
+npm run dev:service
 ```
 
-构建完成后，以前台方式运行 Agent Service：
+`dev:service` 每次先执行 `npm run build`，构建成功后以前台方式启动服务，按 Ctrl+C 关闭。参数可通过 `--` 传入，例如 `npm run dev:service -- --host 127.0.0.1`。
+
+如需独立构建并后台运行，使用以下命令：
 
 ```sh
+npm run build
 node agent-service/dist/cli.js start
 ```
+
+查看状态或停止后台服务：
+
+```sh
+node agent-service/dist/cli.js status
+node agent-service/dist/cli.js stop
+```
+
+已有构建可使用 `node agent-service/dist/cli.js serve` 直接前台启动，无需重新构建。`start` 为后台运行，`serve` 为前台运行，两者择一使用。
+
+前台日志输出到终端；后台日志追加到数据目录下的 `logs/service-YYYY-MM-DD.log`（默认 `~/.openworkgraph/logs/`），按 UTC 日期保留当天及前 6 天。后台默认只记录关键事件、警告和错误；`NODE_ENV=production` 对前后台均启用精简日志，`NODE_ENV=development` 启用详细日志，未设置环境的前台保留详细日志。
 
 ### OpenCode 执行器
 
@@ -42,7 +56,16 @@ OpenCode 集成依赖由万象画布安装流程自动配置，无须单独安�
 
 ### Web Client
 
-在仓库根目录构建 Web Client，并通过 Vite Preview 在 `http://127.0.0.1:4173` 运行生产构建：
+在另一个终端中，从仓库根目录启动 Web 开发服务：
+
+```sh
+npm --prefix web-client ci --include=dev
+npm run dev:web
+```
+
+`dev:web` 等同于 `npm --prefix web-client run dev`，访问地址以终端输出为准，按 Ctrl+C 关闭。
+
+如需预览生产构建，通过 Vite Preview 在 `http://127.0.0.1:4173` 运行：
 
 ```sh
 npm --prefix web-client ci --include=dev
