@@ -6,6 +6,7 @@ import { atomic } from './persistence/database.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
 const clip=(value:string,count:number)=>Array.from(value).slice(0,count).join('');
+const currentTitleSql="COALESCE(g.title,json_extract(v.content,'$.title'),'')";
 const invalid = (message:string):never => { throw new ServiceError('INVALID_REQUEST', message); };
 export class GraphQueries {
   private key = randomBytes(32);
@@ -49,10 +50,11 @@ export class GraphQueries {
       const count=Number(db.prepare('SELECT COUNT(*) n FROM nodes WHERE graph_id=? AND deleted=0').get(scope.graphId)!.n);
       const edgeCount=Number(db.prepare('SELECT COUNT(*) n FROM edges WHERE graph_id=?').get(scope.graphId)!.n);
       if(count>100000||edgeCount>250000)throw new ServiceError('INPUT_BUDGET_EXCEEDED','Graph exceeds synchronous query computation budget.');
-      const nodes:GraphNodeHeading[]=db.prepare("SELECT n.id,n.type,n.current_version,n.read_only,substr(COALESCE(g.title,json_extract(v.content,'$.title'),''),1,513) title FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version LEFT JOIN graph_groups g ON g.id=n.id AND g.run_id IS NULL WHERE n.graph_id=? AND n.deleted=0 ORDER BY n.id").all(scope.graphId).map(r=>({id:String(r.id),type:String(r.type),title:clip(String(r.title),budget.titleChars),contentVersion:Number(r.current_version),readOnly:!!r.read_only}));
+      const headings=db.prepare(`SELECT n.id,n.type,n.current_version,n.read_only,substr(${currentTitleSql},1,513) title,g.title group_title FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version LEFT JOIN graph_groups g ON g.id=n.id AND g.run_id IS NULL WHERE n.graph_id=? AND n.deleted=0 ORDER BY n.id`).all(scope.graphId);
+      const nodes:GraphNodeHeading[]=headings.map(r=>({id:String(r.id),type:String(r.type),title:clip(String(r.title),budget.titleChars),contentVersion:Number(r.current_version),readOnly:!!r.read_only}));
       const edges:Edge[]=db.prepare('SELECT e.id,e.source_id,e.target_id,e.kind FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.graph_id=? AND s.deleted=0 AND t.deleted=0 ORDER BY e.id').all(scope.graphId).map(r=>({id:String(r.id),sourceId:String(r.source_id),targetId:String(r.target_id),kind:r.kind as Edge['kind']}));
       const members=db.prepare('SELECT m.group_id,m.node_id FROM group_members m JOIN graph_groups g ON g.id=m.group_id JOIN nodes n ON n.id=g.id WHERE g.graph_id=? AND g.run_id IS NULL AND n.deleted=0 ORDER BY m.group_id,m.node_id').all(scope.graphId);
-      const version=createHash('sha256').update(JSON.stringify([scope,graph.title,graph.execution_revision,nodes.map(n=>[n.id,n.type,n.contentVersion]),edges,members])).digest('hex');
+      const version=createHash('sha256').update(JSON.stringify([scope,graph.title,graph.execution_revision,headings.map(n=>[n.id,n.type,n.current_version,n.group_title]),edges,members])).digest('hex');
       const {cursor,...condition}=request,identity={...scope,principal,kind,condition};
       const offset=this.offset(cursor,identity,version);
       const meta={...scope,title:clip(String(graph.title),budget.titleChars),executionRevision:Number(graph.execution_revision),layoutRevision:Number(graph.layout_revision),readVersion:version,budget};
@@ -81,7 +83,7 @@ export class GraphQueries {
           const total=Number(db.prepare('SELECT COALESCE(SUM(length(v.content)),0) n FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.graph_id=? AND n.deleted=0').get(scope.graphId)!.n);
           if(total>32*1024*1024)throw new ServiceError('INPUT_BUDGET_EXCEEDED','Search exceeds 32 MiB text scan budget.');
           const hits=new Map<string,string>();
-          for(const row of db.prepare("SELECT n.id,json_extract(v.content,'$.title') title,json_extract(v.content,'$.text') text,json_extract(v.content,'$.prompt') prompt FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.graph_id=? AND n.deleted=0 ORDER BY n.id").all(scope.graphId)){
+          for(const row of db.prepare(`SELECT n.id,${currentTitleSql} title,json_extract(v.content,'$.text') text,json_extract(v.content,'$.prompt') prompt FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version LEFT JOIN graph_groups g ON g.id=n.id AND g.run_id IS NULL WHERE n.graph_id=? AND n.deleted=0 ORDER BY n.id`).all(scope.graphId)){
             for(const field of fields as string[]){const text=String(row[field]??''),at=text.toLocaleLowerCase().indexOf(query);if(at>=0){hits.set(String(row.id),Array.from(text.slice(0,at)).slice(-60).join('')+clip(text.slice(at),180));break;}}
           }
           selected=selected.filter(n=>hits.has(n.id)).map(n=>({...n,snippet:hits.get(n.id)!}));

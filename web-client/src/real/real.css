@@ -733,8 +733,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-header.topbar-right { flex-direction: column; align-items: flex-end; flex-wrap: nowrap; max-width: calc(100% - 32px); pointer-events: none; }
 .runtime-header-actions { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
 .runtime-queue-dock { display: flex; align-items: center; gap: 6px; max-width: min(360px, calc(100vw - 32px)); pointer-events: auto; }
-.runtime-current-status { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; min-height: 28px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
-.runtime-current-status:hover, .runtime-current-status[aria-expanded="true"] { background: var(--fill); border-color: var(--muted); }
+.runtime-current-status { position: relative; z-index: 2; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; min-height: 28px; padding: 4px 10px; font-size: 12px; cursor: default; }
 .real-header .runtime-status-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .real-header .runtime-status-light { display: block; flex: 0 0 8px; height: 8px; border-radius: 50%; background: #8b8b8b; }
 .runtime-current-status[data-state="normal"] .runtime-status-light { background: #32a852; }

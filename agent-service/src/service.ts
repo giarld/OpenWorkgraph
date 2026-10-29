@@ -32,8 +32,12 @@ import { BusinessApi } from "./api.js";
 import { Events } from "./events.js";
 import { WorkflowRuntime, type WorkflowRuntimeOptions } from "./runtime.js";
 import { compareSemVer, latestAgentServiceVersion } from './operations/update.js';
-import { silentLogger, type Logger } from './logger.js';
+import { errorLogFields, silentLogger, type Logger } from './logger.js';
+import { pipeline } from 'node:stream/promises';
 import { logRunChanges } from './run-logging.js';
+import { WorkspaceRestore } from './operations/workspace-restore.js';
+import type { OperationsLock } from './operations/lifecycle.js';
+import { waitForBackups } from './operations/backups.js';
 const HTTP_STATUS: Partial<Record<ErrorCode, number>> = {
   INVALID_REQUEST: 400,
   UNAUTHENTICATED: 401,
@@ -70,6 +74,7 @@ export function createService(
     npxInstallation?: () => Promise<boolean>;
     latestNpmVersion?: () => Promise<string>;
     updateRuntime?: (onExit: () => void) => Promise<void>;
+    operationsLock?: OperationsLock;
   } = {},
 ) {
   const directories = initializeDirectories(dataDir);
@@ -83,19 +88,19 @@ export function createService(
     db.close();
     throw error;
   }
-  const auth = new Auth(db, serviceId, options.now);
-  const projects = new Projects(db, serviceId);
+  let auth = new Auth(db, serviceId, options.now);
+  let projects = new Projects(db, serviceId);
   const projectProbe = options.projectProbe ?? new ProjectProbe();
-  const runtime = new WorkflowRuntime(
+  let runtime = new WorkflowRuntime(
     db,
     serviceId,
     directories,
     { ...options.runtime, logger },
   );
-  const api = new BusinessApi(db, serviceId, auth, runtime);
-  const cliAuthorization=new CliAuthorization(auth,runtime.runs);
-  const events = new Events(db, serviceId, auth, logger);
-  const stopRunLogging = options.logger ? logRunChanges(db, logger) : () => {};
+  let api = new BusinessApi(db, serviceId, auth, runtime, logger);
+  let cliAuthorization=new CliAuthorization(auth,runtime.runs);
+  let events = new Events(db, serviceId, auth, logger);
+  let stopRunLogging = options.logger ? logRunChanges(db, logger) : () => {};
   const instanceId = randomUUID();
   const npmInstallation = options.npmInstallation ?? (async () => false);
   const npxInstallation = options.npxInstallation ?? (async () => false);
@@ -161,9 +166,37 @@ export function createService(
   info.capabilities.backups = {
     status: "available",
     reason:
-      "Manual consistent backups and authenticated download; restore is local-only",
+      "ZIP workspace backups, version-aware validation and confirmed background restore",
     verifiedAt: null,
   };
+  const inFlight = new Set<Promise<void>>();
+  let runtimeClosed = false;
+  const restore = new WorkspaceRestore(db, directories, options.operationsLock, logger, () => api.backups, {
+    canStart: () => !closing && !updateQueued,
+    quiesce: async () => {
+      events.close();
+      while (inFlight.size) await Promise.allSettled([...inFlight]);
+      await waitForBackups(db);
+      if (runtime.runs.unfinished().length) throw new ServiceError('ACTIVE_RUN', '存在未结束的任务，已取消恢复，请结束任务后重试。');
+      if (runtimeClosed) return;
+      try { await runtime.drain(); } finally { runtime.close(); runtimeClosed = true; stopRunLogging(); }
+    },
+    reload: async () => {
+      if (!runtimeClosed) return;
+      runtime = new WorkflowRuntime(db, serviceId, directories, { ...options.runtime, logger });
+      auth = new Auth(db, serviceId, options.now); projects = new Projects(db, serviceId);
+      api = new BusinessApi(db, serviceId, auth, runtime, logger); cliAuthorization = new CliAuthorization(auth, runtime.runs);
+      events = new Events(db, serviceId, auth, logger);
+      stopRunLogging = options.logger ? logRunChanges(db, logger) : () => {};
+      try { await runtime.recover({ start: false }); runtimeClosed = false; }
+      catch (error) { runtime.disposeUnstarted({ allowPreparedRecovery: true }); stopRunLogging(); throw error; }
+      const address = server.address();
+      if (address && typeof address !== 'string') db.prepare("INSERT INTO settings(key,value) VALUES('listener',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(listenerInfo(address, serviceId, instanceId)));
+    },
+    discardPrepared: () => { if (!runtimeClosed) { runtime.disposeUnstarted({ allowPreparedRecovery: true }); events.close(); stopRunLogging(); runtimeClosed = true; } },
+    resume: () => { void runtime.start().catch(error => restore.runtimeFailed(error)); },
+  });
+  if (restore.status.blocked) { runtime.disposeUnstarted(); runtimeClosed = true; }
   const server = createServer((request, response) => {
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Cache-Control", "no-store");
@@ -180,7 +213,8 @@ export function createService(
       requestId, method: request.method ?? 'UNKNOWN', statusCode: response.statusCode, durationMs: Math.round(performance.now() - startedAt),
     }));
     const send = (body: unknown) => response.end(JSON.stringify(body));
-    void (async () => {
+    const track = !restore.status.blocked && !['/health', '/v1/info', '/v1/maintenance', '/v1/events'].includes(request.url ?? '');
+    const work = (async () => {
       const address = server.address();
       if (
         !address ||
@@ -192,6 +226,22 @@ export function createService(
           "Host 请求头无效。",
         );
       const rawPath = request.url ?? "";
+      if (rawPath === '/v1/maintenance' || restore.status.blocked) {
+        const origin = request.headers.origin;
+        if (origin) { if (normalizeOrigin(origin) !== origin) throw new ServiceError('ORIGIN_DENIED', '网页来源无效。'); response.setHeader('Access-Control-Allow-Origin', origin); }
+        const protocol = request.headers['x-workgraph-protocol'];
+        if (protocol !== undefined && (typeof protocol !== 'string' || !isProtocolCompatible(protocol))) throw new ServiceError('PROTOCOL_INCOMPATIBLE', '客户端协议不兼容。');
+        if (request.headers['x-workgraph-service-id'] !== undefined && request.headers['x-workgraph-service-id'] !== serviceId) throw new ServiceError('SERVICE_MISMATCH', '工作空间身份不一致。');
+        if (request.method === 'OPTIONS') { response.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, PUT, OPTIONS'); response.setHeader('Access-Control-Allow-Headers', CORS_HEADERS.join(', ')); response.writeHead(204); response.end(); return; }
+        if (request.method === 'GET' && rawPath === '/v1/maintenance') { send(restore.status); return; }
+        if (request.method === 'GET' && rawPath === '/health') { send({ status: 'maintenance', version: SERVICE_VERSION, protocolVersion: PROTOCOL_VERSION, maintenance: restore.status }); return; }
+        if (request.method === 'GET' && rawPath === '/v1/info') { send({ ...info, maintenance: restore.status }); return; }
+        const replay = /^[/]v1[/]backups[/]([a-f0-9]{64})[/]restore$/.exec(rawPath);
+        if (replay && request.method === 'POST' && origin && typeof protocol === 'string' && request.headers['x-workgraph-service-id'] === serviceId && request.headers.authorization?.startsWith('Bearer ')) {
+          const body = await readJson(request); const state = restore.start(replay[1]!, body, undefined, request.headers.authorization.slice(7), origin); response.statusCode = 202; send(state); return;
+        }
+        restore.requireAvailable();
+      }
       if (await handleVisualizePreview(request, response, runtime.visualizePreviews)) return;
       const fileRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]files(?:[/](?:search|content|link-content|media|thumbnail|stat))?(?:[?]|$)/.test(rawPath);
       const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills(?:[/]search)?(?:[?]|$)/.test(rawPath) || /^[/]v1[/]agents[/][a-z][a-z0-9._-]*[/]skills(?:[?]|$)/.test(rawPath);
@@ -279,6 +329,7 @@ export function createService(
         const runtimeInfo=runtime.serviceInfo;
         send({
           ...info,
+          maintenance: restore.status,
           installation: await npmInstallation() ? 'npm-global' : await npxInstallation() ? 'npx' : 'other',
           imageRoutes:runtimeInfo.imageRoutes,
           capabilities: {
@@ -346,6 +397,17 @@ export function createService(
           "请提供 Authorization: Bearer 会话凭据。",
         );
       const token = authorization.slice(7);
+      const restoreRoute = /^[/]v1[/]backups[/]([a-f0-9]{64})[/](restore-preview|restore)$/.exec(path);
+      if (restoreRoute && request.method === 'POST') {
+        const principal = auth.withSession(token, origin, session => session.id);
+        if (origin === 'native:run') throw new ServiceError('HOST_DENIED', '运行会话不能恢复工作空间。');
+        const body = await readJson(request); auth.withSession(token, origin, () => undefined);
+        if (restoreRoute[2] === 'restore-preview') {
+          if (Object.keys(body).length) throw new ServiceError('INVALID_REQUEST', '恢复预览不接受额外字段。');
+          const preview = await restore.preview(restoreRoute[1]!, principal, token, origin); auth.withSession(token, origin, () => undefined); send(preview); return;
+        }
+        const result = restore.start(restoreRoute[1]!, body, principal, token, origin); response.statusCode = 202; send(result); return;
+      }
       const cliControl=await cliAuthorization.handle(request,path,token,origin);
       if(cliControl.handled){send(cliControl.body);return;}
       if(origin==='native:run'){
@@ -386,31 +448,34 @@ export function createService(
       }
       const business = await api.handle(request, fileRoute || skillsRoute || skillsManagementRoute ? rawPath : path, token, origin);
       if (business.handled) {
-        const body = auth.withSession(
-          token,
-          origin,
-          (current) =>
-            business.binary ?? (business.binaryParts ? undefined : events.decorate(business.body, current.id)),
-        );
-        if (business.status) response.statusCode = business.status;
-        for (const [key, value] of Object.entries(business.headers ?? {}))
-          response.setHeader(key, value);
-        if (business.binaryParts) {
-          const disconnected = new AbortController();
-          const abort = () => disconnected.abort();
-          response.once('close', abort);
-          try {
-            for (const part of business.binaryParts) {
-              for (let offset = 0; offset < part.length; offset += 1024 * 1024) {
-                if (!response.write(part.subarray(offset, offset + 1024 * 1024)))
-                  await once(response, 'drain', { signal: disconnected.signal });
+        try {
+          const body = auth.withSession(
+            token,
+            origin,
+            (current) =>
+              business.binary ?? (business.binaryParts || business.binaryStream ? undefined : events.decorate(business.body, current.id)),
+          );
+          if (business.status) response.statusCode = business.status;
+          for (const [key, value] of Object.entries(business.headers ?? {}))
+            response.setHeader(key, value);
+          if (business.binaryStream) await pipeline(business.binaryStream, response);
+          else if (business.binaryParts) {
+            const disconnected = new AbortController();
+            const abort = () => disconnected.abort();
+            response.once('close', abort);
+            try {
+              for (const part of business.binaryParts) {
+                for (let offset = 0; offset < part.length; offset += 1024 * 1024) {
+                  if (!response.write(part.subarray(offset, offset + 1024 * 1024)))
+                    await once(response, 'drain', { signal: disconnected.signal });
+                }
               }
-            }
-            response.end();
-          } finally { response.off('close', abort); }
-        }
-        else if (business.binary) response.end(body);
-        else send(body);
+              response.end();
+            } finally { response.off('close', abort); }
+          }
+          else if (business.binary) response.end(body);
+          else send(body);
+        } finally { await business.dispose?.(); }
         return;
       }
       // Authenticate before reading request data; recheck after the asynchronous body read.
@@ -540,8 +605,10 @@ export function createService(
         response.writeHead(204);
         response.end();
       } else send(result);
-    })().catch((error) => {
-      logger.write(error instanceof ServiceError ? 'warn' : 'error', 'http.failed', { requestId, code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR' });
+    })();
+    if (track) inFlight.add(work);
+    void work.catch((error) => {
+      logger.write(error instanceof ServiceError ? 'warn' : 'error', 'http.failed', { requestId, code: error instanceof ServiceError ? error.code : 'INTERNAL_ERROR', ...errorLogFields(error) });
       if (response.destroyed || response.writableEnded) return;
       const code: ErrorCode =
         error instanceof ServiceError ? error.code : "INTERNAL_ERROR";
@@ -578,7 +645,7 @@ export function createService(
       response.writeHead(HTTP_STATUS[code] ?? projectStatus[code] ?? 500);
       send(body);
       request.resume();
-    });
+    }).finally(() => { inFlight.delete(work); });
   });
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
@@ -616,8 +683,8 @@ export function createService(
   }
   function close(): Promise<void> {
     closing ??= (async () => {
-      await runtime.drain();
-      runtime.close();
+      await restore.settled().catch(() => {});
+      if (!runtimeClosed) { await runtime.drain(); runtime.close(); }
       projectProbe.close();
       events.close();
       try {
@@ -637,11 +704,12 @@ export function createService(
     db,
     directories,
     info,
-    auth,
-    projects,
-    api,
-    events,
-    runtime,
+    get auth() { return auth; },
+    get projects() { return projects; },
+    get api() { return api; },
+    get events() { return events; },
+    get runtime() { return runtime; },
+    restore,
     instanceId,
     close,
     abortStartup,

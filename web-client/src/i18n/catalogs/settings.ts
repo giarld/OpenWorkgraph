@@ -1,0 +1,32 @@
+import { zhCN } from '../messages';
+
+export const settingsZhCN: Record<string, string> = {
+  'Settings': '设置',
+  'Close settings': '关闭设置',
+  'Settings categories': '设置分类',
+  'General': '通用',
+  'Appearance and language': '外观与语言',
+  'Theme': '主题',
+  'Dark': '深色',
+  'Light': '浅色',
+  'Language': '语言',
+  'Follow system': '跟随系统',
+  'Workspace': '工作空间',
+  'Workspaces': '工作空间列表',
+  'Select Workspace': '选择工作空间',
+  'Search Workspaces': '搜索工作空间',
+  'No matching Workspaces': '没有匹配的工作空间',
+  'Select a Workspace to configure': '选择要设置的工作空间',
+  'Projects': '项目',
+  'Image generation': '图像生成',
+  'Import and export': '导入与导出',
+  'Storage': '存储',
+  'Backups and restore': '备份与恢复',
+  'Connections and sessions': '连接与会话',
+  'Discard unsaved changes': '放弃未保存的更改',
+  'Discard unsaved changes and continue?': '放弃未保存的更改并继续？',
+  'Disconnect Workspace': '断开工作空间',
+  'Disconnect “{name}” from this browser?': '从此浏览器断开“{name}”？',
+  'Pair again': '重新配对',
+};
+Object.assign(zhCN, settingsZhCN);

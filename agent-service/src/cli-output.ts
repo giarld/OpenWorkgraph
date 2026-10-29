@@ -1,16 +1,25 @@
 import { ServiceError } from './errors.js';
 
 const fields: Record<string, string> = {
+  deleted: 'Deleted',
   connectedClients: 'Connected clients',
   acceptedTasksUnaffected: 'Accepted tasks unaffected', activeRuns: 'Active runs', available: 'Available', backupId: 'Backup ID', browserName: 'Client name', bytes: 'Size', capacity: 'Capacity', code: 'Pairing code', createdAt: 'Created at', current: 'Current session', currentVersion: 'Current version', endpoints: 'Runtime endpoints', event: 'Event', expiresAt: 'Expires at', fingerprint: 'Public key fingerprint SHA-256', id: 'ID', instanceId: 'Instance ID', integrity: 'Integrity', invalidatesAllSessions: 'Invalidates all sessions', lastUsedAt: 'Last used at', latestVersion: 'Latest version', listenHost: 'Listen address', localEndpoint: 'Local endpoint', location: 'Storage location', mode: 'Mode', occupied: 'Occupied', origin: 'Web origin', output: 'Output file', packageName: 'Package', pairedAt: 'Paired at', pairingCommand: 'Pairing command', pausesQueuedRuns: 'Pauses queued runs', pluginId: 'Plugin ID', registered: 'Registered', requiresMaintenance: 'Requires maintenance', restarted: 'Runtime restarted', restored: 'Restored', revoked: 'Revoked session', schemaVersion: 'Schema version', serviceId: 'Runtime ID', sha256: 'SHA-256', state: 'State', time: 'Time', typeId: 'Type ID', updateAvailable: 'Update available', updated: 'Package updated', version: 'Version',
 };
 const titles: Record<string, string> = {
+  'backup delete': 'Backup deleted',
   'backup create': 'Backup created', 'backup download': 'Backup downloaded', 'backup list': 'Backups', capacity: 'Runtime capacity', logs: 'Runtime logs', 'plugin register': 'Plugin registered', restart: 'Runtime restarted', 'restore apply': 'Backup restored', 'restore preview': 'Restore preview', 'revoke-session': 'Session revoked', sessions: 'Client sessions', start: 'Runtime started', status: 'Runtime status', stop: 'Runtime stopping', update: 'Runtime update',
 };
 const states: Record<string, string> = { active: 'Active', creating: 'Creating', draining: 'Draining', expired: 'Expired', failed: 'Failed', interrupting: 'Interrupting', ready: 'Ready', running: 'Running' };
 const events: Record<string, string> = { backup_failed: 'Backup failed', backup_ready: 'Backup ready', draining: 'Draining started', interrupting: 'Interrupting', restored: 'Restored', shutdown_failed: 'Shutdown failed', started: 'Started', startup_failed: 'Startup failed', stopped: 'Stopped' };
 const values: Record<string, string> = { pairing: 'Waiting for client pairing', verified: 'Verified' };
 const translatedErrors = new Map<string, string>([
+  ['备份正在删除，请稍后重试。', 'The backup is being deleted. Try again later.'],
+  ['备份已删除，请使用新请求创建备份。', 'The backup was deleted. Create a backup with a new request.'],
+  ['备份标识无效。', 'The backup ID is invalid.'],
+  ['备份正在创建，请完成后再删除。', 'The backup is being created. Wait for it to finish before deleting it.'],
+  ['备份正在准备下载，请稍后重试删除。', 'The backup is being prepared for download. Try deleting it again later.'],
+  ['备份目录记录不匹配。', 'The backup directory does not match its catalogue record.'],
+  ['备份路径不是目录。', 'The backup path is not a directory.'],
   ['Unknown command; use --help', 'Unknown command. Use --help to see available commands.'],
   ['Port must be an integer from 0 to 65535', 'Port must be an integer from 0 to 65535.'],
   ['Unexpected arguments', 'Unexpected arguments. Use --help for command syntax.'],

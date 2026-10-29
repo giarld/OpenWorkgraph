@@ -1,0 +1,5 @@
+.backup-restore-dialog h3 { margin: 0 0 12px; }
+.backup-restore-dialog p + p { margin-top: 12px; }
+.backup-restore-dialog label { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; font-size: 14px; }
+.backup-restore-dialog input { width: 100%; box-sizing: border-box; min-height: 40px; padding: 8px 12px; background: var(--panel); color: var(--text); border: 1px solid var(--stroke); border-radius: 8px; }
+.backup-restore-dialog input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

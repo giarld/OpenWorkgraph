@@ -13,6 +13,7 @@ import type {
   ClientPairingStatus,
   PairResponse,
   ServiceInfo,
+  WorkspaceMaintenance,
   Session,
 } from "../../../packages/protocol/src/index";
 
@@ -198,6 +199,12 @@ export class ConnectionRegistry {
   }
   list(): Connection[] {
     return [...this.rows.keys()].map((id) => this.get(id)!);
+  }
+  setMaintenance(serviceId: string, status: WorkspaceMaintenance): void {
+    const row = this.rows.get(serviceId);
+    if (!row || JSON.stringify(row.info.maintenance) === JSON.stringify(status)) return;
+    row.info = { ...row.info, maintenance: structuredClone(status) };
+    this.emit();
   }
   lease(serviceId: string): ConnectionLease {
     const row = this.rows.get(serviceId);

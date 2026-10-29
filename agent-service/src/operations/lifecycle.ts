@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { atomicJson, digest, privateDir, readSafe, safePath, normalizeSystemPath } from './files.js';
 
 export interface InstanceRecord { instanceId: string; serviceId: string; token: string; port: number; pid: number; startedAt: string }
-export type ManagementCommand = 'status' | 'stop' | 'interrupt-and-stop' | 'pair-code' | 'pair-client' | 'resolve-client' | 'pair-short' | 'sessions' | 'revoke-session' | 'backup-create' | 'capacity' | 'plugin-register' | 'native-session';
+export type ManagementCommand = 'status' | 'stop' | 'interrupt-and-stop' | 'pair-code' | 'pair-client' | 'resolve-client' | 'pair-short' | 'sessions' | 'revoke-session' | 'backup-create' | 'backup-delete' | 'capacity' | 'plugin-register' | 'native-session';
 export type ManagementHandler = (command: ManagementCommand, argument?: string) => Promise<unknown>;
 export function rootPath(dataDir?: string): string { return normalizeSystemPath(dataDir ?? join(homedir(), '.openworkgraph')); }
 export function managementPort(root: string): number { return 20000 + Number.parseInt(digest(root).slice(0, 8), 16) % 40000; }
@@ -35,7 +35,7 @@ export async function acquireOperationsLock(dataDir?: string) {
       void (async () => {
         const request = JSON.parse(input.slice(0, input.indexOf('\n'))) as Record<string, unknown>;
         if (!handler || !equal(request.token, record.token) || request.instanceId !== record.instanceId || request.serviceId !== record.serviceId) throw new Error('Unauthenticated instance');
-        if (!['status', 'stop', 'interrupt-and-stop', 'pair-code', 'pair-client', 'resolve-client', 'pair-short', 'sessions', 'revoke-session', 'backup-create', 'capacity', 'plugin-register', 'native-session'].includes(String(request.command))) throw new Error('Unsupported local command');
+        if (!['status', 'stop', 'interrupt-and-stop', 'pair-code', 'pair-client', 'resolve-client', 'pair-short', 'sessions', 'revoke-session', 'backup-create', 'backup-delete', 'capacity', 'plugin-register', 'native-session'].includes(String(request.command))) throw new Error('Unsupported local command');
         if (request.argument !== undefined && typeof request.argument !== 'string') throw new Error('Invalid argument');
         socket.setTimeout(0);
         const result = await handler(request.command as ManagementCommand, request.argument as string | undefined);
@@ -71,7 +71,7 @@ export async function requestInstance(record: InstanceRecord, command: Managemen
   return new Promise((done, reject) => {
     const socket = createConnection({ host: '127.0.0.1', port: record.port });
     let input = ''; let complete = false;
-    socket.setTimeout(command === 'backup-create' ? 300000 : 3000, () => socket.destroy(new Error('Local management timed out')));
+    socket.setTimeout(command === 'backup-create' || command === 'backup-delete' ? 300000 : 3000, () => socket.destroy(new Error('Local management timed out')));
     socket.once('error', reject);
     socket.once('connect', () => socket.write(JSON.stringify({ ...record, command, argument }) + '\n'));
     socket.on('data', chunk => {

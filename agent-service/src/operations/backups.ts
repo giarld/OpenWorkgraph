@@ -1,29 +1,41 @@
-import { DatabaseSync, backup } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
+import { replaceDatabase } from './replace-database.js';
 import { randomUUID } from 'node:crypto';
 import { join, sep } from 'node:path';
-import { lstat, mkdtemp, rename, rm, realpath, open } from 'node:fs/promises';
+import { lstat, mkdtemp, rename, rm, realpath, open, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import type { Backup, RestorePreview } from '@openworkgraph/protocol';
+import { SERVICE_VERSION } from '@openworkgraph/protocol';
 import type { DataDirectories } from '../directories.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../persistence/schema.js';
 import { atomic, migrate, transaction } from '../persistence/database.js';
 import { Repositories } from '../persistence/repositories.js';
-import { digest, identifier, privateDir, readSafe, safePath, syncDir, writeNew } from './files.js';
+import { digest, identifier, privateDir, readSafe, safePath, syncDir } from './files.js';
 import type { OperationsLock } from './lifecycle.js';
 import { createDatabaseSnapshot } from './snapshot.js';
 import { ServiceError } from '../errors.js';
+import { errorLogFields, silentLogger, type Logger } from '../logger.js';
+import { backupFileChunks, copyBackupFile, hashBackupFile, writeBackupFile } from './backup-files.js';
+import { BACKUP_DATABASE_FILE, BACKUP_ZIP_FILE, createBackupArchive, decodeBackupArchive, validBackupFile } from './backup-archive.js';
+import { compareSemVer } from './update.js';
+import { Readable } from 'node:stream';
+import { finished } from 'node:stream/promises';
 
 export interface BackupOptions {
+  logger?: Logger;
   /** Host excludes ALL blob GC until copies finish, including queued deletions. */
   withBlobLease?: <T>(work: () => Promise<T>) => Promise<T>;
   /** Offline caller holds the same lock used by serve until DB closes. */
   maintenance?: OperationsLock;
 }
 interface FileEntry { path: string; sha256: string; bytes: number }
-interface Manifest { format: 1; id: string; serviceId: string; schemaVersion: number; createdAt: string; files: FileEntry[]; localStateOmitted?: true }
-interface Verified { manifest: Manifest; sha256: string; bytes: number; files: Map<string, Buffer> }
-const MAX_ARCHIVE = 512 * 1024 * 1024;
-const pendingBackups = new WeakMap<DatabaseSync, Set<Promise<Backup>>>();
+interface Manifest { format: 2; id: string; serviceId: string; serviceVersion: string; schemaVersion: number; createdAt: string; files: FileEntry[]; localStateOmitted: true }
+interface Verified { manifest: Manifest; sha256: string; bytes: number; archive: string; files: Map<string, string>; directory: string; dispose: () => Promise<void> }
+export interface BackupDownload { filename: string; contentType: string; bytes: number; body: Readable; dispose: () => Promise<void> }
+interface BackupDeletion { backupId: string; deleted: true }
+const pendingBackups = new WeakMap<DatabaseSync, Set<Promise<unknown>>>();
+const pendingDeletions = new WeakMap<DatabaseSync, Map<string, Promise<BackupDeletion>>>();
+const preparingDownloads = new WeakMap<DatabaseSync, Map<string, number>>();
 export async function waitForBackups(db: DatabaseSync): Promise<void> {
   while (pendingBackups.get(db)?.size) await Promise.allSettled([...pendingBackups.get(db)!]);
 }
@@ -35,7 +47,6 @@ export function clearStaleResourceLeases(db: DatabaseSync, lock: OperationsLock)
     for (const table of ['resource_read_leases', 'resource_maintenance_leases']) if (hasTable(db, table)) db.exec('DELETE FROM ' + table);
   });
 }
-const validFile = (path: string): boolean => path === 'service.sqlite' || /^blobs[/][a-f0-9]{64}$/.test(path);
 const hasTable = (db: DatabaseSync, name: string): boolean => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 const localSettingNames = new Set(['executionSettings', 'agentDefault', 'listener', 'operationsInstance', 'backupRestorePending']);
 const privateFieldNames = new Set(['env', 'environment', 'secret', 'secrets', 'credential', 'credentials', 'password', 'token', 'tokenhash', 'apikey', 'accesskey', 'privatekey', 'authorization', 'cookie', 'executable', 'argv', 'args', 'cwd', 'launch', 'launcher', 'session']);
@@ -108,56 +119,72 @@ function checkDatabase(db: DatabaseSync, manifest: Manifest, schema?: string, up
   if(!upgraded && schema!==undefined && schemaSignature(db)!==(version===SCHEMA_VERSION?schema:historicalSchema(version)))throw new Error('Backup schema differs from trusted local schema');
   if (db.prepare('PRAGMA integrity_check').get()!.integrity_check !== 'ok' || db.prepare('PRAGMA foreign_key_check').get()) throw new Error('Backup database failed integrity checks');
   if (identity(db) !== manifest.serviceId) throw new Error('Backup identity mismatch');
-  const expected = new Map(manifest.files.filter(f => f.path !== 'service.sqlite').map(f => [f.path.slice(6), f]));
+  const expected = new Map(manifest.files.filter(f => f.path !== BACKUP_DATABASE_FILE).map(f => [f.path.slice(6), f]));
   const rows = db.prepare('SELECT sha256,bytes FROM blobs').all();
   if (rows.length !== expected.size || rows.some(row => expected.get(String(row.sha256))?.bytes !== Number(row.bytes))) throw new Error('Manifest does not cover database blobs exactly');
   for (const name of ['sessions', 'pairing_codes', 'settings', 'runs', 'backups', 'occupancy', 'interactions']) if (!hasTable(db, name)) throw new Error('Incomplete backup schema');
 }
-async function withTemporaryDatabase<T>(bytes: Buffer, work: (db: DatabaseSync) => Promise<T>): Promise<T> {
+async function withTemporaryDatabase<T>(source: string, work: (db: DatabaseSync) => Promise<T>): Promise<T> {
   const temporary = await mkdtemp(join(await realpath(tmpdir()), 'workgraph-verify-'));
   try {
-    const path = join(temporary, 'service.sqlite'); await writeNew(path, bytes, 0o600);
+    const path = join(temporary, 'service.sqlite'); await copyBackupFile(source, path, 0o600);
     const db = new DatabaseSync(path, { allowExtension: false });
     try { db.exec('PRAGMA trusted_schema=OFF'); return await work(db); } finally { db.close(); }
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 async function verify(path: string, expectedHash?: string, schema?: string): Promise<Verified> {
-  const source = await safePath(path); const files = new Map<string, Buffer>();
-  let manifestBytes: Buffer;
-  let archive: { format: unknown; manifest: string; files: Record<string, string> } | undefined;
-  if ((await lstat(source)).isDirectory()) manifestBytes = await readSafe(join(source, 'manifest.json'), 8 * 1024 * 1024);
-  else {
-    archive = JSON.parse((await readSafe(source, MAX_ARCHIVE)).toString()) as typeof archive;
-    if (!archive || archive.format !== 'openworkgraph-backup-1' || typeof archive.manifest !== 'string' || !archive.files || typeof archive.files !== 'object' || Array.isArray(archive.files)) throw new Error('Invalid backup download');
-    manifestBytes = Buffer.from(archive.manifest, 'base64');
-  }
-  const hash = digest(manifestBytes);
-  if (expectedHash !== undefined && hash !== expectedHash) throw new Error('Backup manifest checksum mismatch');
-  const manifest = JSON.parse(manifestBytes.toString()) as Manifest;
-  if (manifest.format !== 1 || !Array.isArray(manifest.files) || typeof manifest.serviceId !== 'string' || typeof manifest.createdAt !== 'string' || !Number.isInteger(manifest.schemaVersion) || (manifest.localStateOmitted !== undefined && manifest.localStateOmitted !== true)) throw new Error('Invalid backup manifest');
-  identifier(manifest.id); let total = manifestBytes.length;
-  for (const entry of manifest.files) {
-    if (!entry || typeof entry.path !== 'string' || !validFile(entry.path) || files.has(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Unsafe backup manifest entry');
-    total += entry.bytes; if (total > MAX_ARCHIVE) throw new Error('Backup exceeds verification limit');
-    const encoded = archive?.files[entry.path];
-    if (archive && typeof encoded !== 'string') throw new Error('Missing backup file');
-    const bytes = archive ? Buffer.from(encoded!, 'base64') : await readSafe(join(source, entry.path), entry.bytes);
-    if (bytes.length !== entry.bytes || digest(bytes) !== entry.sha256 || (entry.path.startsWith('blobs/') && entry.sha256 !== entry.path.slice(6))) throw new Error('Backup content checksum mismatch');
-    files.set(entry.path, bytes);
-  }
-  if (!files.has('service.sqlite') || (archive && Object.keys(archive.files).length !== files.size)) throw new Error('Incomplete or extra backup content');
-  await withTemporaryDatabase(files.get('service.sqlite')!, async db => {
-    checkDatabase(db,manifest,schema);
-    if(manifest.schemaVersion<SCHEMA_VERSION){migrate(db);checkDatabase(db,manifest,undefined,true);}
-  });
-  return { manifest, sha256: hash, bytes: total, files };
+  const source = await safePath(path), files = new Map<string, string>();
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'workgraph-backup-verify-'));
+  const dispose = () => rm(directory, { recursive: true, force: true, maxRetries: 5 });
+  try {
+    await privateDir(join(directory, 'blobs')); await privateDir(join(directory, 'database'));
+    const archive = join(directory, 'verified.zip');
+    const sourceZip = (await lstat(source)).isDirectory() ? join(source, BACKUP_ZIP_FILE) : source;
+    const copiedZip = await copyBackupFile(sourceZip, archive, 0o600);
+    let archived: Set<string>;
+    try { archived = await decodeBackupArchive(archive, directory); }
+    catch (cause) { throw new ServiceError('INVALID_REQUEST', '备份 ZIP 无效或已损坏；仅支持当前 ZIP 备份格式。', { cause }); }
+    const manifestBytes = await readSafe(join(directory, 'manifest.json'), Infinity);
+    const hash = digest(manifestBytes);
+    if (expectedHash !== undefined && hash !== expectedHash) throw new Error('Backup manifest checksum mismatch');
+    const manifest = JSON.parse(manifestBytes.toString()) as Manifest;
+    if (manifest.format !== 2 || !Array.isArray(manifest.files) || typeof manifest.serviceId !== 'string' || typeof manifest.serviceVersion !== 'string' || typeof manifest.createdAt !== 'string' || !Number.isInteger(manifest.schemaVersion) || manifest.localStateOmitted !== true) throw new ServiceError('INVALID_REQUEST', '备份清单无效；不支持旧备份格式。');
+    let newer: boolean;
+    try { newer = compareSemVer(manifest.serviceVersion, SERVICE_VERSION) > 0; }
+    catch (cause) { throw new ServiceError('INVALID_REQUEST', '备份中的工作空间版本无效。', { cause }); }
+    if (newer || manifest.schemaVersion > SCHEMA_VERSION) throw new ServiceError('SCHEMA_UNSUPPORTED', '备份来自更新版本的工作空间，请先升级当前工作空间。');
+    identifier(manifest.id);
+    for (const entry of manifest.files) {
+      if (!entry || typeof entry.path !== 'string' || !validBackupFile(entry.path) || files.has(entry.path) || !/^[a-f0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Unsafe backup manifest entry');
+      if (archived && !archived.has(entry.path)) throw new Error('Missing backup file');
+      const target = join(directory, entry.path);
+      const actual = await hashBackupFile(target);
+      if (actual.bytes !== entry.bytes || actual.sha256 !== entry.sha256 || (entry.path.startsWith('blobs/') && entry.sha256 !== entry.path.slice(6))) throw new Error('Backup content checksum mismatch');
+      files.set(entry.path, target);
+    }
+    if (!files.has(BACKUP_DATABASE_FILE) || archived.size !== files.size) throw new Error('Incomplete or extra backup content');
+    await withTemporaryDatabase(files.get(BACKUP_DATABASE_FILE)!, async db => {
+      checkDatabase(db,manifest,schema);
+      if(manifest.schemaVersion<SCHEMA_VERSION){migrate(db);checkDatabase(db,manifest,undefined,true);}
+    });
+    return { manifest, sha256: hash, bytes: copiedZip.bytes, archive, files, directory, dispose };
+  } catch (error) { await dispose(); throw error; }
 }
 
-/** Only create/list/download may be wired to HTTP. Restore is local CLI only. */
+/** Online restore is coordinated by WorkspaceRestore under exclusive ownership. */
 export class Backups {
   constructor(readonly db: DatabaseSync, readonly directories: DataDirectories, readonly options: BackupOptions = {}) {}
+  private async diagnose<T>(operation: string, work: (progress: (stage: string, backupId?: string) => void) => Promise<T>, backupId?: string): Promise<T> {
+    let stage = 'validate';
+    try { return await work((value, id) => { stage = value; if (id) backupId = id; }); }
+    catch (error) { this.logFailure(operation, stage, error, backupId); throw error; }
+  }
+  private logFailure(operation: string, stage: string, error: unknown, backupId?: string): void {
+    (this.options.logger ?? silentLogger).write('error', 'backup.failed', { operation, stage, ...(backupId ? { backupId } : {}), ...errorLogFields(error) });
+  }
   /** Startup only, before HTTP/runtime dispatch, under exclusive service ownership.
-   * Reconcile committed directories only; incomplete staging is retained for diagnosis. */
+   * Repair interrupted/failed catalogue rows and discover committed archives lost
+   * by earlier restores. Incomplete staging is retained for diagnosis. */
   async recoverCreating(lock: OperationsLock): Promise<void> {
     const requireOwnership = () => {
       const file = this.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file;
@@ -165,21 +192,35 @@ export class Backups {
     };
     requireOwnership();
     const schema = schemaSignature(this.db), serviceId = identity(this.db);
-    for (const row of this.db.prepare("SELECT id,path,created_at FROM backups WHERE state='creating'").all()) {
+    const deleted = new Set(this.db.prepare("SELECT key FROM idempotency WHERE scope='backup.delete'").all().map(row => String(row.key)));
+    const known = new Set(this.db.prepare('SELECT id FROM backups').all().map(row => String(row.id)));
+    const rows: { id: string; state: Backup['state'] | null; path: string; createdAt: string | null; sha256: string | null }[] = this.db.prepare("SELECT id,state,path,created_at,sha256 FROM backups WHERE state IN ('creating','failed')").all().map(row => ({ id: String(row.id), state: row.state as Backup['state'], path: String(row.path), createdAt: String(row.created_at), sha256: row.sha256 === null ? null : String(row.sha256) }));
+    // An earlier restore may have lost catalogue rows for newer local archives.
+    // Only committed, ID-named directories are candidates; staging stays private.
+    for (const entry of await readdir(await safePath(this.directories.backups), { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink() && /^[a-f0-9]{64}$/.test(entry.name) && !known.has(entry.name) && !deleted.has(entry.name)) rows.push({ id: entry.name, state: null, path: join(this.directories.backups, entry.name), createdAt: null, sha256: null });
+    }
+    for (const row of rows) {
+      if (deleted.has(row.id)) continue;
       let recovered: Verified | undefined;
+      let candidate: Verified | undefined;
       try {
-        const id = identifier(String(row.id)), path = join(this.directories.backups, id);
+        const id = identifier(row.id), path = join(this.directories.backups, id);
         if (row.path !== path) throw new Error('Backup catalogue path mismatch');
-        const verified = await verify(path, undefined, schema);
-        if (verified.manifest.id !== id || verified.manifest.serviceId !== serviceId || verified.manifest.createdAt !== row.created_at) throw new Error('Backup catalogue identity mismatch');
+        const verified = candidate = await verify(path, row.sha256 ?? undefined, schema);
+        if (verified.manifest.id !== id || verified.manifest.serviceId !== serviceId || (row.createdAt !== null && verified.manifest.createdAt !== row.createdAt)) throw new Error('Backup catalogue identity mismatch');
         recovered = verified;
-      } catch { /* Missing/incomplete/invalid files cannot become downloadable. */ }
+      } catch (error) { this.logFailure('recover', 'verify', error, String(row.id)); }
+      finally { await candidate?.dispose(); }
       requireOwnership();
+      if (!recovered && row.state !== 'creating') continue;
       const state = recovered ? 'ready' : 'failed';
       atomic(this.db, () => {
-        if (this.db.prepare('SELECT state FROM backups WHERE id=?').get(row.id!)?.state !== 'creating') throw new Error('Backup changed during startup recovery');
-        this.change(String(row.id), state, () => {
-          this.db.prepare('UPDATE backups SET state=?,bytes=?,sha256=? WHERE id=?').run(state, recovered?.bytes ?? null, recovered?.sha256 ?? null, row.id!);
+        const current = this.db.prepare('SELECT state FROM backups WHERE id=?').get(row.id);
+        if (row.state === null ? current !== undefined : current?.state !== row.state) throw new Error('Backup changed during startup recovery');
+        this.change(row.id, state, () => {
+          if (row.state === null) this.db.prepare('INSERT INTO backups(id,state,created_at,bytes,sha256,path) VALUES(?,?,?,?,?,?)').run(row.id, state, recovered!.manifest.createdAt, recovered!.bytes, recovered!.sha256, row.path);
+          else this.db.prepare('UPDATE backups SET state=?,bytes=?,sha256=? WHERE id=?').run(state, recovered?.bytes ?? null, recovered?.sha256 ?? null, row.id);
         });
       });
     }
@@ -201,43 +242,100 @@ export class Backups {
     // directories.backups, never a client-provided location.
     return this.db.prepare('SELECT id,state,created_at,bytes,sha256,path FROM backups ORDER BY created_at DESC,id').all().map(row => ({ id: String(row.id), state: row.state as Backup['state'], createdAt: String(row.created_at), bytes: row.bytes === null ? null : Number(row.bytes), sha256: row.sha256 === null ? null : String(row.sha256), ...(typeof row.path === 'string' && row.path ? { location: row.path } : {}) }));
   }
+  private requireNotDeleted(id: string): void {
+    if (pendingDeletions.get(this.db)?.has(id)) throw new ServiceError('CONFLICT', '备份正在删除，请稍后重试。');
+    if (new Repositories(this.db).replay('backup.delete', id, { backupId: id })) throw new ServiceError('NOT_FOUND', '备份已删除，请使用新请求创建备份。', { details: { backupId: id, reason: 'backup_deleted' } });
+  }
+  async delete(id: string): Promise<BackupDeletion> {
+    let deletions = pendingDeletions.get(this.db);
+    if (!deletions) { deletions = new Map(); pendingDeletions.set(this.db, deletions); }
+    const previous = deletions.get(id); if (previous) return previous;
+    const operation = this.diagnose('delete', progress => this.deleteFiles(id, progress), id);
+    deletions.set(id, operation);
+    let pending = pendingBackups.get(this.db);
+    if (!pending) { pending = new Set(); pendingBackups.set(this.db, pending); }
+    pending.add(operation);
+    try { return await operation; } finally { pending.delete(operation); deletions.delete(id); }
+  }
+  private async deleteFiles(id: string, progress: (stage: string) => void): Promise<BackupDeletion> {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new ServiceError('INVALID_REQUEST', '备份标识无效。');
+    if (this.options.maintenance) this.requireMaintenance();
+    else if (!this.options.withBlobLease) throw new Error('Backup deletion requires the owning service or exclusive local maintenance');
+    const row = this.db.prepare('SELECT state,path FROM backups WHERE id=?').get(id);
+    if (row?.state === 'creating') throw new ServiceError('CONFLICT', '备份正在创建，请完成后再删除。');
+    if (preparingDownloads.get(this.db)?.get(id)) throw new ServiceError('CONFLICT', '备份正在准备下载，请稍后重试删除。');
+    const root = await realpath(await safePath(this.directories.backups));
+    if (row && row.path !== join(this.directories.backups, id)) throw new ServiceError('INVALID_REQUEST', '备份目录记录不匹配。');
+    try {
+      progress('remove_files');
+      const staging = new RegExp('^\\.' + id + '\\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$');
+      const targets: string[] = [];
+      for (const entry of await readdir(root, { withFileTypes: true })) {
+        if (entry.name !== id && !staging.test(entry.name)) continue;
+        // Validate all targets before removing any. Catalogue paths never
+        // select filesystem targets; only the validated ID under backups does.
+        const target = await safePath(join(root, entry.name));
+        if (!(await lstat(target)).isDirectory()) throw new ServiceError('INVALID_REQUEST', '备份路径不是目录。');
+        targets.push(target);
+      }
+      for (const target of targets) await rm(target, { recursive: true, force: true, maxRetries: 5 });
+      await syncDir(root);
+      progress('commit');
+      return new Repositories(this.db).idempotent('backup.delete', id, { backupId: id }, () => {
+        this.db.prepare('DELETE FROM backups WHERE id=?').run(id);
+        if (row) new Repositories(this.db).appendEvent({ eventId: randomUUID(), type: 'backup.changed', projectId: null, graphId: null, entityId: id, revision: 2, occurredAt: new Date().toISOString(), payload: { backupId: id, deleted: true } });
+        return { backupId: id, deleted: true };
+      }) as unknown as BackupDeletion;
+    } catch (error) {
+      if (row) {
+        try { this.change(id, 'failed', () => { this.db.prepare("UPDATE backups SET state='failed' WHERE id=?").run(id); }); }
+        catch (stateError) { this.logFailure('delete', 'mark_failed', stateError, id); }
+      }
+      throw error;
+    }
+  }
   async create(idempotencyKey: string = randomUUID()): Promise<Backup> {
     if (!this.options.maintenance && this.db.prepare("SELECT value FROM settings WHERE key='acceptingRuns'").get()?.value !== 'true') throw new ServiceError('MAINTENANCE', 'Service is draining; new backups are unavailable');
     let pending = pendingBackups.get(this.db);
     if (!pending) { pending = new Set(); pendingBackups.set(this.db, pending); }
-    const operation = this.createSnapshot(idempotencyKey); pending.add(operation);
+    const operation = this.diagnose('create', progress => this.createSnapshot(idempotencyKey, progress)); pending.add(operation);
     try { return await operation; } finally { pending.delete(operation); }
   }
-  private async createSnapshot(idempotencyKey: string): Promise<Backup> {
+  private async createSnapshot(idempotencyKey: string, progress: (stage: string, backupId?: string) => void): Promise<Backup> {
     identifier(idempotencyKey);
     const id = digest(identity(this.db) + ':' + idempotencyKey);
+    progress('catalogue', id);
+    this.requireNotDeleted(id);
     const old = (await this.list()).find(item => item.id === id); if (old) return old;
     const work = async (): Promise<Backup> => {
       // No asynchronous gap between the authoritative retry check and insert.
+      this.requireNotDeleted(id);
       const exists = this.db.prepare('SELECT 1 FROM backups WHERE id=?').get(id);
       if (exists) return (await this.list()).find(item => item.id === id)!;
       const createdAt = new Date().toISOString(); const final = join(this.directories.backups, id);
       const temporary = join(this.directories.backups, '.' + id + '.' + randomUUID());
       this.change(id, 'creating', () => { this.db.prepare("INSERT INTO backups(id,state,created_at,path) VALUES(?,'creating',?,?)").run(id, createdAt, final); });
       try {
-        await privateDir(temporary); await privateDir(join(temporary, 'blobs'));
-        const snapshot = join(temporary, 'service.sqlite');
+        progress('prepare');
+        await privateDir(temporary); await privateDir(join(temporary, 'blobs')); await privateDir(join(temporary, 'database'));
+        const snapshot = join(temporary, BACKUP_DATABASE_FILE);
         // One SQLite consistent snapshot including WAL, under host GC exclusion.
-        await createDatabaseSnapshot(this.directories.database, snapshot);
+        progress('snapshot'); await createDatabaseSnapshot(this.directories.database, snapshot);
         const portable = new DatabaseSync(snapshot, { allowExtension: false });
         try {
-          portableJournal(portable);
+          progress('sanitize'); portableJournal(portable);
           transaction(portable, () => omitLocalState(portable, Date.parse(createdAt)));
         } finally { portable.close(); }
         // Compact in the existing worker, so large VACUUMs do not block HTTP.
         // All SQLite handles close before replacing the file on Windows.
         const compacted = snapshot + '.portable';
-        await createDatabaseSnapshot(snapshot, compacted);
+        progress('compact'); await createDatabaseSnapshot(snapshot, compacted);
         await rename(compacted, snapshot);
         const copied = new DatabaseSync(snapshot, { readOnly: true, allowExtension: false });
         let total: number, manifestHash: string;
         try {
           const entries: FileEntry[] = [];
+          progress('copy_blobs');
           for (const row of copied.prepare('SELECT sha256,bytes FROM blobs ORDER BY sha256').all()) {
             const sha = String(row.sha256); if (!/^[a-f0-9]{64}$/.test(sha)) throw new Error('Invalid blob hash');
             const stored = hasTable(copied, 'resource_blob_files') ? copied.prepare('SELECT path FROM resource_blob_files WHERE sha256=?').get(sha) : undefined;
@@ -246,28 +344,29 @@ export class Backups {
             const sourcePath = await realpath(await safePath(String(stored.path)));
             const objects = await realpath(await safePath(join(this.directories.blobs, 'objects')));
             if (!sourcePath.startsWith(objects + sep) || !/^[a-f0-9-]{36}$/.test(sourcePath.slice(objects.length + 1))) throw new Error('Blob mapping escapes managed storage');
-            const bytes = await readSafe(sourcePath, Number(row.bytes));
-            if (bytes.length !== Number(row.bytes) || digest(bytes) !== sha) throw new Error('Source blob checksum mismatch');
-            await writeNew(join(temporary, 'blobs', sha), bytes); entries.push({ path: 'blobs/' + sha, sha256: sha, bytes: bytes.length });
+            const actual = await copyBackupFile(sourcePath, join(temporary, 'blobs', sha));
+            if (actual.bytes !== Number(row.bytes) || actual.sha256 !== sha) throw new Error('Source blob checksum mismatch');
+            entries.push({ path: 'blobs/' + sha, ...actual });
           }
-          const bytes = await readSafe(snapshot), file = await open(snapshot, 'r+');
+          progress('manifest');
+          const actual = await hashBackupFile(snapshot), file = await open(snapshot, 'r+');
           try { await file.sync(); await file.chmod(0o400); } finally { await file.close(); }
-          entries.unshift({ path: 'service.sqlite', bytes: bytes.length, sha256: digest(bytes) });
-          const manifest: Manifest = { format: 1, id, serviceId: identity(copied), schemaVersion: Number(copied.prepare('PRAGMA user_version').get()!.user_version), createdAt, files: entries, localStateOmitted: true };
+          entries.unshift({ path: BACKUP_DATABASE_FILE, ...actual });
+          const manifest: Manifest = { format: 2, id, serviceId: identity(copied), serviceVersion: SERVICE_VERSION, schemaVersion: Number(copied.prepare('PRAGMA user_version').get()!.user_version), createdAt, files: entries, localStateOmitted: true };
           checkDatabase(copied, manifest); const serialized = JSON.stringify(manifest);
-          const encodedBytes = 4 * Math.ceil(Buffer.byteLength(serialized) / 3) + entries.reduce((total, entry) => total + 4 * Math.ceil(entry.bytes / 3) + Buffer.byteLength(JSON.stringify(entry.path)) + 4, 0) + 128;
-          if (encodedBytes > MAX_ARCHIVE) throw new Error('Backup exceeds bounded portable archive limit');
-          await writeNew(join(temporary, 'manifest.json'), serialized);
-          await syncDir(join(temporary, 'blobs')); await syncDir(temporary);
-          total = entries.reduce((sum, file) => sum + file.bytes, Buffer.byteLength(serialized));
+          progress('compress');
+          total = await createBackupArchive(Buffer.from(serialized), new Map(entries.map(entry => [entry.path, join(temporary, entry.path)])), join(temporary, BACKUP_ZIP_FILE));
           manifestHash = digest(serialized);
         } finally { copied.close(); }
+        await rm(join(temporary, 'database'), { recursive: true, force: true, maxRetries: 5 });
+        await rm(join(temporary, 'blobs'), { recursive: true, force: true, maxRetries: 5 });
         // Windows refuses renaming a directory containing an open SQLite file.
-        await rename(temporary, final); await syncDir(this.directories.backups);
+        progress('commit'); await rename(temporary, final); await syncDir(this.directories.backups);
         this.change(id, 'ready', () => { this.db.prepare("UPDATE backups SET state='ready',bytes=?,sha256=? WHERE id=?").run(total, manifestHash, id); });
         return (await this.list()).find(item => item.id === id)!;
       } catch (error) {
-        this.change(id, 'failed', () => { this.db.prepare("UPDATE backups SET state='failed' WHERE id=?").run(id); });
+        try { this.change(id, 'failed', () => { this.db.prepare("UPDATE backups SET state='failed' WHERE id=?").run(id); }); }
+        catch (stateError) { this.logFailure('create', 'mark_failed', stateError, id); }
         // No automatic cleanup; incomplete dirs are never downloadable.
         throw error;
       }
@@ -277,90 +376,133 @@ export class Backups {
     return this.options.withBlobLease(work);
   }
   async readDownload(id: string): Promise<{ filename: string; contentType: string; body: Buffer }> {
+    // Convenience for existing in-process consumers. HTTP and CLI use the
+    // streaming path below and never collect the complete archive in memory.
+    const download = await this.openDownload(id);
+    try { return { filename: download.filename, contentType: download.contentType, body: Buffer.concat(await download.body.toArray()) }; }
+    finally { await download.dispose(); }
+  }
+  async writeDownload(id: string, destination: string): Promise<number> {
+    const download = await this.openDownload(id);
+    try {
+      return await this.diagnose('download', async progress => {
+        progress('write_output'); return writeBackupFile(destination, download.body);
+      }, id);
+    } finally { await download.dispose(); }
+  }
+  async openDownload(id: string): Promise<BackupDownload> {
+    return this.diagnose('download', async progress => {
+      this.requireNotDeleted(id);
+      let downloads = preparingDownloads.get(this.db);
+      if (!downloads) { downloads = new Map(); preparingDownloads.set(this.db, downloads); }
+      downloads.set(id, (downloads.get(id) ?? 0) + 1);
+      try { return await this.prepareDownload(id, progress); }
+      finally { const count = downloads.get(id)! - 1; if (count) downloads.set(id, count); else downloads.delete(id); }
+    }, id);
+  }
+  private async prepareDownload(id: string, progress: (stage: string) => void): Promise<BackupDownload> {
     identifier(id); const record = (await this.list()).find(item => item.id === id);
     if (!record || record.state !== 'ready' || !record.sha256) throw new Error('Backup is not ready');
-    const path = join(this.directories.backups, id), verified = await verify(path, record.sha256, schemaSignature(this.db));
-    let manifest = await readSafe(join(path, 'manifest.json'));
-    // Old ready backups remain immutable on disk. Export a sanitized copy and
-    // its own manifest/checksum; restore preview authenticates that exact export.
-    const original = verified.files.get('service.sqlite')!;
-    const sanitized = await withTemporaryDatabase(original, async db => {
-      portableJournal(db);
-      const changed = transaction(db, () => omitLocalState(db, Date.parse(verified.manifest.createdAt) || 1));
-      if (!changed && verified.manifest.localStateOmitted) return original;
-      const file = db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')!.file;
-      const compacted = String(file) + '.portable';
-      await createDatabaseSnapshot(String(file), compacted);
-      return readSafe(compacted);
-    });
-    if (sanitized !== original) {
-      verified.files.set('service.sqlite', sanitized);
-      manifest = Buffer.from(JSON.stringify({ ...verified.manifest, localStateOmitted: true, files: verified.manifest.files.map(entry => entry.path === 'service.sqlite' ? { path: entry.path, bytes: sanitized.length, sha256: digest(sanitized) } : entry) }));
-    }
-    const body = Buffer.from(JSON.stringify({ format: 'openworkgraph-backup-1', manifest: manifest.toString('base64'), files: Object.fromEntries([...verified.files].map(([name, bytes]) => [name, bytes.toString('base64')])) }));
-    if (body.length > MAX_ARCHIVE) throw new Error('Download exceeds bounded archive limit');
-    return { filename: id + '.owg-backup', contentType: 'application/vnd.openworkgraph.backup+json', body };
+    progress('verify');
+    const verified = await verify(join(this.directories.backups, id), record.sha256, schemaSignature(this.db));
+    let disposed: Promise<void> | undefined;
+    const cleanup = () => disposed ??= verified.dispose();
+    const owner = this;
+    const chunks = async function* () {
+      try { yield* backupFileChunks(verified.archive); }
+      catch (error) { owner.logFailure('download', 'stream', error, id); throw error; }
+      finally { await cleanup(); }
+    };
+    const body = Readable.from(chunks(), { objectMode: false });
+    body.once('close', () => { void cleanup().catch(error => this.logFailure('download', 'cleanup', error, id)); });
+    return { filename: id + '.owg-backup.zip', contentType: 'application/zip', bytes: verified.bytes, body, dispose: async () => {
+      const stopped = finished(body, { cleanup: true }); body.destroy();
+      await stopped.catch(() => undefined); await cleanup();
+    } };
   }
   async previewRestore(path: string): Promise<RestorePreview & { sha256: string; serviceId: string }> {
-    const verified = await verify(path, undefined, schemaSignature(this.db));
-    if (verified.manifest.serviceId !== identity(this.db)) throw new Error('Restore cannot replace another service identity');
-    return { backupId: verified.manifest.id, integrity: 'verified', requiresMaintenance: true, invalidatesAllSessions: true, pausesQueuedRuns: true, sha256: verified.sha256, serviceId: verified.manifest.serviceId };
+    return this.diagnose('preview_restore', async progress => {
+      progress('verify'); const verified = await verify(path, undefined, schemaSignature(this.db));
+      try {
+        progress('identity', verified.manifest.id);
+        if (verified.manifest.serviceId !== identity(this.db)) throw new Error('Restore cannot replace another service identity');
+        return { serviceVersion: verified.manifest.serviceVersion, schemaVersion: verified.manifest.schemaVersion, targetServiceVersion: SERVICE_VERSION, targetSchemaVersion: SCHEMA_VERSION, requiresUpgrade: verified.manifest.schemaVersion < SCHEMA_VERSION, backupId: verified.manifest.id, integrity: 'verified', requiresMaintenance: true, invalidatesAllSessions: true, pausesQueuedRuns: true, sha256: verified.sha256, serviceId: verified.manifest.serviceId };
+      } finally { await verified.dispose(); }
+    });
   }
   async restore(path: string, expectedSha256: string): Promise<void> {
+    return this.diagnose('restore', progress => this.restoreVerified(path, expectedSha256, progress));
+  }
+  private async restoreVerified(path: string, expectedSha256: string, progress: (stage: string, backupId?: string) => void): Promise<void> {
     this.requireMaintenance();
     if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error('Restore requires preview manifest checksum');
     // Complete integrity/schema/blob validation BEFORE live storage writes.
-    // Retain verified bytes; never reopen untrusted input after validation.
-    const verified = await verify(path, expectedSha256, schemaSignature(this.db));
-    if (verified.manifest.serviceId !== identity(this.db)) throw new Error('Restore cannot replace another service identity');
-    await withTemporaryDatabase(verified.files.get('service.sqlite')!, async restored => {
-      if(verified.manifest.schemaVersion<SCHEMA_VERSION)migrate(restored);
-      portableJournal(restored);
-      const mappings: [string, string][] = [];
-      await privateDir(join(this.directories.blobs, 'objects'));
-      for (const [name, bytes] of verified.files) {
-        if (name === 'service.sqlite') continue;
-        const destination = join(this.directories.blobs, 'objects', randomUUID());
-        await writeNew(destination, bytes); mappings.push([name.slice(6), destination]);
-      }
-      await syncDir(join(this.directories.blobs, 'objects'));
-      transaction(restored, () => {
-        // Also sanitize old archives that predate portable backup omission.
-        omitLocalState(restored, Date.now());
-        restored.exec("DELETE FROM pairing_codes; UPDATE interactions SET status='expired',version=version+1 WHERE status='pending'; DELETE FROM settings WHERE key IN ('listener','operationsInstance','backupRestorePending'); INSERT INTO settings(key,value) VALUES('backupRestorePending','true'); UPDATE settings SET value='true' WHERE key='acceptingRuns';");
-        restored.exec("UPDATE runs SET status=CASE WHEN status IN ('accepted','queued') THEN 'paused_restore' WHEN status IN ('agent_completed','finalizing') THEN 'finalizing' ELSE 'reconciling' END WHERE status NOT IN ('succeeded','failed','cancelled','interrupted','paused_restore');");
-        // Persisted backend completion is not backend uncertainty. Continue the
-        // local idempotent publication path from retained result/manifest; never
-        // ask a fresh unattached backend to reconcile or replay completed work.
-        // Unknown active work keeps capacity until reconciled. The scheduler
-        // reacquires one shared cross-runtime project lock for active executions.
-        // Never make an uncertain backend disappear merely by clearing occupancy.
-        restored.exec("DELETE FROM occupancy WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('reconciling','finalizing'));");
-        const slots = new Set(restored.prepare('SELECT slot FROM occupancy').all().map(row => Number(row.slot)));
-        for (const row of restored.prepare("SELECT id,kind,project_id FROM runs WHERE status IN ('reconciling','finalizing') AND id NOT IN (SELECT run_id FROM occupancy) ORDER BY sequence").all()) {
-          let slot = 0; while (slots.has(slot)) slot++; slots.add(slot);
-          restored.prepare('INSERT INTO occupancy(run_id,slot,project_id) VALUES(?,?,NULL)').run(String(row.id), slot);
+    // Retain isolated verified files; never reopen untrusted input after validation.
+    progress('verify'); const verified = await verify(path, expectedSha256, schemaSignature(this.db));
+    try {
+      progress('identity', verified.manifest.id);
+      if (verified.manifest.serviceId !== identity(this.db)) throw new Error('Restore cannot replace another service identity');
+      // Archive files belong to this installation, outside the restored business
+      // snapshot. Keep their current catalogue and deletion replay records.
+      const catalogue = this.db.prepare('SELECT id,state,created_at,bytes,sha256,path FROM backups').all();
+      const deletedBackups = this.db.prepare("SELECT key,request_hash,response,invalidated FROM idempotency WHERE scope='backup.delete'").all();
+      await withTemporaryDatabase(verified.files.get(BACKUP_DATABASE_FILE)!, async restored => {
+        progress('prepare_database');
+        if(verified.manifest.schemaVersion<SCHEMA_VERSION)migrate(restored);
+        portableJournal(restored);
+        const mappings: [string, string][] = [];
+        await privateDir(join(this.directories.blobs, 'objects'));
+        progress('restore_blobs');
+        for (const [name, source] of verified.files) {
+          if (name === BACKUP_DATABASE_FILE) continue;
+          const destination = join(this.directories.blobs, 'objects', randomUUID());
+          await copyBackupFile(source, destination); mappings.push([name.slice(6), destination]);
         }
-        if (hasTable(restored, 'run_runtime')) restored.prepare('UPDATE run_runtime SET epoch=?,revision=revision+1').run(randomUUID());
-        for (const table of ['resource_upload_chunks', 'resource_uploads', 'resource_file_deletions', 'resource_read_leases', 'resource_maintenance_leases']) if (hasTable(restored, table)) restored.exec('DELETE FROM ' + table);
-        if (hasTable(restored, 'resource_blob_files')) {
-          restored.exec('DELETE FROM resource_blob_files');
-          for (const [sha, file] of mappings) restored.prepare('INSERT INTO resource_blob_files(sha256,path) VALUES(?,?)').run(sha, file);
-        }
-        // Embedded catalogue rows may describe absent/incomplete directories.
-        for (const row of restored.prepare("SELECT id FROM backups WHERE state!='failed'").all()) {
-          const id = String(row.id); restored.prepare("UPDATE backups SET state='failed' WHERE id=?").run(id);
-          new Repositories(restored).appendEvent({ eventId: randomUUID(), type: 'backup.changed', projectId: null, graphId: null, entityId: id, revision: 2, occurredAt: new Date().toISOString(), payload: { backupId: id, state: 'failed', reason: 'restored_catalogue_requires_local_revalidation' } });
-        }
+        await syncDir(join(this.directories.blobs, 'objects'));
+        progress('restore_state'); transaction(restored, () => {
+          // Reapply local-state omission before installing the database.
+          omitLocalState(restored, Date.now());
+          restored.exec("DELETE FROM pairing_codes; UPDATE interactions SET status='expired',version=version+1 WHERE status='pending'; DELETE FROM settings WHERE key IN ('listener','operationsInstance','backupRestorePending'); INSERT INTO settings(key,value) VALUES('backupRestorePending','true'); UPDATE settings SET value='true' WHERE key='acceptingRuns';");
+          restored.exec("UPDATE runs SET status=CASE WHEN status IN ('accepted','queued') THEN 'paused_restore' WHEN status IN ('agent_completed','finalizing') THEN 'finalizing' ELSE 'reconciling' END WHERE status NOT IN ('succeeded','failed','cancelled','interrupted','paused_restore');");
+          // Persisted backend completion is not backend uncertainty. Continue the
+          // local idempotent publication path from retained result/manifest; never
+          // ask a fresh unattached backend to reconcile or replay completed work.
+          // Unknown active work keeps capacity until reconciled. The scheduler
+          // reacquires one shared cross-runtime project lock for active executions.
+          // Never make an uncertain backend disappear merely by clearing occupancy.
+          restored.exec("DELETE FROM occupancy WHERE run_id IN (SELECT id FROM runs WHERE status NOT IN ('reconciling','finalizing'));");
+          const slots = new Set(restored.prepare('SELECT slot FROM occupancy').all().map(row => Number(row.slot)));
+          for (const row of restored.prepare("SELECT id,kind,project_id FROM runs WHERE status IN ('reconciling','finalizing') AND id NOT IN (SELECT run_id FROM occupancy) ORDER BY sequence").all()) {
+            let slot = 0; while (slots.has(slot)) slot++; slots.add(slot);
+            restored.prepare('INSERT INTO occupancy(run_id,slot,project_id) VALUES(?,?,NULL)').run(String(row.id), slot);
+          }
+          if (hasTable(restored, 'run_runtime')) restored.prepare('UPDATE run_runtime SET epoch=?,revision=revision+1').run(randomUUID());
+          for (const table of ['resource_upload_chunks', 'resource_uploads', 'resource_file_deletions', 'resource_read_leases', 'resource_maintenance_leases']) if (hasTable(restored, table)) restored.exec('DELETE FROM ' + table);
+          if (hasTable(restored, 'resource_blob_files')) {
+            restored.exec('DELETE FROM resource_blob_files');
+            for (const [sha, file] of mappings) restored.prepare('INSERT INTO resource_blob_files(sha256,path) VALUES(?,?)').run(sha, file);
+          }
+          restored.exec("DELETE FROM backups; DELETE FROM idempotency WHERE scope='backup.delete';");
+          for (const row of deletedBackups) {
+            restored.prepare("INSERT INTO idempotency(scope,key,request_hash,response,invalidated) VALUES('backup.delete',?,?,?,?)").run(row.key!, row.request_hash!, row.response!, row.invalidated!);
+          }
+          const localBackups = new Backups(restored, this.directories);
+          for (const row of catalogue) {
+            const id = String(row.id);
+            localBackups.change(id, row.state as Backup['state'], () => {
+              restored.prepare('INSERT INTO backups(id,state,created_at,bytes,sha256,path) VALUES(?,?,?,?,?,?)').run(id, row.state!, row.created_at!, row.bytes!, row.sha256!, row.path!);
+            });
+          }
+        });
+        checkDatabase(restored, verified.manifest,undefined,true); this.requireMaintenance();
+        const source = String(restored.prepare('PRAGMA database_list').all().find(row => row.name === 'main')!.file), compacted = source + '.portable';
+        progress('compact'); await createDatabaseSnapshot(source, compacted);
+        // Replace only after checkpointing and closing the owned destination.
+        const portable = new DatabaseSync(compacted, { readOnly: true, allowExtension: false });
+        progress('apply_database'); try { await replaceDatabase(this.db, this.directories.database, portable); } finally { portable.close(); }
+        const checkpoint = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+        if (Number(checkpoint?.busy) !== 0) throw new Error('Restored backup could not clear the destination WAL');
       });
-      checkDatabase(restored, verified.manifest,undefined,true); this.requireMaintenance();
-      const source = String(restored.prepare('PRAGMA database_list').all().find(row => row.name === 'main')!.file), compacted = source + '.portable';
-      await createDatabaseSnapshot(source, compacted);
-      // SQLite replaces destination transactionally, not main-file rename over WAL.
-      const portable = new DatabaseSync(compacted, { readOnly: true, allowExtension: false });
-      try { await backup(portable, this.directories.database); } finally { portable.close(); }
-      const checkpoint = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-      if (Number(checkpoint?.busy) !== 0) throw new Error('Restored backup could not clear the destination WAL');
-    });
+    } finally { await verified.dispose(); }
   }
 }

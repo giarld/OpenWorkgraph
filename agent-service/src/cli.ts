@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { acquireOperationsLock, manage, readInstance, requestInstance, rootPath, startBackground, waitUntilStopped } from './operations/lifecycle.js';
 import { serveManaged } from './operations/daemon.js';
 import { OperationsLog } from './operations/logs.js';
-import { withOfflineBackups, withReadBackups } from './operations/local-admin.js';
-import { writeNew, readSafe } from './operations/files.js';
+import { previewBackupRestore, withOfflineBackups, withReadBackups } from './operations/local-admin.js';
+import { writeRestoreState } from './operations/restore-state.js';
+import { readSafe } from './operations/files.js';
 import { localCapacity } from './operations/capacity.js';
 import { registerLocalPlugin } from './operations/plugins.js';
 import { Repositories } from './persistence/repositories.js';
@@ -134,6 +135,13 @@ async function main() {
   }
   if (command === 'backup' || command === 'restore') {
     const action = positionals[1], path = positionals[2];
+    if (command === 'backup' && action === 'delete') {
+      if (!path || positionals.length !== 3) throw new ServiceError('INVALID_REQUEST', 'Use backup delete <BACKUP_ID>.');
+      let result: unknown;
+      try { result = await manage(dataDir, 'backup-delete', path); }
+      catch { result = await withOfflineBackups(dataDir, backups => backups.delete(path)); }
+      printOutput('backup delete', result, outputJson); return;
+    }
     if (command === 'backup' && action === 'create') {
       if (positionals.length !== 2) throw new Error('Unexpected backup arguments');
       // Online IPC is authenticated; on refusal, offline acquisition fails closed
@@ -143,15 +151,17 @@ async function main() {
       catch { result = await withOfflineBackups(dataDir, backups => backups.create(values['idempotency-key'])); }
       printOutput('backup create', result, outputJson); return;
     }
+    if (command === 'restore' && action === 'preview' && path && positionals.length === 3) {
+      printOutput('restore preview', await previewBackupRestore(dataDir, path), outputJson); return;
+    }
     const useBackups = command === 'restore' && action === 'apply' ? withOfflineBackups : withReadBackups;
     const result = await useBackups(dataDir, async backups => {
       if (command === 'backup' && action === 'list' && positionals.length === 2) return backups.list();
       if (command === 'backup' && action === 'download' && path && values.output && positionals.length === 3) {
-        const download = await backups.readDownload(path); await writeNew(values.output, download.body); return { output: values.output, bytes: download.body.length };
+        return { output: values.output, bytes: await backups.writeDownload(path, values.output) };
       }
-      if (command === 'restore' && action === 'preview' && path && positionals.length === 3) return backups.previewRestore(path);
       if (command === 'restore' && action === 'apply' && path && values.sha256 && positionals.length === 3) {
-        await backups.restore(path, values.sha256); return { restored: true, invalidatesAllSessions: true, pausesQueuedRuns: true };
+        await backups.restore(path, values.sha256); await writeRestoreState(backups.directories.root, { state: 'idle', blocked: false }); return { restored: true, invalidatesAllSessions: true, pausesQueuedRuns: true };
       }
       throw new Error('Invalid backup/restore arguments; use --help');
     });

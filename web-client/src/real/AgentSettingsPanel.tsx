@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Check, ChevronRight, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, ExternalLink, RefreshCw, Trash2 } from 'lucide-react';
 import type { AgentBackendConfiguration, AgentPlatform, AgentConfigurationUpdate } from '../../../packages/protocol/src/agents';
 import { agentModelKey, initialEffort, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
 import { useI18n } from '../i18n/I18nProvider';
@@ -13,25 +13,58 @@ const installationGuides: Record<string, string> = {
 };
 
 /** New configuration sections use an independent gateway, never old settings keys. */
-export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady, onBusyChange }: {
+export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady, onBusyChange, onDirtyChange }: {
   store: WorkspaceAgentStore; readOnly?: boolean; onChanged?: () => void; onReady?: () => void; onBusyChange?: (busy: boolean) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const { language, t } = useI18n();
   const text = (zh: string, en: string) => language === 'zh-CN' ? zh : en;
   const state = useWorkspaceAgents(store);
   const [selected, setSelected] = useState('');
   const [sortMode, setSortMode] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPosition, setPickerPosition] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number }>({ left: 0, top: 0, width: 0, maxHeight: 320 });
+  const picker = useRef<HTMLDivElement>(null);
+  const pickerButton = useRef<HTMLButtonElement>(null);
+  const pickerPanel = useRef<HTMLDivElement>(null);
+  const pickerId = useId();
+  const closePicker = () => { setPickerOpen(false); pickerButton.current?.focus(); };
+  useLayoutEffect(() => {
+    if (!pickerOpen) return;
+    const position = () => {
+      const bounds = pickerButton.current?.getBoundingClientRect();
+      if (!bounds) return;
+      const height = Math.min(360, window.innerHeight - 32);
+      const below = window.innerHeight - bounds.bottom - 16;
+      const above = bounds.top - 16;
+      const opensUp = below < Math.min(height, 240) && above > below;
+      const maxHeight = Math.min(height, opensUp ? above : below);
+      setPickerPosition({ left: Math.max(16, Math.min(bounds.left, window.innerWidth - bounds.width - 16)), top: opensUp ? undefined : bounds.bottom + 6, bottom: opensUp ? window.innerHeight - bounds.top + 6 : undefined, width: bounds.width, maxHeight });
+    };
+    position();
+    window.addEventListener('resize', position);
+    window.addEventListener('scroll', position, true);
+    return () => { window.removeEventListener('resize', position); window.removeEventListener('scroll', position, true); };
+  }, [pickerOpen]);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    pickerPanel.current?.querySelector<HTMLButtonElement>('.agent-backend-row > button[aria-pressed="true"]')?.focus({ preventScroll: true });
+    const dismiss = (event: PointerEvent) => { if (!picker.current?.contains(event.target as Node)) setPickerOpen(false); };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [pickerOpen]);
   const [expandedProviders, setExpandedProviders] = useState<ReadonlySet<string>>(() => new Set());
   const [editing, setEditing] = useState<{ backendId: string; settings: AgentBackendConfiguration; value: BackendConfigurationFields }>();
   const [order, setOrder] = useState<string[]>();
   const [defaultSelection, setDefaultSelection] = useState<{ backendId: string; model: { model: string; reasoningEffort: string | null } }>();
   const [permission, setPermission] = useState<'read-only' | 'workspace-write' | 'danger-full-access'>();
+  const [customModel, setCustomModel] = useState('');
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
   const errorRef = useRef<HTMLParagraphElement>(null);
   const agents = orderedAgents(state), backend = state.descriptors.find(item => item.id === selected) ?? agents[0];
   const resource = backend && state.resources[backend.id], settings = resource?.settings;
-  const fields = editing && editing.backendId === backend?.id && editing.settings === settings ? editing.value
-    : settings ? backendConfigurationFields(settings, resource?.models?.map(model => ({ id: model.id, visible: false })) ?? []) : undefined;
+  const savedFields = settings ? backendConfigurationFields(settings, resource?.models?.map(model => ({ id: model.id, visible: false })) ?? []) : undefined;
+  const fields = editing && editing.backendId === backend?.id && editing.settings === settings ? editing.value : savedFields;
   const configuration = state.configuration;
   const platform = configuration?.platform;
   const unsupportedPlatform = !!platform && !!backend?.capabilities.platforms && !backend.capabilities.platforms.includes(platform as AgentPlatform);
@@ -46,6 +79,20 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   const onboardingDefaultBlocked = !!onReady && !(chosenBackend && chosenBackend.revision > 0 && chosenBackend.schemaVersion > 0);
   const chosenModel = chosen && state.resources[chosen.backendId]?.models?.find(item => item.id === chosen.model.model);
   const disabled = readOnly || busy;
+  const savedDefault = configuration?.default.selection;
+  const comparableFields = settings && fields ? backendConfigurationFields({ ...settings, ...fields }, resource?.models?.map(model => ({ id: model.id, visible: false })) ?? []) : fields;
+  // Compare against the displayed saved values, including hidden discovered models.
+  // Merely loading a catalog, opening a group or entering sort mode is not an edit.
+  const dirty = Boolean(
+    (comparableFields && savedFields && JSON.stringify(comparableFields) !== JSON.stringify(savedFields))
+    || (defaultSelection && (defaultSelection.backendId !== savedDefault?.backendId
+      || defaultSelection.model.model !== savedDefault?.model || defaultSelection.model.reasoningEffort !== savedDefault?.reasoningEffort))
+    || (order && JSON.stringify(order) !== JSON.stringify(agents.map(item => item.id)))
+    || (permission && configuration && permission !== configuration.permissions.project)
+    || customModel.trim()
+  );
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => {
     if (onReady && state.mode === 'agents') for (const item of state.descriptors) void store.checkInstallation(item.id);
   }, [store, !!onReady, state.mode, state.descriptors]);
@@ -55,6 +102,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   useEffect(() => { onBusyChange?.(busy); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   useEffect(() => { if (!selected && backend) setSelected(backend.id); }, [selected, backend?.id]);
   useEffect(() => { setEditing(undefined); }, [backend?.id, settings]);
+  useEffect(() => { setCustomModel(''); }, [backend?.id]);
   useEffect(() => {
     setPermission(undefined); setOrder(undefined); setDefaultSelection(undefined);
   }, [configuration]);
@@ -119,9 +167,25 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
       <button type="button" disabled={!permission} onClick={() => void save(async () => { await store.saveConfiguration({ section: 'permissions', expectedRevision: configuration!.permissions.revision, project: permission! }); setPermission(undefined); }, text('公共权限已保存。', 'Shared permissions saved.'))}>{text('保存公共权限', 'Save shared permissions')}</button>
     </fieldset>
     <div className="agent-settings-section agent-editor">
-    <div className="agent-settings-toolbar"><h3>{text('Agent 与模型', 'Agents and models')}</h3><button type="button" disabled={disabled || !configurationSupported} aria-pressed={sortMode} onClick={() => setSortMode(value => !value)}>{text('调整 Agent 顺序', 'Reorder Agents')}</button></div>
+    <div className="agent-settings-toolbar"><h3>{text('Agent 与模型', 'Agents and models')}</h3></div>
     {onReady && <p>{text('选择你常用的 Agent，单选或多选', 'Choose the Agents you use most, one or more.')}</p>}
-    <div className="agent-backend-list" role="group" aria-label={text('Agent 模型管理', 'Agent model management')}>
+    <div className="agent-picker" ref={picker} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setPickerOpen(false); }}
+      onKeyDown={event => { if (pickerOpen && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePicker(); } }}>
+    <button type="button" ref={pickerButton} className="agent-picker-trigger" role="combobox" aria-label={text('选择 Agent', 'Select Agent')}
+      aria-haspopup="dialog" aria-expanded={pickerOpen} aria-controls={pickerId} disabled={busy || !agents.length}
+      onClick={() => setPickerOpen(value => !value)} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setPickerOpen(true); } }}>
+      {backend && <AgentMark descriptor={backend}/>}<span className="agent-picker-name">{backend?.name ?? text('选择 Agent', 'Select Agent')}</span><ChevronDown size={16} aria-hidden="true"/>
+    </button>
+    {pickerOpen && <div ref={pickerPanel} id={pickerId} className="agent-picker-popover" role="dialog" aria-label={text('选择与排序 Agent', 'Select and reorder Agents')} style={pickerPosition}
+      onKeyDown={event => {
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('.agent-backend-row > button:first-child'));
+        const index = buttons.indexOf(event.target as HTMLButtonElement);
+        if (index < 0) return;
+        event.preventDefault(); buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }}>
+    <div className="agent-picker-toolbar"><span>Agent</span><button type="button" disabled={disabled || !configurationSupported} aria-pressed={sortMode} onClick={() => setSortMode(value => !value)}>{text('调整 Agent 顺序', 'Reorder Agents')}</button></div>
+    <div className="agent-backend-list" data-reordering={sortMode} role="group" aria-label={text('Agent 模型管理', 'Agent model management')}>
       {(order ?? agents.map(item => item.id)).map((id, index, list) => {
         const item = state.descriptors.find(entry => entry.id === id); if (!item) return null;
         const savedBackend = configuration?.backends.find(item => item.backendId === id);
@@ -132,7 +196,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
           const current = order ?? agents.map(item => item.id); if (!current.includes(dragged) || dragged === id) return;
           const next = current.filter(item => item !== dragged); next.splice(next.indexOf(id), 0, dragged);
           setOrder(next);
-        }}><button type="button" aria-pressed={backend?.id === id} onClick={() => setSelected(id)}><AgentMark descriptor={item}/><span className="agent-backend-name">{item.name}</span>{configured && <span className="agent-configured"><Check size={16} aria-hidden="true"/>{text('已配置', 'Configured')}</span>}{state.resources[id]?.settings?.enabled === false && <span>{text('已停用', 'Disabled')}</span>}</button>
+        }}><button type="button" disabled={busy} aria-pressed={backend?.id === id} onClick={() => { setSelected(id); if (!sortMode) closePicker(); }}><AgentMark descriptor={item}/><span className="agent-backend-name">{item.name}</span>{configured && <span className="agent-configured"><Check size={16} aria-hidden="true"/>{text('已配置', 'Configured')}</span>}{state.resources[id]?.settings?.enabled === false && <span>{text('已停用', 'Disabled')}</span>}</button>
           <button type="button" aria-label={text('上移 ', 'Move up ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === 0} onClick={() => move(id, -1)}><ArrowUp size={16}/></button>
           <button type="button" aria-label={text('下移 ', 'Move down ') + item.name} hidden={!sortMode} disabled={disabled || !sortMode || !configurationSupported || index === list.length - 1} onClick={() => move(id, 1)}><ArrowDown size={16}/></button>
           {onReady && state.resources[id]?.installation === 'missing' && installationGuides[id] && <div className="agent-installation-help">
@@ -141,7 +205,9 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
           </div>}
         </div>;
       })}
-      {(sortMode || order) && <button type="button" disabled={disabled || !configurationSupported || !order} onClick={() => void save(async () => { await store.saveConfiguration({ section: 'order', backendIds: order!, expectedRevision: configuration!.order.revision }); setOrder(undefined); }, text('Agent 顺序已保存。', 'Agent order saved.'))}>{text('保存顺序', 'Save order')}</button>}
+    </div>
+    {(sortMode || order) && <div className="agent-picker-actions"><button type="button" disabled={disabled || !configurationSupported || !order} onClick={() => void save(async () => { await store.saveConfiguration({ section: 'order', backendIds: order!, expectedRevision: configuration!.order.revision }); setOrder(undefined); setSortMode(false); }, text('Agent 顺序已保存。', 'Agent order saved.'))}>{text('保存顺序', 'Save order')}</button></div>}
+    </div>}
     </div>
     {backend && <>
       {backendUnsupported ? <p role="alert">{text('执行器不支持此操作。', 'The executor does not support this operation.')}<br/>{unsupportedReason}</p>
@@ -163,7 +229,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
           </label>;
         })}
         <fieldset className="agent-model-settings" disabled={disabled || !configurationSupported}><legend>{text('模型可见性', 'Model visibility')}</legend>
-          {backend.models.allowCustom && <label>{text('手动模型 ID', 'Custom model ID')}<input aria-label={text('手动模型 ID', 'Custom model ID')} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); const id = event.currentTarget.value.trim(); if (id && !fields.models.some(model => model.id === id)) update({ models: [...fields.models, { id, visible: true }] }); event.currentTarget.value = ''; } }}/><span>{text('按 Enter 添加', 'Press Enter to add')}</span></label>}
+          {backend.models.allowCustom && <label>{text('手动模型 ID', 'Custom model ID')}<input aria-label={text('手动模型 ID', 'Custom model ID')} value={customModel} onChange={event => setCustomModel(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); const id = customModel.trim(); if (id && !fields.models.some(model => model.id === id)) update({ models: [...fields.models, { id, visible: true }] }); setCustomModel(''); } }}/><span>{text('按 Enter 添加', 'Press Enter to add')}</span></label>}
 
           <div className="management-actions"><button type="button" onClick={() => update({ models: fields.models.map(model => ({ ...model, visible: true })) })}>{text('全部显示', 'Show all')}</button><button type="button" onClick={() => update({ models: fields.models.map(model => ({ ...model, visible: false })) })}>{text('全部隐藏', 'Hide all')}</button></div>
           <div className="agent-model-providers">{[...providerGroups].sort(([a], [b]) => a === b ? 0 : a === null ? 1 : b === null ? -1 : a.localeCompare(b)).map(([provider, models]) => {

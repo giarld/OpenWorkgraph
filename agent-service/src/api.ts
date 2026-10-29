@@ -29,7 +29,9 @@ import { VisualizeApi } from './visualize-api.js';
 import { VisualizeLibraryApi } from './visualize-library-api.js';
 import { VisualizeLibrary } from './visualize-library.js';
 import type { Json } from '@openworkgraph/protocol';
-export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; headers?:Record<string,string> }
+import type { Readable } from 'node:stream';
+import { silentLogger, type Logger } from './logger.js';
+export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; binaryStream?:Readable; dispose?:()=>Promise<void>; headers?:Record<string,string> }
 export class BusinessApi {
   readonly graphs:Graphs;
   private queries?:GraphQueries;
@@ -45,7 +47,7 @@ export class BusinessApi {
   private visualizeApi?:VisualizeApi;
   private visualizeLibraryApi?:VisualizeLibraryApi;
   private agentConfigurationApi?: AgentConfigurationApi;
-  constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
+  constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime,logger:Logger=silentLogger){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{logger,withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
     this.outputsApi??=new RunOutputsApi(this.runtime,this.auth);
     const outputs=await this.outputsApi.handle(request,path,token,origin);if(outputs.handled)return outputs;

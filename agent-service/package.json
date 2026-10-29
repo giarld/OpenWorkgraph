@@ -1,6 +1,6 @@
 {
   "name": "openworkgraph",
-  "version": "0.5.17",
+  "version": "0.5.19",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -31,7 +31,9 @@
   },
   "dependencies": {
     "sharp": "^0.35.4",
-    "yaml": "^2.9.1"
+    "yaml": "^2.9.1",
+    "yauzl": "3.4.0",
+    "yazl": "3.3.1"
   },
   "devDependencies": {
     "esbuild": "0.28.2"

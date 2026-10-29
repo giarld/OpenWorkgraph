@@ -31,6 +31,21 @@
 :root[data-theme=dark] .agent-settings [role=alert] { color: var(--danger, #ffb4ab); }
 .agent-backend-error { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .agent-backend-row > button[hidden] { display: none; }
+.agent-picker { min-width: 0; width: 100%; }
+:is(.management-panel, .welcome-agent-settings) .agent-settings .agent-picker-trigger { width: 100%; justify-content: flex-start; min-height: 44px; padding: 10px 12px; gap: 10px; }
+.agent-picker-name { flex: 1; min-width: 0; text-align: left; overflow-wrap: anywhere; }
+.agent-picker .agent-brand-mark { flex-shrink: 0; }
+.agent-picker-popover { position: fixed; z-index: 100; display: flex; flex-direction: column; box-sizing: border-box; padding: 8px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+.agent-picker-toolbar { display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; gap: 8px; padding: 0 0 8px; border-bottom: 1px solid var(--stroke); font-size: 13px; }
+.agent-picker-toolbar > span { padding-left: 8px; font-weight: 600; }
+.agent-picker .agent-backend-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-height: 0; overflow-y: auto; padding: 8px 0; margin: 0; }
+.agent-picker .agent-backend-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: center; }
+.agent-picker .agent-backend-list[data-reordering=true] .agent-backend-row { grid-template-columns: minmax(0, 1fr) 44px 44px; }
+:is(.management-panel, .welcome-agent-settings) .agent-picker .agent-backend-row > button:first-child { width: 100%; min-height: 44px; padding: 8px; gap: 8px; }
+.agent-picker .agent-backend-name { flex: 1 1 96px; min-width: min(100%, 96px); overflow-wrap: normal; word-break: normal; }
+.agent-picker .agent-configured { flex-shrink: 0; white-space: nowrap; }
+.agent-picker .agent-installation-help { grid-column: 1 / -1; }
+.agent-picker-actions { display: flex; justify-content: flex-end; flex-shrink: 0; padding-top: 8px; border-top: 1px solid var(--stroke); }
 .agent-installation-help { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; flex-basis: 100%; min-width: 0; padding: 0 12px 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .agent-installation-help a { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: var(--link); text-underline-offset: 3px; }
 .agent-installation-help a svg { flex-shrink: 0; }

@@ -9,11 +9,20 @@ export class BackupApi {
   constructor(readonly backups:Backups,readonly auth:Auth){}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
     if(path==='/v1/restore-guidance'&&request.method==='GET')return this.auth.withSession(token,origin,()=>({handled:true,body:{localOnly:true,command:'openworkgraph restore apply <backup-path> --sha256 <verified-sha256> --data-dir <service-data-dir>'}}));
-    const match=/^[/]v1[/]backups(?:[/]([a-f0-9]{64})[/](download))?$/.exec(path);if(!match)return {handled:false};
+    const match=/^[/]v1[/]backups(?:[/]([a-f0-9]{64})(?:[/](download))?)?$/.exec(path);if(!match)return {handled:false};
     const principal=this.auth.withSession(token,origin,s=>s.id);
     if(request.method==='GET'){
-      if(match[1]){const value=await this.backups.readDownload(match[1]);return this.auth.withSession(token,origin,()=>({handled:true,binary:value.body,headers:{'Content-Type':value.contentType,'Content-Length':String(value.body.length),'Content-Disposition':'attachment; filename="'+value.filename+'"'}}));}
+      if(match[1]&&match[2]){
+        const value=await this.backups.openDownload(match[1]);
+        try{return this.auth.withSession(token,origin,()=>({handled:true,binaryStream:value.body,dispose:value.dispose,headers:{'Content-Type':value.contentType,'Content-Length':String(value.bytes),'Content-Disposition':'attachment; filename="'+value.filename+'"'}}));}
+        catch(error){await value.dispose();throw error;}
+      }
+      if(match[1])throw new ServiceError('NOT_FOUND','备份接口不存在。');
       const value=await this.backups.list();return this.auth.withSession(token,origin,()=>({handled:true,body:value}));
+    }
+    if(request.method==='DELETE'&&match[1]&&!match[2]){
+      const value=await this.backups.delete(match[1]);
+      return this.auth.withSession(token,origin,()=>({handled:true,body:value}));
     }
     if(request.method==='POST'&&!match[1]){
       const body=await readJson(request);if(Object.keys(body).length!==1||typeof body.idempotencyKey!=='string'||!body.idempotencyKey||body.idempotencyKey.length>256)throw new ServiceError('INVALID_REQUEST','备份需要幂等键。');

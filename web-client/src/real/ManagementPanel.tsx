@@ -1,15 +1,24 @@
 import { AgentSettingsPanel } from './AgentSettingsPanel';
+import { BackupRestoreDialog } from './BackupRestoreDialog';
 import { useWorkspaceAgents, type WorkspaceAgentStore } from './agent-state';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { randomId } from "../adapter/random";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, Image, ArrowLeftRight, ChevronDown, Settings2, Pencil, HardDrive } from 'lucide-react';
-import type { Backup, GraphBundle, ModelDefaults, Project, ProjectCandidates, Session, ExecutionSettings, SandboxMode, ImageProvider } from '../../../packages/protocol/src/index';
+import type { Backup, BackupRestoreChallenge, WorkspaceMaintenance, GraphBundle, ModelDefaults, Project, ProjectCandidates, Session, ExecutionSettings, SandboxMode, ImageProvider } from '../../../packages/protocol/src/index';
 import { createWorkGraphArchive, readWorkGraphFile } from './workgraph-archive';
 import { useI18n } from '../i18n/I18nProvider';
+import { errorCode } from './contracts';
 import './ManagementPanel.css';
 
-export type ManagementPage = 'projects' | 'add' | 'settings';
+export type ManagementPage = 'projects' | 'add' | 'settings' | 'agents' | 'images' | 'storage' | 'backups' | 'sessions' | 'transfer';
+type SettingsPage = Exclude<ManagementPage, 'projects' | 'add' | 'settings'>;
+const pageTitles: Record<ManagementPage, string> = {
+  projects: 'Project management', add: 'Add project', settings: 'More management',
+  agents: 'Agent settings', images: 'Image generation agent · API providers',
+  storage: 'Storage data management', backups: 'Workspace backups and restore',
+  sessions: 'Browser sessions', transfer: 'Work Graph import and export',
+};
 
 export interface ManagementPanelProps {
   agentStore?: WorkspaceAgentStore;
@@ -17,18 +26,25 @@ export interface ManagementPanelProps {
   initialPage?: ManagementPage;
   page?: ManagementPage;
   onPageChange?: (page: ManagementPage) => void;
+  /** Content for a parent-owned settings dialog; navigation is supplied by the parent. */
+  embedded?: boolean;
+  /** Pending operations, including Agent settings saves; excludes resource loading. */
+  onBusyChange?: (busy: boolean) => void;
+  /** Unsaved local forms and Agent settings edits; cleared on unmount. */
+  onDirtyChange?: (dirty: boolean) => void;
   runtimeAddress?: string;
   onRenameRuntime?: () => void;
   /** Authenticated transport. BLOB means HTTP GET decoded as Blob. */
   request: <T>(path: string, body?: unknown, method?: string, options?: { journal?: "session" | "memory" }) => Promise<T>;
   projectId?: string;
+  onProjectChange?: (id: string) => void;
   graphId?: string;
   readOnly?: boolean;
   onChanged: () => void;
   onModelsChanged?: () => void;
+  onRestoreStarted?: (status: WorkspaceMaintenance) => void;
   onError: (error: unknown) => void;
 }
-type Guidance = { localOnly: true; command: string };
 type LocatedBackup = Backup & { location?: string };
 type StorageCategory = 'database' | 'resources' | 'runs' | 'backups' | 'config' | 'staging' | 'other';
 type StorageUsage = { totalBytes: number; categories: Record<StorageCategory, number>; measuredAt: string };
@@ -46,6 +62,7 @@ const formatSize = (bytes: number) => {
 };
 type Resource<T> = { data?: T; loading: boolean; error?: string };
 type DiscoveredImageModel = { id: string; name: string; selected: boolean };
+const providerSnapshot = (id: string, name: string, endpoint: string, enabled: boolean) => JSON.stringify([id, name, endpoint, enabled]);
 const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Request failed. Check the Workspace connection and try again.';
 const encode = encodeURIComponent;
 const localTime = (value: string) => {
@@ -104,35 +121,53 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const [manualOpen, setManualOpen] = useState(false);
   const manualDialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { if (manualOpen) manualDialog.current?.showModal(); else manualDialog.current?.close(); }, [manualOpen]);
-  const projects = useResource<Project[]>('/v1/projects/all', props);
+  const showAgents = page === 'settings' || page === 'agents';
+  const projects = useResource<Project[]>('/v1/projects/all', props, page === 'projects' || page === 'add' || page === 'settings' || page === 'transfer');
   const candidates = useResource<ProjectCandidates>('/v1/project-candidates', props, page === 'add');
-  const sessions = useResource<Session[]>('/v1/sessions', props, page === 'settings');
-  const backups = useResource<LocatedBackup[]>('/v1/backups', props, page === 'settings');
-  const storage = useResource<StorageUsage>('/v1/storage', props, page === 'settings');
-  const guidance = useResource<Guidance>('/v1/restore-guidance', props, page === 'settings');
-  const agents = useWorkspaceAgents(props.agentStore, page === 'settings');
+  const sessions = useResource<Session[]>('/v1/sessions', props, page === 'settings' || page === 'sessions');
+  const backups = useResource<LocatedBackup[]>('/v1/backups', props, page === 'settings' || page === 'backups');
+  const storage = useResource<StorageUsage>('/v1/storage', props, page === 'settings' || page === 'storage');
+  const agents = useWorkspaceAgents(props.agentStore, showAgents);
   const legacyAgents = agents.mode === 'legacy';
-  const models = useResource<ModelDefaults>('/v1/models', props, page === 'settings' && legacyAgents);
-  const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, page === 'settings' && legacyAgents);
-  const imageProviders = useResource<ImageProvider[]>('/v1/image-providers', props, page === 'settings');
+  const models = useResource<ModelDefaults>('/v1/models', props, showAgents && legacyAgents);
+  const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, showAgents && legacyAgents);
+  const imageProviders = useResource<ImageProvider[]>('/v1/image-providers', props, page === 'settings' || page === 'images');
   const [providerId, setProviderId] = useState('');
   const [providerName, setProviderName] = useState('');
   const [providerEndpoint, setProviderEndpoint] = useState('https://api.openai.com');
   const [providerEnabled, setProviderEnabled] = useState(true);
+  const [savedProvider, setSavedProvider] = useState(() => providerSnapshot('', '', 'https://api.openai.com', true));
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredImageModel[]>([]);
+  const [savedDiscoveredModels, setSavedDiscoveredModels] = useState('[]');
   const [imageSecret, setImageSecret] = useState('');
   const [sandbox, setSandbox] = useState<SandboxMode>('workspace-write');
-  useEffect(() => { if (execution.data) setSandbox(execution.data.sandboxMode); }, [execution.data]);
+  const [savedSandbox, setSavedSandbox] = useState<SandboxMode>('workspace-write');
+  useEffect(() => { if (execution.data) { setSandbox(execution.data.sandboxMode); setSavedSandbox(execution.data.sandboxMode); } }, [execution.data]);
   const [path, setPath] = useState('');
-  const [repair, setRepair] = useState<{ id: string; path: string }>();
+  const [repair, setRepair] = useState<{ id: string; path: string; originalPath: string }>();
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState('');
+  const [savedModel, setSavedModel] = useState({ model: '', effort: '' });
   const [file, setFile] = useState<File>();
   const [notice, setNotice] = useState('');
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState('');
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentDirty, setAgentDirty] = useState(false);
+  const pending = Boolean(busy) || agentBusy;
+  useEffect(() => { props.onBusyChange?.(pending); }, [pending, props.onBusyChange]);
+  useEffect(() => () => props.onBusyChange?.(false), [props.onBusyChange]);
+  const dirty = agentDirty || Boolean(
+    (manualOpen && path.trim()) || (repair && repair.path !== repair.originalPath) || file || imageSecret
+    || providerSnapshot(providerId, providerName, providerEndpoint, providerEnabled) !== savedProvider
+    || JSON.stringify(discoveredModels) !== savedDiscoveredModels
+    || sandbox !== savedSandbox || model !== savedModel.model || effort !== savedModel.effort
+  );
+  useEffect(() => { props.onDirtyChange?.(dirty); }, [dirty, props.onDirtyChange]);
+  useEffect(() => () => props.onDirtyChange?.(false), [props.onDirtyChange]);
   const [revoked, setRevoked] = useState(false);
   const [confirmation, setConfirmation] = useState<{ text: string; run: () => void }>();
+  const [restorePreview, setRestorePreview] = useState<BackupRestoreChallenge & { idempotencyKey: string }>();
   const mounted = useRef(false);
   const lock = useRef(false);
   const backupKey = useRef<string | undefined>(undefined);
@@ -153,26 +188,33 @@ export function ManagementPanel(props: ManagementPanelProps) {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (!scopeEffectReady.current) { scopeEffectReady.current = true; return; }
-    setFile(undefined); setConfirmation(undefined); setNotice(''); setFailure('');
+    setFile(undefined); setConfirmation(undefined); setRestorePreview(undefined); setNotice(''); setFailure('');
   }, [scope]);
   useEffect(() => {
     if (!pageEffectReady.current) { pageEffectReady.current = true; return; }
-    setFile(undefined); setConfirmation(undefined);
+    setFile(undefined); setConfirmation(undefined); setRestorePreview(undefined);
   }, [page]);
   useEffect(() => { if (revoked) props.onError(new Error(t('The current browser session was revoked. Pair again to use management features.'))); }, [revoked, props.onError, t]);
   useEffect(() => {
     setModel(models.data?.selection?.model ?? '');
     setEffort(models.data?.selection?.reasoningEffort ?? '');
+    setSavedModel({ model: models.data?.selection?.model ?? '', effort: models.data?.selection?.reasoningEffort ?? '' });
   }, [models.data]);
   const selectedProject = projects.data?.find(p => p.projectId === projectId);
   const selectedModel = models.data?.available.find(m => m.id === model);
   const selectedProvider = imageProviders.data?.find(p => p.id === providerId);
+  function resetProviderForm(provider?: ImageProvider) {
+    const id = provider?.id ?? '', name = provider?.name ?? '', endpoint = provider?.endpoint ?? 'https://api.openai.com', enabled = provider?.enabled ?? true;
+    setProviderId(id); setProviderName(name); setProviderEndpoint(endpoint); setProviderEnabled(enabled);
+    setSavedProvider(providerSnapshot(id, name, endpoint, enabled));
+  }
   useEffect(() => {
     if(!selectedProvider)return;
-    setProviderName(selectedProvider.name);setProviderEndpoint(selectedProvider.endpoint);setProviderEnabled(selectedProvider.enabled);
+    resetProviderForm(selectedProvider);
   },[selectedProvider?.id,selectedProvider?.revision]);
   useEffect(() => {
     setDiscoveredModels([]);
+    setSavedDiscoveredModels('[]');
   },[selectedProvider?.id]);
 
   async function act(label: string, work: (valid: () => boolean) => Promise<void>, scoped = false, writing = true) {
@@ -211,18 +253,24 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const writeDisabled = disabled || Boolean(props.readOnly);
   const resourceSummary = (value: Resource<unknown>, summary: string) => value.loading ? t('Loading…') : value.error ? t('Loading failed · Expand to retry') : summary;
   const settingsSections = {
-    'Agent settings': { icon: SlidersHorizontal, group: t('Agents and models'), summary: agents.mode === 'loading' ? t('Loading…') : agents.error ? t('Loading failed · Expand to retry') : t('Permissions, Agent configuration, and default model') },
-    'Agent permissions': { icon: ShieldCheck, group: t('Agents and models'), summary: resourceSummary(execution, t('{mode} · Applies to new tasks', { mode: { 'read-only': t('Read-only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') }[execution.data?.sandboxMode ?? 'workspace-write'] })) },
-    'Workspace default model': { icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
-    'Image generation agent · API providers': { icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
-    'Work Graph import and export': { icon: ArrowLeftRight, group: t('Data and backups'), summary: t('Import or export ZIP Work Graph packages') },
-    'Storage data management': { icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Workspace data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Workspace storage and clean unused resource copies')) },
-    'Workspace backups and local restore': { icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Local restore', { count: backups.data.length }) : t('Back up the entire Workspace and view local restore guidance')) },
-    'Browser sessions': { icon: Monitor, group: t('Connections and access'), summary: resourceSummary(sessions, t('{count} browser sessions · View and revoke', { count: sessions.data?.length ?? 0 })) },
-  } satisfies Record<string, { icon: typeof Monitor; summary: string; group?: string }>;
+    'Agent settings': { page: 'agents', icon: SlidersHorizontal, group: t('Agents and models'), summary: agents.mode === 'loading' ? t('Loading…') : agents.error ? t('Loading failed · Expand to retry') : t('Permissions, Agent configuration, and default model') },
+    'Agent permissions': { page: 'agents', icon: ShieldCheck, group: t('Agents and models'), summary: resourceSummary(execution, t('{mode} · Applies to new tasks', { mode: { 'read-only': t('Read-only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') }[execution.data?.sandboxMode ?? 'workspace-write'] })) },
+    'Workspace default model': { page: 'agents', icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
+    'Image generation agent · API providers': { page: 'images', icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
+    'Work Graph import and export': { page: 'transfer', icon: ArrowLeftRight, group: t('Data and backups'), summary: t('Import or export ZIP Work Graph packages') },
+    'Storage data management': { page: 'storage', icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Workspace data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Workspace storage and clean unused resource copies')) },
+    'Workspace backups and restore': { page: 'backups', icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Restore Workspace', { count: backups.data.length }) : t('Back up and restore the entire Workspace')) },
+    'Browser sessions': { page: 'sessions', icon: Monitor, group: t('Connections and access'), summary: resourceSummary(sessions, t('{count} browser sessions · View and revoke', { count: sessions.data?.length ?? 0 })) },
+  } satisfies Record<string, { page: SettingsPage; icon: typeof Monitor; summary: string; group?: string }>;
   function section(title: keyof typeof settingsSections, children: ReactNode) {
-    if (page !== 'settings') return null;
     const item = settingsSections[title];
+    if (page !== 'settings') {
+      if (page !== item.page) return null;
+      return <section className="management-setting-section management-setting-page" aria-label={t(title)}>
+        {page === 'agents' && legacyAgents && <h3>{t(title)}</h3>}
+        <div className="management-setting-body">{children}</div>
+      </section>;
+    }
     const Icon = item.icon;
     return <section className="management-setting-section">
       {'group' in item && <h3 className="management-setting-group">{item.group}</h3>}
@@ -233,14 +281,14 @@ export function ManagementPanel(props: ManagementPanelProps) {
     </section>;
   }
 
-  return <div className="management-panel" data-canvas-interactive aria-label={t('Workspace management')}>
+  return <div className={`management-panel${props.embedded ? ' management-panel-embedded' : ''}`} data-canvas-interactive aria-label={t('Workspace management')}>
     <header>
       <nav className="management-navigation" aria-label={t('Workspace management navigation')}>
-        <button className="management-back" type="button" aria-label={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} title={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} disabled={Boolean(busy)} hidden={page === 'projects' && !props.onBack} onClick={() => { if (page === 'projects') props.onBack?.(); else { setPage('projects'); setConfirmation(undefined); setFailure(''); } }}><ArrowLeft size={20} aria-hidden="true" /></button>
-        <h2>{page === 'projects' ? t('Project management') : page === 'add' ? t('Add project') : t('More management')}</h2>
+        <button className="management-back" type="button" aria-label={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} title={page === 'projects' ? t('Back to Workspace list') : t('Back to project management')} disabled={pending} hidden={props.embedded ? page !== 'add' : page === 'projects' && !props.onBack} onClick={() => { if (page === 'projects') props.onBack?.(); else { setPage('projects'); setConfirmation(undefined); setFailure(''); } }}><ArrowLeft size={20} aria-hidden="true" /></button>
+        <h2>{t(pageTitles[page])}</h2>
       </nav>
       {props.runtimeAddress && <code>{props.runtimeAddress}</code>}
-      <p>{page === 'add' ? t('Choose an existing project or add a directory manually.') : page === 'settings' ? t('Expand settings as needed to manage Workspace capabilities and data.') : t('Manage projects and work content for this Workspace.')}</p>
+      {(page === 'projects' || page === 'add' || page === 'settings') && <p>{page === 'add' ? t('Choose an existing project or add a directory manually.') : page === 'settings' ? t('Expand settings as needed to manage Workspace capabilities and data.') : t('Manage projects and work content for this Workspace.')}</p>}
     </header>
     <div className="management-panel-body" ref={bodyRef}>
     <div aria-live="polite">{busy && <p role="status">{t('{action}…', { action: busy })}</p>}{notice && <p role="status">{notice}</p>}{failure && !manualOpen && <p role="alert">{failure}</p>}</div>
@@ -248,6 +296,11 @@ export function ManagementPanel(props: ManagementPanelProps) {
     {revoked && <p role="status">{t('The current browser session was revoked. Pair again to use management features.')}</p>}
     {confirmation && <ConfirmationDialog title={t('Confirm management action')} text={confirmation.text} disabled={writeDisabled}
       onCancel={() => setConfirmation(undefined)} onConfirm={() => { const run = confirmation.run; setConfirmation(undefined); run(); }}/>}
+    {restorePreview && <BackupRestoreDialog preview={restorePreview} disabled={writeDisabled} pending={!!busy} onCancel={() => setRestorePreview(undefined)} onConfirm={() => { void act(t('Restore backup'), async valid => {
+      const status = await props.request<WorkspaceMaintenance>(`/v1/backups/${encode(restorePreview.backupId)}/restore`, { confirmationToken: restorePreview.confirmationToken, confirmationText: 'RESTORE', idempotencyKey: restorePreview.idempotencyKey }, 'POST', { journal: 'memory' });
+      latest.current.onRestoreStarted?.(status);
+      if (valid()) setRestorePreview(undefined);
+    }); }}/> }
     <fieldset disabled={disabled} className="management-controls">
     {page === 'add' && <section className="management-section" aria-label={t('Add project')}>
       <button className="candidate-manual" type="button" disabled={writeDisabled} onClick={() => { setPath(''); setFailure(''); setManualOpen(true); }}><FolderPlus size={16} aria-hidden="true" />{t('Add a new project directory')}</button>
@@ -287,7 +340,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
     {page === 'projects' && <section className="management-section" aria-label={t('Registered projects')}>
       <div className="management-page-actions">
         <button className="management-primary" type="button" disabled={writeDisabled} onClick={() => { setNotice(''); setFailure(''); setPage('add'); }}><Plus size={16} aria-hidden="true" />{t('Add new project')}</button>
-        <button type="button" onClick={() => setPage('settings')}><Settings2 size={16} aria-hidden="true" />{t('More management')}</button>
+        {!props.embedded && <button type="button" onClick={() => setPage('settings')}><Settings2 size={16} aria-hidden="true" />{t('More management')}</button>}
       </div>
       <Status value={projects} retry={projects.reload} />
       <div className="candidate-heading"><h3>{t('Registered projects')} <span>{projects.data?.length ?? 0}</span></h3><button className="candidate-refresh" type="button" aria-label={t('Refresh projects')} title={t('Refresh projects')} disabled={projects.loading} onClick={projects.reload}><RefreshCw size={16} aria-hidden="true" /></button></div>
@@ -296,9 +349,9 @@ export function ManagementPanel(props: ManagementPanelProps) {
         <div className="management-item-heading"><Folder size={18} aria-hidden="true" /><strong>{project.name}</strong>{project.projectId === projectId && <span className="management-badge">{t('Current project')}</span>}</div><code>{project.canonicalPath}</code>
         <div className="management-item-meta"><span className="management-badge">{project.state === 'active' ? t('Enabled') : t('Disabled')}</span><span>{project.availability === 'available' ? t('Path available') : project.availability === 'unavailable' ? t('Path unavailable') : t('Path status unknown')}</span><span>{project.isGit ? 'Git' : t('Not Git')}</span></div>
         <div className="management-actions"><button type="button" disabled={writeDisabled} onClick={() => confirm(t('{action} project “{name}”? Disabled projects are read-only, and the Workspace will reject disabling a project with unfinished tasks.', { action: project.state === 'active' ? t('Disable') : t('Enable'), name: project.name }), () => { void mutate(t('Update project state'), `/v1/projects/${encode(project.projectId)}/state`, { state: project.state === 'active' ? 'inactive' : 'active' }, projects.reload); })}>{project.state === 'active' ? t('Disable project') : t('Enable project')}</button>
-        <button type="button" disabled={writeDisabled || project.state !== 'active'} onClick={() => setRepair({ id: project.projectId, path: project.canonicalPath })}>{t('Change path')}</button></div>
-        {repair?.id === project.projectId && <form onSubmit={event => { event.preventDefault(); const nextPath = repair.path.trim(); confirm(t('Change the path for “{name}” to {path}? This will not move the directory or files.', { name: project.name, path: nextPath }), () => { void mutate(t('Change project path'), `/v1/projects/${encode(project.projectId)}/path`, { path: nextPath }, projects.reload); }); }}>
-          <label>{t('New absolute directory path')}<input disabled={writeDisabled} required value={repair.path} onChange={event => setRepair({ id: project.projectId, path: event.target.value })} /></label>
+        <button type="button" disabled={writeDisabled || project.state !== 'active'} onClick={() => setRepair({ id: project.projectId, path: project.canonicalPath, originalPath: project.canonicalPath })}>{t('Change path')}</button></div>
+        {repair?.id === project.projectId && <form onSubmit={event => { event.preventDefault(); const nextPath = repair.path.trim(); confirm(t('Change the path for “{name}” to {path}? This will not move the directory or files.', { name: project.name, path: nextPath }), () => { void mutate(t('Change project path'), `/v1/projects/${encode(project.projectId)}/path`, { path: nextPath }, async () => { setRepair(undefined); await projects.reload(); }); }); }}>
+          <label>{t('New absolute directory path')}<input disabled={writeDisabled} required value={repair.path} onChange={event => setRepair({ ...repair, path: event.target.value })} /></label>
           <button type="submit" disabled={writeDisabled || !repair.path.trim()}>{t('Save path')}</button><button type="button" onClick={() => setRepair(undefined)}>{t('Cancel changes')}</button>
         </form>}
       </li>)}</ul>
@@ -307,11 +360,11 @@ export function ManagementPanel(props: ManagementPanelProps) {
     {page === 'settings' && props.onRenameRuntime && <div className="management-actions">
       <button type="button" onClick={props.onRenameRuntime}><Pencil size={16} aria-hidden="true" />{t('Rename Workspace')}</button>
     </div>}
-    {props.agentStore && !legacyAgents && section('Agent settings', <AgentSettingsPanel store={props.agentStore} readOnly={writeDisabled} onChanged={props.onModelsChanged}/>)}
+    {props.agentStore && !legacyAgents && section('Agent settings', <AgentSettingsPanel store={props.agentStore} readOnly={writeDisabled} onChanged={props.onModelsChanged} onBusyChange={setAgentBusy} onDirtyChange={setAgentDirty}/>)}
     {legacyAgents && section('Agent permissions', <>
       <Status value={execution} retry={execution.reload} />
       <p>{t('Sandbox permissions are enforced by Codex app-server. Changes apply to newly submitted tasks; queued and running tasks keep their original setting.')}</p>
-      {execution.data && <form onSubmit={event => { event.preventDefault(); void mutate(t('Save permission scope'), '/v1/execution-settings', { sandboxMode: sandbox, expectedRevision: execution.data!.revision }, execution.reload); }}>
+      {execution.data && <form onSubmit={event => { event.preventDefault(); void mutate(t('Save permission scope'), '/v1/execution-settings', { sandboxMode: sandbox, expectedRevision: execution.data!.revision }, async () => { setSavedSandbox(sandbox); await execution.reload(); }); }}>
         <label>{t('Sandbox permissions')}<select aria-label={t('Sandbox permissions')} value={sandbox} disabled={writeDisabled} onChange={event => setSandbox(event.target.value as SandboxMode)}>
           <option value="read-only">{t('Read-only')}</option>
           <option value="workspace-write">{t('Workspace write')}</option>
@@ -336,13 +389,14 @@ export function ManagementPanel(props: ManagementPanelProps) {
       <Status value={imageProviders} retry={imageProviders.reload} />
       <button type="button" onClick={imageProviders.reload}>{t('Refresh image generation catalog')}</button>
       <p>{t('The image generation API is independent of Codex image generation. After saving a provider and API key, choose which provider models image nodes may use.')}</p>
-      <label>{t('Provider instance')}<select aria-label={t('Image generation provider')} value={providerId} onChange={event => { setProviderId(event.target.value);setDiscoveredModels([]);setImageSecret(''); }}>
+      <label>{t('Provider instance')}<select aria-label={t('Image generation provider')} value={providerId} onChange={event => { resetProviderForm(imageProviders.data?.find(provider => provider.id === event.target.value));setDiscoveredModels([]);setSavedDiscoveredModels('[]');setImageSecret(''); }}>
         <option value="">{t('Add new provider')}</option>{providerId && !selectedProvider && <option value={providerId}>{t('New provider')} · {providerId}</option>}{imageProviders.data?.map(item => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}
       </select></label>
       {!selectedProvider && <label>{t('New provider ID')}<input value={providerId} onChange={event => setProviderId(event.target.value)} disabled={writeDisabled} placeholder={t('For example, openai-main')} /></label>}
       <form autoComplete="off" onSubmit={event => { event.preventDefault(); const secret=imageSecret; void act(t('Save image generation provider'),async valid => {
         const saved=await props.request<ImageProvider>('/v1/image-providers',{id:providerId,name:providerName,driver:'openai',endpoint:providerEndpoint,enabled:providerEnabled,expectedRevision:selectedProvider?.revision??0},'POST');
         if(!valid())return;
+        resetProviderForm(saved);
         if(secret){
           try { await props.request('/v1/image-providers/'+encode(saved.id)+'/credential',{secret,expectedRevision:saved.revision},'POST'); }
           catch(error){ await imageProviders.reload(); throw new Error(t('Provider settings were saved, but the API key could not be saved: {error}', { error: message(error) })); }
@@ -361,12 +415,12 @@ export function ManagementPanel(props: ManagementPanelProps) {
       {selectedProvider && <>
         <p>{t('Revision')} {selectedProvider.revision} · {selectedProvider.enabled ? t('Enabled') : t('Disabled')}</p>
         <div className="management-danger-actions"><button type="button" disabled={writeDisabled || !selectedProvider.credentialRevision} onClick={() => confirm(t('Revoke all previous credential versions for this provider? Accepted but unsent requests will no longer continue.'),()=>{void mutate(t('Revoke image generation credentials'),'/v1/image-providers/'+encode(selectedProvider.id)+'/credential-revoke',{expectedRevision:selectedProvider.revision},imageProviders.reload);})}>{t('Revoke credentials')}</button>
-        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Delete provider “{name}”? New tasks can no longer use it; accepted tasks retain frozen settings.', { name: selectedProvider.name }),()=>{void mutate(t('Delete image generation provider'),'/v1/image-providers/'+encode(selectedProvider.id)+'/delete',{expectedRevision:selectedProvider.revision},imageProviders.reload);setProviderId('');})}>{t('Delete provider')}</button></div>
+        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Delete provider “{name}”? New tasks can no longer use it; accepted tasks retain frozen settings.', { name: selectedProvider.name }),()=>{void mutate(t('Delete image generation provider'),'/v1/image-providers/'+encode(selectedProvider.id)+'/delete',{expectedRevision:selectedProvider.revision},async () => { resetProviderForm(); setImageSecret(''); await imageProviders.reload(); });})}>{t('Delete provider')}</button></div>
         <h4 className="management-form-heading">{t('Image generation models')}</h4>
         <p>{t('Fetch the provider model catalog, then select the models image nodes may use. Quality, size, and aspect ratio are set on image nodes.')}</p>
         <button type="button" disabled={writeDisabled || !selectedProvider.enabled || !selectedProvider.credentialConfigured} onClick={() => { void act(t('Fetch image generation models'),async valid => {
           const result=await props.request<{models:DiscoveredImageModel[];revision:number}>('/v1/image-providers/'+encode(selectedProvider.id)+'/models/discover',{expectedRevision:selectedProvider.revision},'POST');
-          if(valid()){setDiscoveredModels(result.models);setNotice(t('Fetched {count} models from the provider. Select models and save.', { count: result.models.length }));}
+          if(valid()){setDiscoveredModels(result.models);setSavedDiscoveredModels(JSON.stringify(result.models));setNotice(t('Fetched {count} models from the provider. Select models and save.', { count: result.models.length }));}
         }); }}>{t('Fetch image generation models')}</button>
         {!selectedProvider.enabled && <p>{t('This provider is disabled. Enable new task submissions and save provider settings before fetching models.')}</p>}
         {!selectedProvider.credentialConfigured && <p>{selectedProvider.credentialRevision === null
@@ -376,7 +430,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
           {discoveredModels.map(item => <label className="management-checkbox" key={item.id}><input type="checkbox" checked={item.selected} disabled={writeDisabled} onChange={event => setDiscoveredModels(current=>current.map(model=>model.id===item.id?{...model,selected:event.target.checked}:model))} /><span>{item.name}<code>{item.id}</code></span></label>)}
           <button type="button" disabled={writeDisabled} onClick={() => { void act(t('Save image generation model selection'),async valid => {
             await props.request('/v1/image-providers/'+encode(selectedProvider.id)+'/models/select',{models:discoveredModels.filter(item=>item.selected).map(({id,name})=>({id,name})),expectedRevision:selectedProvider.revision},'POST');
-            if(valid()){setNotice(t('Image generation model selection saved.'));await imageProviders.reload();}
+            if(valid()){setSavedDiscoveredModels(JSON.stringify(discoveredModels));setNotice(t('Image generation model selection saved.'));await imageProviders.reload();}
           }); }}>{t('Save model selection')}</button>
         </div>}
         {selectedProvider.models.length===0 && <p>{t('No image generation models selected.')}</p>}
@@ -384,6 +438,10 @@ export function ManagementPanel(props: ManagementPanelProps) {
       </>}
     </>)}
     {section('Work Graph import and export', <>
+      {props.onProjectChange && <label>{t('Project workspace')}<select value={projectId ?? ''} disabled={disabled} onChange={event => props.onProjectChange?.(event.target.value)}>
+        <option value="">{t('No project selected')}</option>
+        {projects.data?.map(project => <option key={project.projectId} value={project.projectId}>{project.name}</option>)}
+      </select></label>}
       <p>{t('Import target:')} {selectedProject ? `${selectedProject.name} (${selectedProject.projectId})` : projectId ? t('{projectId} (project not loaded or unavailable)', { projectId }) : t('No project selected')}. {t('Import creates a new Work Graph and does not overwrite the current graph.')}</p>
       <p>{t('Export target:')} {graphId ?? t('No Work Graph selected')}. {t('Import and export run only after an explicit click and do not migrate Workspace sessions.')}</p>
       <button type="button" disabled={!projectId || !graphId || !selectedProject} onClick={() => { void act(t('Export Work Graph'), async valid => {
@@ -425,12 +483,20 @@ export function ManagementPanel(props: ManagementPanelProps) {
         }); })}>{t('Clear cache')}</button></div>
       <p>{t('Cleanup checks current references before removal. Shared files and protected history are retained; failed file removals stay queued for retry.')}</p>
     </>)}
-    {section('Workspace backups and local restore', <>
-      <p>{t('A backup covers the entire Workspace, not only the current project. Restore can only be performed by an administrator on the Workspace computer.')}</p>
+    {section('Workspace backups and restore', <>
+      <p>{t('A ZIP backup contains the Workspace database and resource files. Restoring replaces data across all projects.')}</p>
       <Status value={backups} retry={backups.reload} />
       <button type="button" disabled={writeDisabled} onClick={() => { void act(t('Create backup'), async valid => {
         backupKey.current ??= randomId();
-        const backup = await props.request<LocatedBackup>('/v1/backups', { idempotencyKey: backupKey.current }, 'POST');
+        let backup: LocatedBackup;
+        try { backup = await props.request<LocatedBackup>('/v1/backups', { idempotencyKey: backupKey.current }, 'POST'); }
+        catch (error) {
+          const envelope = error && typeof error === 'object' && 'details' in error ? error.details : undefined;
+          const details = envelope && typeof envelope === 'object' && 'details' in envelope ? envelope.details : envelope;
+          if (!valid() || errorCode(error) !== 'NOT_FOUND' || !details || typeof details !== 'object' || !('reason' in details) || details.reason !== 'backup_deleted') throw error;
+          backupKey.current = randomId();
+          backup = await props.request<LocatedBackup>('/v1/backups', { idempotencyKey: backupKey.current }, 'POST');
+        }
         if (!valid()) return;
         backupKey.current = undefined;
         if (backup.state === 'failed') throw new Error(t('The Workspace reported that backup creation failed. Check Workspace logs and try again.'));
@@ -440,15 +506,20 @@ export function ManagementPanel(props: ManagementPanelProps) {
       {backups.data?.length === 0 && <p>{t('No backups.')}</p>}
       <ul>{backups.data?.map(backup => <li key={backup.id}><div className="management-item-heading"><Archive size={18} aria-hidden="true" /><strong>{backup.createdAt}</strong><span className="management-badge">{backup.state === 'ready' ? t('Ready') : backup.state === 'creating' ? t('Creating') : t('Failed')}</span></div><code>{backup.id}</code><span>{backup.bytes === null ? t('Size unknown') : t('{bytes} bytes', { bytes: backup.bytes })}</span>{backup.sha256 && <code>Manifest SHA-256: {backup.sha256}</code>}
         <span>{t('Workspace location:')}{backup.location ? <code>{backup.location}</code> : t('Workspace did not provide a location')}</span>
+        <div className="management-backup-actions">
         <button type="button" disabled={backup.state !== 'ready'} onClick={() => { void act(t('Download backup'), async valid => {
           const blob = await props.request<Blob>(`/v1/backups/${encode(backup.id)}/download`, undefined, 'BLOB');
           if (!valid()) return;
           if (!(blob instanceof Blob)) throw new Error(t('The authenticated request must return the backup binary response as a Blob.'));
-          saveFile(blob, `${backup.id}.owg-backup`); setNotice(t('The backup was sent to the browser for download. Confirm that the download completed.'));
+          saveFile(blob, `${backup.id}.owg-backup.zip`); setNotice(t('The backup was sent to the browser for download. Confirm that the download completed.'));
         }, false, false); }}>{t('Authenticated backup download')}</button>
+        <button type="button" disabled={writeDisabled || backup.state !== 'ready'} onClick={() => confirm(t('Restore the backup from {createdAt}? Current Workspace data will be replaced.', { createdAt: backup.createdAt }), () => { void act(t('Check backup'), async valid => {
+          const preview = await props.request<BackupRestoreChallenge>(`/v1/backups/${encode(backup.id)}/restore-preview`, {}, 'POST', { journal: 'memory' });
+          if (valid()) setRestorePreview({ ...preview, idempotencyKey: randomId() });
+        }); })}>{t('Restore backup')}</button>
+        <button type="button" disabled={writeDisabled || backup.state === 'creating'} onClick={() => confirm(t('Delete backup from {createdAt}? This permanently removes its files from the Workspace.', { createdAt: backup.createdAt }), () => { void mutate(t('Delete backup'), `/v1/backups/${encode(backup.id)}`, undefined, async () => { await Promise.all([backups.reload(), ...(page === 'settings' ? [storage.reload()] : [])]); }, 'DELETE'); })}>{t('Delete backup')}</button>
+        </div>
       </li>)}</ul>
-      <Status value={guidance} retry={guidance.reload} />
-      {guidance.data && <details><summary>{t('Local restore guidance (not executed in the browser)')}</summary><p>{t('After safely preserving current data and stopping the Workspace, a local administrator should run restore preview to inspect the backup, verify the returned manifest SHA-256, and replace the placeholders below. The digest shown in the list is not the SHA-256 of the complete downloaded file. Restore invalidates all browser sessions and pauses queued tasks; pair again afterward.')}</p><pre>{guidance.data.command}</pre></details>}
     </>)}
     {section('Browser sessions', <>
       <Status value={sessions} retry={sessions.reload} /><button type="button" onClick={sessions.reload}>{t('Refresh sessions')}</button>

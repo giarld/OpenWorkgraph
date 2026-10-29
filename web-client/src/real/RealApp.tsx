@@ -1,4 +1,5 @@
 import { workspaceAgentStore } from './agent-state';
+import { useWorkspaceMaintenance, WorkspaceMaintenanceDialog } from './WorkspaceMaintenance';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { ImportWorkGraphDialog } from './ImportWorkGraphDialog';
 import { ProgressDialog } from '../components/ProgressDialog';
@@ -9,8 +10,7 @@ import { FILE_NODE_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-
 import { runtimeStatus } from './runtime-status';
 import { runtimeNeedsUpgrade } from '../domain/runtime-version';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
-import { ConnectionRegistry, RUNTIME_NAME_MAX_LENGTH, type Connection } from "../adapter/connections";
-import { createPairingIdentity, type PairingIdentity } from '../adapter/client-pairing';
+import { ConnectionRegistry, type Connection } from "../adapter/connections";
 import {
   Transport,
   LifecycleCancelledError,
@@ -41,7 +41,7 @@ export { createAuthoritativeLoader } from "./authoritative-loader";
 import { readProjectGraphPages } from "./graph-pages";
 import { groupLibraryGraphs } from './library-graphs';
 import { createWorkGraphArchive, readWorkGraphFile, workGraphArchiveFilename } from './workgraph-archive';
-import { ManagementPanel, type ManagementPage } from "./ManagementPanel";
+import { SettingsDialog, type SettingsEntry } from './SettingsDialog';
 import { ResourcesPanel, type CanvasCreated, type LibraryAsset, type ResourcePlacement } from "./ResourcesPanel";
 import { parseVisualizeAssetPackage, VISUALIZE_LIBRARY_MAX_JSON_BYTES } from '../../../packages/protocol/src/visualize-library';
 import { ProjectFilesPanel } from './ProjectFilesPanel';
@@ -56,7 +56,6 @@ import { useI18n } from '../i18n/I18nProvider';
 import '../i18n/catalogs/app';
 import "./real.css";
 import { WelcomeDialog } from './WelcomeDialog';
-import { WelcomeCommand } from './WelcomeCommand';
 import { WorkspaceRestartHint } from './WorkspaceRestartHint';
 import webClientPackage from '../../package.json';
 const noPendingSubscription = () => () => {};
@@ -130,14 +129,13 @@ export function RealApp() {
   const [creationPending, setCreationPending] = useState(false);
   const creationInFlight = useRef(false);
   const [cardRename, setCardRename] = useState<GraphSnapshot>();
-  const [runtimeRename, setRuntimeRename] = useState<{ serviceId: string; sessionId: string; name: string }>();
   const [cardTitle, setCardTitle] = useState('');
   const [cardPurge, setCardPurge] = useState<GraphSnapshot>();
   const [cardPurgeTitle, setCardPurgeTitle] = useState('');
-  useEffect(() => { const sync = () => { if (location.hash === '#workgraphs') enterLibrary.current(); setPage(location.hash === '#workgraphs' ? 'library' : 'editor'); setServicePanelOpen(false); }; window.addEventListener('hashchange', sync); return () => window.removeEventListener('hashchange', sync); }, []);
-  const showPage = (value: 'editor' | 'library') => { if (value === 'library') setLibraryProjectId(''); setPage(value); setServicePanelOpen(false); if (value === 'editor' && window.innerWidth <= 700) setLeftOpen(false); location.hash = value === 'library' ? 'workgraphs' : 'editor'; };
-  const [rightPanel, setRightPanel] = useState<'queue' | 'management' | 'details' | null>(null);
-  const [closingRightPanel, setClosingRightPanel] = useState<'queue' | 'management' | 'details' | null>(null);
+  useEffect(() => { const sync = () => { if (location.hash === '#workgraphs') enterLibrary.current(); setPage(location.hash === '#workgraphs' ? 'library' : 'editor'); setSettingsOpen(false); }; window.addEventListener('hashchange', sync); return () => window.removeEventListener('hashchange', sync); }, []);
+  const showPage = (value: 'editor' | 'library') => { if (value === 'library') setLibraryProjectId(''); setPage(value); setSettingsOpen(false); if (value === 'editor' && window.innerWidth <= 700) setLeftOpen(false); location.hash = value === 'library' ? 'workgraphs' : 'editor'; };
+  const [rightPanel, setRightPanel] = useState<'queue' | 'details' | null>(null);
+  const [closingRightPanel, setClosingRightPanel] = useState<'queue' | 'details' | null>(null);
   useEffect(() => {
     if (rightPanel) {
       setClosingRightPanel(rightPanel);
@@ -147,18 +145,11 @@ export function RealApp() {
     return () => window.clearTimeout(timer);
   }, [rightPanel]);
   const panelContent = rightPanel ?? closingRightPanel;
-  const servicePanelOpen = rightPanel === 'management';
-  const setServicePanelOpen = (value: boolean | ((open: boolean) => boolean)) =>
-    setRightPanel(current => (typeof value === 'function' ? value(current === 'management') : value) ? 'management' : current === 'management' ? null : current);
-  const toggleWorkspaceManagement = () => setServicePanelOpen(open => !open);
-  const [servicePage, setServicePage] = useState<"list" | "connect" | "projects">("list");
-  const [managementPage, setManagementPage] = useState<ManagementPage>('projects');
-  const [managementEntry, setManagementEntry] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsEntry, setSettingsEntry] = useState<SettingsEntry>();
   const openAddProject = () => {
-    setManagementPage('add');
-    setManagementEntry(entry => entry + 1);
-    setServicePage('projects');
-    setServicePanelOpen(true);
+    setSettingsEntry(current => ({ workspaceId: serviceId, page: 'add', sequence: (current?.sequence ?? 0) + 1 }));
+    setSettingsOpen(true);
   };
   const [nodeSidebar, setNodeSidebar] = useState<HTMLDivElement | null>(null);
   const [leftOpen, setLeftOpen] = useState(() => window.innerWidth > 700);
@@ -384,12 +375,10 @@ export function RealApp() {
     [notifications],
   );
   const services = connections.filter((c) => c.status !== "invalid");
+  const { maintenance, acknowledge: acknowledgeRestore } = useWorkspaceMaintenance(registry, connections);
   const connection =
     services.find((c) => c.serviceId === activeService) ?? services[0];
   const serviceId = connection?.serviceId ?? "";
-  useEffect(() => {
-    if (servicePage === 'projects' && !serviceId) setServicePage('list');
-  }, [servicePage, serviceId]);
   const transport = useMemo(
     () => (serviceId ? new Transport(registry, serviceId) : undefined),
     [registry, serviceId, connection?.generation],
@@ -514,10 +503,6 @@ export function RealApp() {
     };
     return {plan:(run:Run)=>withEditor(run,owner=>owner.executionPlan(run)),start:(run:Run,body:Parameters<GraphEditor['startExecution']>[1])=>withEditor(run,owner=>owner.startExecution(run,body))};
   },[request]);
-  const managementAgents = useMemo(() => {
-    if (!serviceId || connection?.status !== 'paired') return undefined;
-    return workspaceAgentStore(registry, serviceId);
-  }, [registry, serviceId, connection?.generation, connection?.session.id, connection?.status]);
   const graphConnection = graph && !localMode ? registry.get(graph.serviceId) : undefined;
   const graphAgents = useMemo(() => {
     if (!graphConnection || graphConnection.status !== 'paired') return undefined;
@@ -628,7 +613,7 @@ export function RealApp() {
   }, [localMode, graph?.graphId, bridgeScope, request, local.bridgeFor]);
   const assetsAvailable = localMode ? !!localBridge?.capabilities.assets : !!connection;
   const projectFilesAvailable = !localMode && connection?.info.capabilities.projectFiles?.status === 'available' && connection.info.capabilities.projectFileReferences?.status === 'available';
-  const canvasOnline = localMode || !!online;
+  const canvasOnline = !maintenance?.blocked && (localMode || !!online);
   const canvasProjectActive = localMode || (page === 'library' ? libraryTargetProject : project)?.state === "active";
   useEffect(() => {
     setDeleteName("");
@@ -1020,7 +1005,8 @@ export function RealApp() {
     .list()
     .filter((t) => services.some((c) => c.serviceId === t.serviceId));
   return (
-    <main className={"app real-app " + (leftOpen ? "" : "sidebar-closed")}>
+    <main inert={!!maintenance} className={"app real-app " + (leftOpen ? "" : "sidebar-closed")}>
+      {maintenance && <WorkspaceMaintenanceDialog state={maintenance} onAcknowledge={acknowledgeRestore}/>}
       {confirmTrashGraphs && <ConfirmationDialog title={t('Confirm move to trash')}
         text={confirmTrashGraphs.length === 1
           ? t('Move “{title}” to the trash? You can restore it from the trash later.', { title: confirmTrashGraphs[0].title })
@@ -1045,6 +1031,17 @@ export function RealApp() {
           });
         }}
       />}
+      <SettingsDialog open={settingsOpen} registry={registry} connections={connections} defaultWorkspaceId={serviceId} entry={settingsEntry}
+        context={{ serviceId: localMode ? '' : serviceId, projectId: project?.projectId, graphId: localMode ? undefined : graph?.graphId }}
+        onlineWorkspaceIds={services.filter(item => item.status === 'paired' && data[item.serviceId]?.eventStatus === 'connected').map(item => item.serviceId)}
+        theme={theme} onThemeChange={setTheme} onClose={() => setSettingsOpen(false)} onChanged={changed}
+        onModelsChanged={() => setModelRevision(value => value + 1)} onError={onError}
+        updatingWorkspaceId={updatingRuntime?.serviceId} onUpdate={updateRuntime}
+        onDisconnect={target => {
+          notifications.removeService(target.serviceId); clearServiceCache(target.serviceId); registry.forget(target.serviceId);
+          setUpdatingRuntime(current => current?.serviceId === target.serviceId ? undefined : current);
+          setData(current => Object.fromEntries(Object.entries(current).filter(([id]) => id !== target.serviceId)));
+        }}/>
       {services.map((c) => (
         <ServiceMonitor
           key={c.serviceId + ":" + c.generation}
@@ -1055,20 +1052,6 @@ export function RealApp() {
           registerRefresh={registerServiceRefresh}
         />
       ))}
-      {runtimeRename && <div className="library-dialog-backdrop"><form className="library-dialog panel" role="dialog" aria-modal="true" aria-label={t('Rename Workspace')}
-        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setRuntimeRename(undefined); } }}
-        onSubmit={event => {
-          event.preventDefault();
-          try {
-            registry.renameRuntime(runtimeRename.serviceId, runtimeRename.name, runtimeRename.sessionId);
-            setRuntimeRename(undefined);
-          } catch (error) { onError(error); }
-        }}>
-        <h2>{t('Rename Workspace')}</h2>
-        <label>{t('Workspace name')}<input autoFocus required maxLength={RUNTIME_NAME_MAX_LENGTH} value={runtimeRename.name} onFocus={event => event.target.select()} onChange={event => setRuntimeRename({ ...runtimeRename, name: event.target.value })}/></label>
-        <button disabled={!runtimeRename.name.trim()}>{t('Confirm rename')}</button>
-        <button type="button" onClick={() => setRuntimeRename(undefined)}>{t('Cancel')}</button>
-      </form></div>}
       {cardRename && <div className="library-dialog-backdrop"><form className="library-dialog panel" role="dialog" aria-modal="true" aria-label={t('Rename Work Graph')} onSubmit={e => { e.preventDefault(); act(async () => { await updateCard(cardRename, [{ type: 'graph.rename', title: cardTitle.trim() }]); setCardRename(undefined); }); }}><label>{t('New Work Graph name')}<input autoFocus required value={cardTitle} onChange={e => setCardTitle(e.target.value)}/></label><button disabled={busy || !cardTitle.trim()}>{t('Confirm rename')}</button><button type="button" onClick={() => setCardRename(undefined)}>{t('Cancel')}</button></form></div>}
       {cardPurge && <div className="library-dialog-backdrop"><form className="library-dialog panel" role="dialog" aria-modal="true" aria-label={t('Permanently delete Work Graph')} onSubmit={e => { e.preventDefault(); act(() => purgeCard(cardPurge, cardPurgeTitle)); }}>
         <h2>{t('Permanently delete Work Graph')}</h2>
@@ -1112,7 +1095,7 @@ export function RealApp() {
       }}/>
       <header className="real-header topbar-right">
         <div className="runtime-header-actions">
-          <button type="button" className="icon-button panel" aria-label={t('Workspace settings')} title={t('Workspace settings')} aria-expanded={servicePanelOpen} aria-controls="service-panel" onClick={toggleWorkspaceManagement}>
+          <button type="button" className="icon-button panel" aria-label={t('Settings')} title={t('Settings')} aria-expanded={settingsOpen} aria-haspopup="dialog" aria-controls="global-settings-dialog" onClick={() => setSettingsOpen(true)}>
             <Settings size={18} aria-hidden="true"/>
           </button>
           <button className="icon-button panel desktop-notification-button" aria-label={desktopNotificationsEnabled ? t('Disable desktop notifications') : t('Enable desktop notifications')} title={desktopNotificationsEnabled ? t('Disable desktop notifications') : t('Enable desktop notifications')} aria-pressed={desktopNotificationsEnabled}
@@ -1156,11 +1139,11 @@ export function RealApp() {
           <button className="icon-button panel" aria-label={t('Toggle theme')} title={t('Toggle theme')} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={18}/> : <Moon size={18}/>}</button>
         </div>
         <div className="runtime-queue-dock">
-          <button type="button" className="runtime-current-status panel" aria-label={t('Workspace management')} aria-expanded={servicePanelOpen} aria-controls="service-panel" aria-describedby="runtime-status-tooltip" data-state={activeRuntimeStatus.state} onClick={toggleWorkspaceManagement}>
+          <div className="runtime-current-status panel" aria-describedby="runtime-status-tooltip" data-state={activeRuntimeStatus.state}>
             <span className="runtime-status-light" aria-hidden="true" />
             <span className="runtime-status-name">{activeRuntimeStatus.name}</span>
             <span id="runtime-status-tooltip" className="runtime-status-tooltip panel" role="tooltip">{activeRuntimeStatus.details}</span>
-          </button>
+          </div>
           <button
             className="queue-trigger panel"
             aria-label={t('Workspace queue')}
@@ -1571,7 +1554,7 @@ export function RealApp() {
                   installation: connection.info.installation,
                   updating: updatingRuntime?.serviceId === connection.serviceId, updateDisabled: !!updatingRuntime || !online,
                   onUpdate: connection.info.installation === 'npm-global' && connection.status === 'paired' ? () => void updateRuntime(connection) : undefined,
-                  onManage: () => { setServicePage('list'); setServicePanelOpen(true); },
+                  onManage: () => { setSettingsEntry(current => ({ workspaceId: serviceId, page: 'sessions', sequence: (current?.sequence ?? 0) + 1 })); setSettingsOpen(true); },
                 } : undefined}
                 projectActive={canvasProjectActive}
                 onOpenRun={(run, visible = Boolean(run)) => { setDetailRun(run); setRightPanel(panel => visible ? 'details' : panel === 'details' ? null : panel); }}
@@ -1653,7 +1636,7 @@ export function RealApp() {
             <section className="real-empty"><h2>{t('Select or create a Work Graph')}</h2><button onClick={() => showPage("library")}>{t('My Work Graphs')}</button><p>{t('Select a Workspace in My Work Graphs, then create or open a Work Graph.')}</p></section>
           )}
         </section>
-        <aside id="service-panel" className={'real-service-panel' + (rightPanel ? '' : ' real-service-panel-collapsed')} aria-label={panelContent === 'queue' ? t('Workspace queue') : panelContent === 'details' ? t('Run details') : t('Workspace management and connection')} aria-hidden={!rightPanel} inert={!rightPanel}>
+        <aside id="service-panel" className={'real-service-panel' + (rightPanel ? '' : ' real-service-panel-collapsed')} aria-label={panelContent === 'queue' ? t('Workspace queue') : t('Run details')} aria-hidden={!rightPanel} inert={!rightPanel}>
           {panelContent === 'details' && <div className="real-right-panel-content">
             <div className="service-panel-heading"><h2>{t('Run details')}</h2><button className="icon-button" aria-label={t('Close run details')} onClick={() => setRightPanel(null)}>×</button></div>
             {detailRun && connection && detailRun.serviceId === serviceId ? <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
@@ -1682,235 +1665,9 @@ export function RealApp() {
               }}
             /></div>
           )}
-          {panelContent === 'management' && <>
-          <div className="service-panel-heading"><h2>{t('Workspace management and connection')}</h2><button className="icon-button" aria-label={t('Collapse')} onClick={() => setServicePanelOpen(false)}>×</button></div>
-          <div className="service-panel-content">
-          {servicePage === "connect" && <>
-          <div className="runtime-subpage-heading"><button className="runtime-back" type="button" aria-label={t('Back to Workspace list')} title={t('Back to Workspace list')} onClick={() => setServicePage("list")}><ArrowLeft size={20} aria-hidden="true" /></button><h3>{t('Connect new Workspace')}</h3></div>
-          <Pairing
-            registry={registry}
-            onPaired={(id) => {
-              navigate(() => { setActiveService(id); setTemporary(false); setTab('canvas'); setFilter('active'); changed(); setServicePage('list'); });
-            }}
-            onError={onError}
-          />
-          </>}
-          {servicePage === "list" && <><p className="runtime-intro">{t('Select a Workspace to manage projects, or connect another device.')}</p>
-          <button className="runtime-connect runtime-primary" type="button" onClick={() => setServicePage("connect")}><Plus size={16} aria-hidden="true" />{t('Connect new Workspace')}</button>
-          <div className="runtime-list-heading"><h3>{t('Connected Workspaces')}</h3><span>{connections.length}</span></div>
-          {connections.length === 0 && (
-            <div className="runtime-empty"><Server size={28} aria-hidden="true" /><strong>{t('No Workspace connected')}</strong><p>{t('Connect a Workspace to manage projects and run tasks.')}<br />{t('Temporary Work Graphs are available immediately and are not uploaded automatically after connecting.')}</p></div>
-          )}
-          {connections.map((c) => (
-            <div className="real-service" data-selected={serviceId === c.serviceId} key={c.serviceId}>
-              <button
-                className="runtime-card-open"
-                aria-pressed={serviceId === c.serviceId}
-                onClick={() => {
-                  if (serviceId === c.serviceId) {
-                    setManagementPage('projects');
-                    setServicePage(c.status === 'invalid' ? 'connect' : 'projects');
-                    return;
-                  }
-                  navigate(() => {
-                    setActiveService(c.serviceId); setTemporary(false);
-                    setProjectId(''); setGraphId(''); setTab('canvas'); setFilter('active');
-                    setManagementPage('projects');
-                    setServicePage(c.status === 'invalid' ? 'connect' : 'projects');
-                  });
-                }}
-              >
-                <span className="runtime-card-heading"><Server size={18} aria-hidden="true" /><span className="runtime-address">{c.runtimeName || c.address}</span><ChevronRight size={16} aria-hidden="true" /></span>
-                {c.runtimeName && <small>{c.address}</small>}
-                <span className="runtime-card-status">
-                  <span className="runtime-status">
-                    {c.status === 'paired' ? <CheckCircle2 size={14} aria-hidden="true" /> : c.status === 'offline' ? <WifiOff size={14} aria-hidden="true" /> : <CircleAlert size={14} aria-hidden="true" />}
-                    {c.status === 'paired' ? t('Authenticated') : c.status === 'offline' ? t('Offline') : t('Session expired. Pair again.')}
-                  </span>
-                  {serviceId === c.serviceId && <span className="runtime-current">{t('Current Workspace')}</span>}
-                </span>
-                {runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && <span className="runtime-upgrade-warning"><CircleAlert size={14} aria-hidden="true" />{t('Upgrade Workspace v{runtimeVersion} to v{clientVersion}', { runtimeVersion: c.info.version, clientVersion: webClientPackage.version })}</span>}
-                <small className="runtime-identity">ID · {c.serviceId}</small>
-              </button>
-              {c.info.installation === 'npx' && runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && (
-                <div className="runtime-npx-upgrade">
-                  <p>{t('Run this command on the Workspace device to restart with the latest version. Restarting cancels active and queued tasks; finish your tasks first.')}</p>
-                  <WelcomeCommand command="npx openworkgraph@latest restart" label={t('Workspace upgrade command')} copyLabel={t('Copy Workspace upgrade command')} />
-                </div>
-              )}
-              <div className="runtime-card-actions">
-              {c.status === 'paired' && c.info.installation === 'npm-global' && runtimeNeedsUpgrade(c.info.version, webClientPackage.version) && (
-                <button type="button" disabled={!!updatingRuntime} onClick={() => void updateRuntime(c)}>
-                  <Download size={14} aria-hidden="true" />{updatingRuntime?.serviceId === c.serviceId ? t('Updating Workspace…') : t('Update Workspace')}
-                </button>
-              )}
-
-              <button
-                className="runtime-disconnect"
-                onClick={() => {
-                  notifications.removeService(c.serviceId);
-                  clearServiceCache(c.serviceId);
-                  registry.forget(c.serviceId);
-                  setUpdatingRuntime(current => current?.serviceId === c.serviceId ? undefined : current);
-                  setData((d) =>
-                    Object.fromEntries(
-                      Object.entries(d).filter(([id]) => id !== c.serviceId),
-                    ),
-                  );
-                }}
-              >
-                <Unplug size={14} aria-hidden="true" />{t('Disconnect')}
-              </button>
-              {c.status === "offline" && (
-                <button
-                  onClick={() => act(() => registry.restore([c.serviceId]))}
-                >
-                  <RotateCcw size={14} aria-hidden="true" />{t('Reconnect')}
-                </button>
-              )}
-              </div>
-            </div>
-          ))}
-          </>}
-          {servicePage === "projects" && connection && (
-            <ManagementPanel
-              agentStore={managementAgents}
-              page={managementPage}
-              onPageChange={setManagementPage}
-              onBack={() => setServicePage("list")}
-              runtimeAddress={connection.address}
-              onRenameRuntime={() => setRuntimeRename({ serviceId: connection.serviceId, sessionId: connection.session.id, name: connection.runtimeName || '' })}
-              readOnly={!online}
-              key={serviceId + ":" + connection.generation + ":" + managementEntry}
-              request={request}
-              projectId={project?.projectId}
-              graphId={localMode ? undefined : graph?.graphId}
-              onChanged={changed}
-              onModelsChanged={() => setModelRevision(value => value + 1)}
-              onError={onError}
-            />
-          )}
-          </div>
-          </>}
         </aside>
       </div>
     </main>
-  );
-}
-function Pairing({
-  registry,
-  onPaired,
-  onError,
-}: {
-  registry: ConnectionRegistry;
-  onPaired: (id: string) => void;
-  onError: (e: unknown) => void;
-}) {
-  const { t } = useI18n();
-  const [address, setAddress] = useState("http://127.0.0.1:14317");
-  const [name, setName] = useState<string>();
-  const [runtimeName, setRuntimeName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [identity, setIdentity] = useState<PairingIdentity>();
-  const [clientCode, setClientCode] = useState('');
-  const identityRef = useRef<PairingIdentity | undefined>(undefined);
-  const controllerRef = useRef<AbortController | undefined>(undefined);
-  const [generating, setGenerating] = useState(false);
-  const [pairError, setPairError] = useState('');
-  const [copyStatus, setCopyStatus] = useState('');
-  const clientTicket = useRef(0);
-  const attempt = useRef(0);
-  useEffect(
-    () => () => {
-      attempt.current++;
-      clientTicket.current++;
-      controllerRef.current?.abort();
-      identityRef.current?.dispose();
-    },
-    [],
-  );
-  return (
-    <div className="runtime-pairing">
-      <p className="runtime-intro">{t('Connect a Workspace to manage projects and Work Graphs in this browser.')}</p>
-      <section className="runtime-step" aria-labelledby="pairing-authorize-title">
-      <h4 id="pairing-authorize-title"><span className="runtime-step-number">1</span>{t('Enter the address and authorize')}</h4>
-      <p>{t('Enter the address of the Workspace device, then generate a client code.')}</p>
-        <label>
-          {t('Workspace address')}
-          <input
-            form="runtime-pairing-form"
-            type="url"
-            required
-            disabled={generating || busy}
-            value={address}
-            onChange={(e) => {
-              attempt.current++;
-              if (e.target.value !== address) {
-                clientTicket.current++; controllerRef.current?.abort(); controllerRef.current = undefined; identityRef.current?.dispose(); identityRef.current = undefined;
-                setIdentity(undefined); setClientCode(''); setCopyStatus('');
-              }
-              setAddress(e.target.value);
-              setBusy(false);
-            }}
-          />
-        </label>
-        <label>
-          {t('Workspace name')}
-          <input disabled={generating || busy} maxLength={RUNTIME_NAME_MAX_LENGTH} value={runtimeName} placeholder={address} onChange={(e) => setRuntimeName(e.target.value)} />
-        </label>
-        <label>
-          {t('Browser name')}
-          <input required disabled={generating || busy} value={name ?? t('Desktop browser')} onChange={(e) => setName(e.target.value)} />
-        </label>
-
-      <button className="runtime-primary" type="button" disabled={generating || busy} onClick={() => {
-        const ticket = ++clientTicket.current;
-        attempt.current++;
-        controllerRef.current?.abort();
-        identityRef.current?.dispose();
-        identityRef.current = undefined;
-        setIdentity(undefined); setClientCode(''); setPairError(''); setCopyStatus(''); setGenerating(true);
-        void createPairingIdentity(location.origin).then(async value => {
-          try {
-            const request = await registry.requestClientPairing(address, value);
-            if (ticket !== clientTicket.current) { value.dispose(); return; }
-            const controller = new AbortController();
-            controllerRef.current = controller;
-            identityRef.current = value; setIdentity(value); setClientCode(request.code); setGenerating(false); setBusy(true);
-            const connection = await registry.waitForClientPairing(request, name ?? t('Desktop browser'), value, runtimeName.trim() || undefined, controller.signal);
-            if (ticket !== clientTicket.current) return;
-            value.dispose(); identityRef.current = undefined; setIdentity(undefined); setBusy(false);
-            onPaired(connection.serviceId);
-          } catch (error) { value.dispose(); throw error; }
-        }).catch(error => { if (ticket === clientTicket.current) { setPairError(messageOf(error)); onError(error); } })
-          .finally(() => { if (ticket === clientTicket.current) { setGenerating(false); setBusy(false); } });
-      }}>{generating ? t('Generating…') : busy ? t('Waiting for Workspace approval…') : identity ? t('Regenerate client code') : t('Generate client code')}</button>
-      {identity && <>
-        <label>{t('Client code')}<input readOnly value={clientCode} onFocus={e => e.currentTarget.select()} spellCheck={false} className="pairing-short-code" /></label>
-        <button type="button" onClick={() => {
-          const ticket = clientTicket.current;
-          if (!navigator.clipboard?.writeText) { setCopyStatus('Select the client code above and copy it manually.'); return; }
-          void navigator.clipboard.writeText(clientCode).then(() => { if (ticket === clientTicket.current) setCopyStatus('Client code copied.'); })
-            .catch(() => { if (ticket === clientTicket.current) setCopyStatus('Copy is unavailable. Select the client code and copy it manually.'); });
-        }}>{t('Copy client code')}</button>
-        <p role="status">{copyStatus ? t(copyStatus) : ''}</p>
-        <small>{t('Current origin: {origin}', { origin: location.origin })}</small>
-        <details><summary>{t('View public key fingerprint')}</summary><small>{t('Public key fingerprint SHA-256: {fingerprint}', { fingerprint: identity.fingerprint })}</small></details>
-        <p>{t('Run this on the Workspace device (no need to enter the origin manually):')}</p>
-        <code>npx openworkgraph@latest pair --client-code {clientCode}</code>
-        <p>{t('The client code is valid for 5 minutes. Keep this page open; refreshing or regenerating requires authorization again.')}</p>
-        {busy && <p role="status">{t('Waiting for Workspace approval…')}</p>}
-      </>}
-      </section>
-      {pairError && <p role="status">{t('Pairing was not completed. Check the notification and try again.')}</p>}
-      <details className="runtime-help"><summary>{t('Connection and access information')}</summary>
-        <p>{t('After pairing, this browser has full management access: it can manage projects and Work Graphs, run tasks, manage assets, revoke browser sessions, and manage operation backups.')}</p>
-        <p>{t('HTTP is supported and HTTPS is not required. HTTP does not encrypt sessions or business data, so use it only on trusted networks. Legacy pairing codes can still be redeemed.')}</p>
-        <p>
-          {t('The address belongs to the Workspace device; do not use the other device’s localhost across devices. If Chrome or Edge requests local network access, authorize it according to your deployment policy.')}
-        </p>
-      </details>
-    </div>
   );
 }
 function ServiceMonitor({

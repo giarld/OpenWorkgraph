@@ -1,6 +1,6 @@
 import { translate } from "../i18n/translate";
 import { PROTOCOL_VERSION, GRAPH_BINARY_MIME, graphBinaryParts, readGraphBinary } from "../../../packages/protocol/src/index";
-import type { GraphBundle } from "../../../packages/protocol/src/index";
+import type { GraphBundle, WorkspaceMaintenance } from "../../../packages/protocol/src/index";
 import type { SkillCatalog, SkillCatalogQuery, SkillCatalogItem, SkillDetail, SkillConfiguration, SkillLibrarySettings } from "../../../packages/protocol/src/skills";
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -55,6 +55,13 @@ interface SharedRequests {
   journals: Map<StorageLike | null, Map<string, Map<string, PendingRequestEntry>>>;
 }
 const sharedRequests = new WeakMap<ConnectionRegistry, Map<string, SharedRequests>>();
+function rejectedForRestoration(error: unknown): WorkspaceMaintenance | undefined {
+  if (!(error instanceof TransportError) || error.code !== 'MAINTENANCE' || !error.details || typeof error.details !== 'object') return;
+  const envelope = error.details as { details?: unknown; workspaceMaintenance?: unknown };
+  const details = envelope.details && typeof envelope.details === 'object' ? envelope.details as { workspaceMaintenance?: unknown } : envelope;
+  const state = details.workspaceMaintenance as WorkspaceMaintenance | undefined;
+  return state?.blocked === true ? state : undefined;
+}
 /** Service-bound authenticated HTTP. No write is retried implicitly. */
 export class Transport {
   private unknown = new Map<string, PendingRequestEntry>();
@@ -218,6 +225,9 @@ export class Transport {
   ): Promise<{ response: Response; lease: ConnectionLease }> {
     this.path(path);
     this.assertOwner();
+    const maintenance = this.registry.get(this.serviceId)?.info.maintenance;
+    if (maintenance?.blocked && !/^[/]v1[/]backups[/][A-Za-z0-9_-]+[/]restore$/.test(path))
+      throw new TransportError('MAINTENANCE', translate('Workspace restoration is in progress. All operations are temporarily blocked.'), 503, { workspaceMaintenance: maintenance });
     const lease = this.owner;
     const headers = new Headers({
       Authorization: "Bearer " + lease.token,
@@ -245,7 +255,12 @@ export class Transport {
         cache: options.cache ?? "no-store",
       });
       this.assertOwner();
-      await checkResponse(response);
+      try { await checkResponse(response); }
+      catch (error) {
+        const state = rejectedForRestoration(error);
+        if (state) this.registry.setMaintenance(this.serviceId, state);
+        throw error;
+      }
       this.assertOwner();
       if (signal.aborted) throw new LifecycleCancelledError();
       this.registry.setStatus(lease, "paired");
@@ -339,7 +354,7 @@ export class Transport {
         }
       }
       this.begin(entry);
-      try { return await this.send<T>(path, entry.payload ?? serialized, verb, entry); }
+      try { return await this.send<T>(path, entry.payload ?? serialized, verb, entry, { replaying: !!existing }); }
       finally { this.end(entry); }
     }
     return this.send<T>(path, payload ?? serialized, verb, undefined, options);
@@ -349,7 +364,7 @@ export class Transport {
     body: string | Blob | undefined,
     method: string,
     entry?: PendingRequestEntry,
-    options: TransportRequestOptions = {},
+    options: TransportRequestOptions & { replaying?: boolean } = {},
   ): Promise<T> {
     let readingBody = false;
     try {
@@ -398,11 +413,12 @@ export class Transport {
       // Reclassify only when our own lease/lifecycle proves cancellation.
       if (readingBody) this.assertOwner();
       // 5xx/disconnect/truncated success may follow a commit: retain the journal.
+      // Restoration rejects only this attempt; an earlier unknown write may
+      // already be committed and still needs reconciliation after a rollback.
       if (
         entry &&
         error instanceof TransportError &&
-        error.status >= 400 &&
-        error.status < 500 &&
+        ((error.status >= 400 && error.status < 500) || (!options.replaying && rejectedForRestoration(error))) &&
         error.code !== "HTTP_ERROR"
       ) {
         this.removeEntry(entry);
@@ -425,7 +441,7 @@ export class Transport {
         translate("The idempotency key is bound to the original session and cannot be replayed after pairing again"),
       );
     this.begin(entry);
-    try { return await this.send<T>(entry.path, entry.payload ?? entry.body, entry.method, entry); }
+    try { return await this.send<T>(entry.path, entry.payload ?? entry.body, entry.method, entry, { replaying: true }); }
     finally { this.end(entry); }
   }
   readSkillLibrarySettings(): Promise<SkillLibrarySettings> {

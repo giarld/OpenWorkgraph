@@ -878,7 +878,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const openRunCallback = useRef(props.onOpenRun);
   useEffect(() => { openRunCallback.current = props.onOpenRun; }, [props.onOpenRun]);
   useEffect(() => {
-    const visible = runnableNodeSelected && (runNeedsAttention || editorVisible);
+    const visible = runnableNodeSelected && Boolean(selectedRun) && (runNeedsAttention || editorVisible);
     openRunCallback.current?.(visible ? selectedRun : undefined, visible);
   }, [g.serviceId, g.projectId, g.graphId, node?.id, runnableNodeSelected, editorVisible, runNeedsAttention,
     selectedRun?.id, selectedRun?.status, selectedRun?.hasPendingGenerationCandidate, selectionRevision]);

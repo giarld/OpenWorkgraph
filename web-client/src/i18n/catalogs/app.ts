@@ -280,7 +280,6 @@ export const appZhCN: Record<string, string> = {
   'Workspace address': '工作空间地址',
   'Workspace management': '工作空间管理',
   'Workspace settings': '工作空间设置',
-  'Workspace management and connection': '工作空间管理与连接',
   'Workspace queue': '工作空间队列',
   'Select Workspace': '选择工作空间',
   'Select a Workspace in My Work Graphs, then create or open a Work Graph.': '在我的工作图中选择工作空间，再创建或打开工作图。',

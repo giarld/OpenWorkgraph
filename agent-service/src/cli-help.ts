@@ -134,6 +134,7 @@ export function formatHelp(): string {
     'Backup and restore',
     row('backup create', 'Create a backup; optional --idempotency-key <KEY>'),
     row('backup list', 'List backups'),
+    row('backup delete <BACKUP_ID>', 'Permanently delete a backup and its files'),
     row('backup download <BACKUP_ID>', 'Download a backup; requires --output <NEW_FILE>'),
     row('restore preview <PATH>', 'Preview a restore and its SHA-256'),
     row('restore apply <PATH>', 'Restore locally; requires --sha256 <HASH>'),

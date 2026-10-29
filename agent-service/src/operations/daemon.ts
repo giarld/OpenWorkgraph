@@ -5,6 +5,7 @@ import { createService } from '../service.js';
 import { listenerInfo } from '../network.js';
 import { localControl } from '../local-control.js';
 import { acquireOperationsLock } from './lifecycle.js';
+import { acquireDatabaseAccess } from './database-access.js';
 import { OperationsLog } from './logs.js';
 import { RuntimeLogger } from '../logger.js';
 import { waitForBackups, clearStaleResourceLeases } from './backups.js';
@@ -29,6 +30,7 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
   const npxInstallation = npmInstallation.then(global => global ? false : isNpxInstallation(cliPath));
   try { service = createService(lock.root, {
     logger,
+    operationsLock: lock,
     npmInstallation: () => npmInstallation,
     npxInstallation: () => npxInstallation,
     updateRuntime: async onExit => {
@@ -46,18 +48,19 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
   const removeSignals = () => { process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal); };
   // server.address() becomes null as soon as HTTP shutdown begins; local
   // management must remain available until connections close and locks release.
-  const status = () => ({ state, version: SERVICE_VERSION, activeRuns: closing ? 0 : activeRunCount(service.db), connectedClients: service.events.connectedClientCount(), listenHost: listenAddress.address, ...listenerInfo(listenAddress, service.info.serviceId, service.instanceId) });
+  const status = () => ({ state, maintenance: service.restore.status, version: SERVICE_VERSION, activeRuns: closing || service.restore.status.blocked ? 0 : activeRunCount(service.db), connectedClients: service.events.connectedClientCount(), listenHost: listenAddress.address, ...listenerInfo(listenAddress, service.info.serviceId, service.instanceId) });
   async function stop(interrupt: boolean): Promise<void> {
+    await service.restore.settled().catch(() => {});
     // Escalation remains available while an earlier drain waits indefinitely.
     if (stopping && (!interrupt || state === 'interrupting')) return;
     state = interrupt ? 'interrupting' : 'draining';
     stopping = true;
-    service.runtime.stopRuns();
+    if (!service.restore.status.blocked) service.runtime.stopRuns();
     await log.append(interrupt ? 'interrupting' : 'draining');
     const drain = (async () => {
       // Flush the command acknowledgment before any transport is closed.
       await new Promise(resolve => setTimeout(resolve, 30));
-      await Promise.all([waitForBackups(service.db), service.runtime.drain({ interrupt: true })]);
+      await Promise.all([waitForBackups(service.db), ...(service.restore.status.blocked ? [] : [service.runtime.drain({ interrupt: true })])]);
     })();
     drains.add(drain);
     void drain.then(async () => {
@@ -79,16 +82,15 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
     }).catch(() => { /* Diagnostics failures must not become unhandled rejections. */ });
   }
   try {
-    clearStaleResourceLeases(service.db, lock);
-    await service.api.backups.recoverCreating(lock);
+    if (!service.restore.status.blocked) { clearStaleResourceLeases(service.db, lock); await service.api.backups.recoverCreating(lock); }
     await new Promise<void>((done, reject) => { service.server.once('error', reject); service.server.listen(port, host, done); });
     listenAddress = service.server.address() as AddressInfo;
     // Own the kernel lock before transferring scheduler epochs. Runtime.start
     // resets acceptingRuns after a normal shutdown and starts its dispatch timer.
-    recoveryAttempted = true;
-    await service.runtime.recover();
+    if (!service.restore.status.blocked) { recoveryAttempted = true; await service.runtime.recover(); }
     await lock.publish(service.info.serviceId, async (command, argument) => {
       if (command === 'status') return status();
+      if (service.restore.status.state !== 'failed' || !['stop', 'interrupt-and-stop'].includes(command)) service.restore.requireAvailable();
       if (command === 'capacity') return localCapacity(service.db, argument);
       if (command === 'plugin-register') return registerLocalPlugin(service.db, service.info.serviceId, argument ?? '');
       if (command === 'native-session') return service.auth.issueNativeSession();
@@ -100,14 +102,22 @@ export async function serveManaged(dataDir: string | undefined, host: string, po
       }
       if (command === 'revoke-session') { service.auth.revokeLocal(argument ?? ''); return { revoked: argument, acceptedTasksUnaffected: true }; }
       if (command === 'pair-code' || command === 'pair-client') {
-        const control = localControl(lock.root);
-        try { return await control.pairingCode(command === 'pair-code' ? argument ?? '' : '', command === 'pair-client' ? argument ?? '' : undefined); } finally { control.close(); }
+        // localControl keeps a separate SQLite connection across its HTTP probe.
+        // Database replacement must wait for that connection to close as well.
+        const access = await acquireDatabaseAccess(lock.root, () => service.restore.requireAvailable());
+        try {
+          service.restore.requireAvailable();
+          const control = localControl(lock.root);
+          try { return await control.pairingCode(command === 'pair-code' ? argument ?? '' : '', command === 'pair-client' ? argument ?? '' : undefined); }
+          finally { control.close(); }
+        } finally { await access.release(); }
       }
       if (command === 'backup-create') {
         if (state !== 'running') throw new Error('Service is draining; new backups are unavailable');
         const result = await service.api.backups.create(argument);
         await log.append('backup_ready'); return result;
       }
+      if (command === 'backup-delete') return service.api.backups.delete(argument ?? '');
       await stop(command === 'interrupt-and-stop'); return { state, version: SERVICE_VERSION, serviceId: service.info.serviceId, instanceId: service.instanceId };
     }, service.instanceId);
     await log.append('started');

@@ -7,4 +7,7 @@ try {
   const db = new DatabaseSync(source, { readOnly: true, allowExtension: false, timeout: 5000 });
   try { db.prepare('VACUUM INTO ?').run(destination); } finally { db.close(); }
   parentPort!.postMessage({ ok: true });
-} catch { parentPort!.postMessage({ ok: false }); }
+} catch (error) {
+  const failure = error instanceof Error ? error : new Error('Unknown SQLite snapshot failure');
+  parentPort!.postMessage({ ok: false, error: { name: failure.name, message: failure.message, stack: failure.stack, code: (failure as NodeJS.ErrnoException).code } });
+}

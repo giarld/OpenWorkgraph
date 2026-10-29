@@ -1,0 +1,100 @@
+.settings-dialog { width: min(1060px, calc(100vw - 48px)); height: min(780px, calc(100dvh - 64px)); max-width: none; max-height: none; margin: auto; padding: 0; overflow: hidden; border: 1px solid var(--stroke); border-radius: 18px; color: var(--text); background: var(--panel); box-shadow: var(--shadow); }
+.settings-dialog::backdrop { background: #0008; backdrop-filter: blur(3px); }
+.settings-dialog[open] { display: flex; flex-direction: column; }
+.settings-dialog button, .settings-dialog input, .settings-dialog select { font: inherit; font-size: 14px; color: var(--text); }
+.settings-dialog button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: transparent; cursor: pointer; }
+.settings-dialog button:hover:not(:disabled) { background: var(--fill); }
+.settings-dialog button:disabled { opacity: .5; cursor: not-allowed; }
+.settings-dialog :focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.settings-dialog input, .settings-dialog select { min-width: 0; max-width: 100%; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); }
+.settings-dialog input[type=checkbox], .settings-dialog input[type=radio] { width: auto; }
+.settings-dialog-header { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; min-height: 80px; padding: 18px 24px 18px 32px; border-bottom: 1px solid var(--stroke); }
+.settings-dialog-header h2 { margin: 0; font-size: 22px; font-weight: 650; }
+.settings-dialog button.settings-close { flex-shrink: 0; width: 40px; height: 40px; padding: 0; border-color: transparent; }
+.settings-dialog-layout { display: grid; grid-template-columns: 236px minmax(0, 1fr); flex: 1; min-height: 0; }
+.settings-navigation { min-height: 0; min-width: 0; padding: 24px 12px; border-right: 1px solid var(--stroke); display: flex; flex-direction: column; gap: 24px; }
+.settings-group-label { margin: 0 12px 12px; font-size: 13px; font-weight: 500; color: var(--muted); }
+.settings-workspace-selection { padding: 0 8px; position: relative; z-index: 3; }
+.settings-workspace-selection .settings-group-label { margin-left: 4px; }
+.settings-workspace-navigation { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow-y: auto; margin-top: -12px; }
+.settings-dialog button.settings-nav-item { width: 100%; justify-content: flex-start; min-height: 44px; padding: 10px 12px; gap: 12px; border: 0; text-align: left; position: relative; font-weight: 500; }
+.settings-nav-item svg { flex-shrink: 0; color: var(--muted); }
+.settings-dialog .settings-nav-item[aria-current=page] { background: var(--fill); }
+.settings-nav-item[aria-current=page]::before { content: ''; position: absolute; left: 0; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--link); }
+.settings-content { min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 28px 36px 36px; scrollbar-gutter: stable; }
+.settings-content h3 { margin: 0 0 28px; font-size: 22px; font-weight: 650; }
+.settings-content h4 { font-size: 15px; }
+.settings-content p { line-height: 1.6; }
+.settings-preference-row { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(140px, 280px); align-items: center; gap: 24px; min-height: 90px; padding: 20px 0; border-bottom: 1px solid var(--stroke); font-size: 14px; }
+.settings-preference-row select { width: 100%; min-height: 44px; }
+.settings-page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+.settings-page-header h3 { margin: 0; }
+.settings-dialog .settings-primary { background: var(--active); color: var(--panel); border-color: var(--active); }
+.settings-dialog .settings-primary:hover:not(:disabled) { background: var(--text); }
+.settings-empty p { color: var(--muted); margin-bottom: 24px; }
+.settings-error { color: var(--text); padding: 12px; border-left: 3px solid #e5484d; background: var(--fill); overflow-wrap: anywhere; }
+.settings-offline { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding: 12px; background: var(--fill); font-size: 13px; line-height: 1.5; }
+.settings-offline span { flex: 1; }
+.settings-offline button { flex-shrink: 0; }
+.settings-connection { border-bottom: 1px solid var(--stroke); padding-bottom: 24px; margin-bottom: 24px; }
+.settings-connection-name { display: flex; align-items: center; gap: 12px; overflow-wrap: anywhere; }
+.settings-connection-name form { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; align-items: flex-end; }
+.settings-connection-name label { display: flex; flex-direction: column; gap: 8px; flex: 1 1 200px; }
+.settings-connection-address { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.settings-connection-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.settings-upgrade { font-size: 14px; }
+.settings-connect .runtime-pairing { min-width: 0; }
+.settings-connect .runtime-pairing > .runtime-intro { margin-top: 0; }
+.settings-connect .runtime-pairing label { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; font-size: 14px; }
+.settings-connect .runtime-pairing code { overflow-wrap: anywhere; white-space: normal; }
+.settings-dialog .management-panel { max-height: none; overflow: visible; padding: 0; border: 0; background: transparent; min-width: 0; font-size: 14px; }
+.settings-dialog .management-panel > header { margin-bottom: 28px; }
+.settings-dialog .management-panel > header h2 { font-size: 22px; }
+.settings-dialog .management-panel-body { overflow: visible; }
+.settings-dialog .management-panel-embedded { display: block; height: auto; }
+.settings-dialog .management-panel fieldset { min-width: 0; }
+.settings-dialog .management-panel .management-actions { gap: 8px; }
+.settings-dialog .management-panel input:not([type=checkbox]):not([type=radio]), .settings-dialog .management-panel select { min-height: 40px; }
+.settings-dialog .agent-settings-section { border: 0; padding: 0 0 24px; margin-bottom: 24px; border-bottom: 1px solid var(--stroke); border-radius: 0; background: transparent; }
+.settings-dialog .agent-settings-section > legend { margin-bottom: 16px; font-size: 15px; }
+.settings-dialog .agent-settings-toolbar h3 { font-size: 16px; margin: 0; }
+.settings-dialog .agent-settings-intro { margin-bottom: 24px; }
+.settings-dialog .agent-settings-section > label { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.4fr); align-items: center; gap: 16px; }
+.workspace-combobox { position: relative; min-width: 0; }
+.settings-dialog button.workspace-combobox-trigger { display: flex; justify-content: space-between; width: 100%; min-height: 44px; padding: 10px 12px; }
+.workspace-combobox-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-combobox-trigger svg { flex-shrink: 0; }
+.workspace-combobox-popover { position: absolute; z-index: 10; top: calc(100% + 6px); left: 0; width: max(100%, 280px); max-width: calc(100vw - 64px); padding: 6px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow); }
+.workspace-combobox-search { display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--fill); border-radius: 6px; }
+.settings-dialog .workspace-combobox-search input { width: 100%; padding: 10px 0; border: 0; background: transparent; outline-offset: -2px; }
+.workspace-combobox-options { max-height: 220px; overflow-y: auto; margin: 6px 0; }
+.workspace-combobox-options [role=option] { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.workspace-combobox-options [role=option].is-active { background: var(--fill); }
+.workspace-combobox-options [role=option] span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.workspace-combobox-options strong { font-weight: 500; overflow-wrap: anywhere; }
+.workspace-combobox-options small { color: var(--muted); overflow-wrap: anywhere; font-size: 12px; }
+.workspace-combobox-options svg { flex-shrink: 0; }
+.settings-dialog button.workspace-combobox-connect { width: 100%; justify-content: flex-start; border: 0; border-top: 1px solid var(--stroke); border-radius: 0; min-height: 44px; }
+.workspace-combobox-empty { padding: 8px; margin: 0; color: var(--muted); font-size: 13px; }
+@media (max-width: 700px) {
+  .settings-dialog { width: calc(100vw - 16px); height: calc(100dvh - 24px); border-radius: 12px; }
+  .settings-dialog-header { min-height: 64px; padding: 12px 16px 12px 20px; }
+  .settings-dialog-header h2 { font-size: 20px; }
+  .settings-dialog-layout { display: flex; flex-direction: column; }
+  .settings-navigation { flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; padding: 12px; gap: 8px; border-right: 0; border-bottom: 1px solid var(--stroke); }
+  .settings-group-label { margin: 0 4px 8px; font-size: 12px; }
+  .settings-workspace-selection { padding: 0; }
+  .settings-dialog button.settings-nav-item { font-size: 13px; gap: 8px; padding: 10px; }
+  .settings-workspace-navigation { grid-column: 1 / -1; flex-direction: row; overflow-x: auto; overflow-y: hidden; margin: 4px 0 0; padding-bottom: 2px; }
+  .settings-workspace-navigation .settings-nav-item { flex: 0 0 auto; width: auto; white-space: nowrap; }
+  .settings-workspace-navigation .settings-nav-item svg { display: none; }
+  .settings-workspace-navigation .settings-nav-item[aria-current=page]::before { top: auto; bottom: 0; left: 10px; right: 10px; height: 2px; width: auto; }
+  .workspace-combobox-popover { left: auto; right: 0; width: min(290px, calc(100vw - 42px)); max-width: none; }
+  .workspace-combobox-options { max-height: min(220px, 30dvh); }
+  .settings-content { flex: 1; padding: 22px 18px 28px; scrollbar-gutter: auto; }
+  .settings-content h3, .settings-dialog .management-panel > header h2 { font-size: 20px; }
+  .settings-preference-row { grid-template-columns: 80px minmax(0, 1fr); gap: 12px; }
+  .settings-dialog .agent-settings-section > label { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+  .settings-dialog .agent-settings-toolbar { flex-wrap: wrap; }
+  .settings-offline { flex-wrap: wrap; }
+}

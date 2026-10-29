@@ -683,7 +683,7 @@ export class WorkflowRuntime {
     return this.starting;
   }
   /** Host must hold its service-root instance lock before transferring epochs. */
-  async recover(): Promise<void> {
+  async recover(options: { start?: boolean } = {}): Promise<void> {
     if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Workspace closed');
     this.recovering = true;
     atomic(this.db, () => {
@@ -697,12 +697,12 @@ export class WorkflowRuntime {
         catch { return true; }
       });
     });
-    await this.start();
+    if (options.start !== false) await this.start();
   }
   /** Bind/startup failure only: never drain or mutate persisted service state. */
-  disposeUnstarted(): void {
+  disposeUnstarted(options: { allowPreparedRecovery?: boolean } = {}): void {
     this.visualizePreviews.close();
-    if (this.starting || this.recovering || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
+    if (this.starting || (this.recovering && !options.allowPreparedRecovery) || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
     if (this.closed) return;
     this.closed = true; this.executionChains.stop(); this.probe.close();
     this.agentConfiguration?.close();
