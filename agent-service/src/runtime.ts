@@ -1,3 +1,4 @@
+import { RemoteAssets } from './remote-assets.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { subscribeDatabaseChanges } from './persistence/changes.js';
@@ -93,6 +94,7 @@ export class WorkflowRuntime {
   readonly executionSettings: ExecutionSettingsStore;
   readonly imageProviders: ImageProviders;
   readonly imageCredentials: ImageCredentials;
+  readonly remoteAssets: RemoteAssets;
   readonly skills: BuiltinSkills;
   readonly skillConfigs: SkillConfigs;
   readonly skillSessions: SkillSessions;
@@ -132,7 +134,7 @@ export class WorkflowRuntime {
     this.productionAgents = !options.backend && options.enableBackend !== false && !!options.agentRegistry;
     this.availableModels = structuredClone(options.models ?? []);
     this.blobs = new BlobStore(directories.blobs); this.resources = new Resources(db, this.blobs);
-    this.graphs = new Graphs(db, serviceId); this.plugins = new PluginRegistry(db);
+    this.graphs = new Graphs(db, serviceId); this.remoteAssets = new RemoteAssets(db, serviceId, directories, this.resources, this.graphs); this.plugins = new PluginRegistry(db);
     this.visualize = new VisualizePages(this.graphs, this.resources);
     this.visualizeInputs = new VisualizeInputs(this.graphs, this.resources);
     const successors = new VisualizeSuccessors(this.visualize, async (prompt, projectId) => {
@@ -686,6 +688,8 @@ export class WorkflowRuntime {
   async recover(options: { start?: boolean } = {}): Promise<void> {
     if (this.closed || this.closing) throw new ServiceError('MAINTENANCE', 'Workspace closed');
     this.recovering = true;
+    this.remoteAssets.recover();
+    await this.remoteAssets.cleanStartupCaches();
     atomic(this.db, () => {
       if (this.runs.repo.setting('backupRestorePending') === true) {
         this.db.prepare("DELETE FROM settings WHERE key='backupRestorePending'").run();
@@ -704,7 +708,7 @@ export class WorkflowRuntime {
     this.visualizePreviews.close();
     if (this.starting || (this.recovering && !options.allowPreparedRecovery) || this.timer || !this.scheduler.isUnstarted || this.closing || this.stopping) throw new ServiceError('CONFLICT', 'Runtime has already entered its lifecycle');
     if (this.closed) return;
-    this.closed = true; this.executionChains.stop(); this.probe.close();
+    this.remoteAssets.disposeUnstarted(); this.closed = true; this.executionChains.stop(); this.probe.close();
     this.agentConfiguration?.close();
     void this.agentDiscovery?.dispose().catch(() => {});
   }
@@ -718,10 +722,12 @@ export class WorkflowRuntime {
   }
   async drain(options: { interrupt?: boolean } = {}): Promise<void> {
     this.stopAccepting();
+    if (options.interrupt) this.remoteAssets.close();
     while (this.active().length) {
       if (options.interrupt) for (const run of this.active()) this.runs.cancel(run.id, 'runtime-drain', 'host');
       await this.pump(); await delay(25);
     }
+    await this.remoteAssets.settled();
     await this.scheduler.settled();
     await this.chainPumpWork;
     await this.agentRouter?.disposeDrained();
@@ -738,6 +744,7 @@ export class WorkflowRuntime {
   }
   close(): void {
     this.visualizePreviews.close();
+    this.remoteAssets.close();
     if (this.closed) return; this.stopAccepting(); this.closing = true;
     if (!this.active().length) this.finishClose();
     else if (!this.timer) this.schedulePump(0);

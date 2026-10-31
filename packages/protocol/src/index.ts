@@ -1,5 +1,6 @@
 /** Public wire types. Never expose SQLite rows or backend-specific events here. */
 export * from './pairing.js';
+export * from './remote-assets.js';
 export * from './run-input.js';
 export * from './resource-mime.js';
 export * from './execution-chain.js';
@@ -11,7 +12,7 @@ export * from './agent-forms.js';
 export * from './approval-permissions.js';
 export * from './workgraph-cli.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.5.19' as const;
+export const SERVICE_VERSION = '0.5.20' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -31,7 +32,7 @@ export interface Capability { status: 'available' | 'unavailable' | 'unknown'; r
 export interface ImageRouteCapability { route: {type:'codex'} | {type:'api';providerId:string;modelId:string}; modes: Record<ImageInputMode,Capability> }
 export type CoreCapabilityName = 'pairing' | 'projects' | 'graphs' | 'assets' | 'execution' | 'imageGeneration' | 'events' | 'backups';
 export type ProjectFileCapabilityName = 'projectFiles' | 'projectFileReferences';
-export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; maintenance?: WorkspaceMaintenance; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName | 'visualizeLibrary' | 'workgraphCli', Capability>>; imageRoutes?: ImageRouteCapability[]; visualizeCompatibility?: import('./visualize-library.js').VisualizeCompatibility }
+export interface ServiceInfo { serviceId: string; version: string; protocolVersion: string; installation?: 'npm-global' | 'npx' | 'other'; maintenance?: WorkspaceMaintenance; capabilities: Record<CoreCapabilityName, Capability> & Partial<Record<ProjectFileCapabilityName | 'visualizeLibrary' | 'workgraphCli' | 'remoteAssets', Capability>>; imageRoutes?: ImageRouteCapability[]; visualizeCompatibility?: import('./visualize-library.js').VisualizeCompatibility }
 export interface Health { status: 'ok'; version: string; protocolVersion: string }
 export function isProtocolCompatible(version: string): boolean { return /^1\.\d+$/.test(version); }
 export interface Session { id: string; browserName: string; pairedAt: string; lastUsedAt: string; expiresAt: string; current: boolean; origin: string; state: 'active' | 'expired' }
@@ -124,7 +125,7 @@ export interface RunNotification { run: Run; revision: number; createdAt: string
 export interface ExecutionPlan { targetId: string; executionRevision: number; nodes: { id: string; title: string; required: boolean; hasRun: boolean; missingPrompt?: boolean; hasExpandedOutputs?: boolean }[]; edges: Edge[]; initialNodeIds: string[]; requiresConfirmation: boolean; preserveHistoricalOutputs?: boolean }
 export interface Interaction { id: string; runId: string; epoch: string; version: number; kind: 'question' | 'approval'; status: 'pending' | 'answered' | 'expired'; payload: Json }
 export interface InteractionReply { runId: string; interactionId: string; epoch: string; expectedVersion: number; idempotencyKey: string; answer: Json }
-export interface ServiceEvent { serviceId: string; cursor: string; eventId: string; type: 'project.changed' | 'project.files.changed' | 'graph.changed' | 'asset.changed' | 'canvas_resource.created' | 'canvas_resource.changed' | 'canvas_resource.collected' | 'run.changed' | 'interaction.changed' | 'notification.changed' | 'session.revoked' | 'backup.changed' | 'capacity.changed'; projectId: string | null; graphId: string | null; entityId: string; revision: number; occurredAt: string; payload: Json }
+export interface ServiceEvent { serviceId: string; cursor: string; eventId: string; type: 'data-source.changed' | 'remote-transfer.changed' | 'project.changed' | 'project.files.changed' | 'graph.changed' | 'asset.changed' | 'canvas_resource.created' | 'canvas_resource.changed' | 'canvas_resource.collected' | 'run.changed' | 'interaction.changed' | 'notification.changed' | 'session.revoked' | 'backup.changed' | 'capacity.changed'; projectId: string | null; graphId: string | null; entityId: string; revision: number; occurredAt: string; payload: Json }
 export interface Backup { id: string; state: 'creating' | 'ready' | 'failed'; createdAt: string; bytes: number | null; sha256: string | null }
 export interface HistoryCleanupPreview { runIds: string[]; processRecordCount: number; preserves: readonly ['runs', 'deliveries', 'assets', 'graphLinks'] }
 export interface RestorePreview { backupId: string; integrity: 'verified'; requiresMaintenance: true; invalidatesAllSessions: true; pausesQueuedRuns: true; serviceVersion: string; schemaVersion: number; targetServiceVersion: string; targetSchemaVersion: number; requiresUpgrade: boolean; sha256: string; serviceId: string }
@@ -157,6 +158,7 @@ export interface LocalRestoreControl { previewRestore(path: string): Promise<Res
 
 export { previewEdgeError } from "./preview.js";
 export * from './node-layout.js';
+export * from './node-import.js';
 export * from './skills.js';
 export * from './visualize.js';
 export * from './visualize-assets.js';

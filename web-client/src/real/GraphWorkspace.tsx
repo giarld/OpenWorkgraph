@@ -28,7 +28,7 @@ import { FileNodePreview, filePreviewMode, type FilePreviewMode } from './FileNo
 import { previewMode } from './preview-formats';
 import { VideoNodeSummary } from './VideoNodeSummary';
 import { ExecutionOutputList } from "./ExecutionOutputList";
-import { Toast } from './Toast';
+import { NotificationQueue, type NotificationItem } from './NotificationCenter';
 import { WorkspaceRestartHint } from './WorkspaceRestartHint';
 import { WorkspaceUpgradeHint, type WorkspaceUpgradeHintProps } from './WorkspaceUpgradeHint';
 import { SaveStatusMenu } from './SaveStatusMenu';
@@ -227,7 +227,6 @@ export interface GraphWorkspaceProps {
   onRunSubmitted?: (run: Run) => void;
   theme?: "light" | "dark";
   sidebarTarget?: HTMLElement | null;
-  toastTarget?: HTMLElement | null;
   temporary?: boolean;
   uploadFile?: (file: File) => Promise<CanvasCreated>;
   onPlaceProjectFile?: (relativePath: string) => void | Promise<void>;
@@ -1845,34 +1844,28 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     preview.click();
     return true;
   };
-  const localNoticeStamp = [visualizeSaveNotice, pasteState.count, pasteState.error ?? '', ...uploads.map(job => `${job.id}:${job.state}`)].join('\u0000');
-  useEffect(() => {
-    if (props.toastTarget) props.toastTarget.scrollTop = props.toastTarget.scrollHeight;
-  }, [localNoticeStamp, props.toastTarget]);
-  const notices = <>
-    <Toast open={pasteState.count > 0} duration={null} role="status" className="workgraph-paste-status">
-      <span>{t('Pasting nodes…')}</span>
-      {pasteState.progress && <span>{t('Resources {completed}/{total}', {completed:pasteState.progress.completed,total:pasteState.progress.total})}</span>}
-      {pasteState.count > 1 && <span>{t('{count} batches waiting', {count:pasteState.count - 1})}</span>}
-      {pasteState.warning && <span>{pasteState.warning}</span>}
-    </Toast>
-    {visualizeSaveNotice && <Toast key={visualizeSaveNotice} duration={5000} dismissLabel={t('Close')} onDismiss={() => setVisualizeSaveNotice('')}><span>{visualizeSaveNotice}</span></Toast>}
-    {uploads.map((job) => (
-      <Toast className="real-upload-status" key={job.id} duration={job.state === 'saved' ? 5000 : null} dismissLabel={job.state === 'uploading' ? undefined : t('Close')} onDismiss={() => setUploads(jobs => jobs.filter(j => j.id !== job.id))}>
-        <span>
-          {job.file.name} ·{" "}
-          {job.state === "saved"
-            ? t('Saved to the Work Graph')
-            : job.state === "failed"
-              ? t('Upload or placement failed')
-              : t('Uploading')}
-        </span>
-        {job.state === "uploading" && <span className="real-upload-percent" aria-label={t('Upload progress')}>{Math.max(0, Math.min(100, Math.round(job.progress)))}%</span>}
-        {job.state === 'failed' && job.error && <span role="alert">{job.error}</span>}
+  const notices: NotificationItem[] = [
+    ...(pasteState.count > 0 ? [{ id: 'paste', kind: 'progress' as const, duration: null,
+      content: <div className="workgraph-paste-status"><strong>{t('Pasting nodes…')}</strong>
+        {pasteState.progress && <span>{t('Resources {completed}/{total}', {completed:pasteState.progress.completed,total:pasteState.progress.total})}</span>}
+        {pasteState.count > 1 && <span>{t('{count} batches waiting', {count:pasteState.count - 1})}</span>}
+        {pasteState.warning && <span>{pasteState.warning}</span>}
+      </div>,
+    }] : []),
+    ...(visualizeSaveNotice ? [{ id: 'visualize-save', kind: 'success' as const, resetKey: visualizeSaveNotice, dismissLabel: t('Close'), content: visualizeSaveNotice }] : []),
+    ...uploads.map((job): NotificationItem => ({
+      id: job.id, kind: job.state === 'saved' ? 'success' : job.state === 'failed' ? 'error' : 'progress',
+      duration: job.state === 'saved' ? 5000 : null, resetKey: job.state,
+      dismissLabel: job.state === 'uploading' ? undefined : t('Close'),
+      content: <div className="real-upload-status">
+        <strong>{job.state === 'saved' ? t('Saved to the Work Graph') : job.state === 'failed' ? t('Upload or placement failed') : t('Uploading')}</strong>
+        <span>{job.file.name}</span>
+        {job.state === 'uploading' && <progress aria-label={t('Upload progress')} max={100} value={Math.max(0, Math.min(100, job.progress))}/>}
+        {job.state === 'failed' && job.error && <span>{job.error}</span>}
         {job.state === 'failed' && (job.visualize || !job.replacement && visualizeUploadMime(job.file)) && <button type="button" onClick={() => act(() => resumeUpload(job))}>{t('Retry')}</button>}
-      </Toast>
-    ))}
-  </>;
+      </div>,
+    })),
+  ];
   const renderNodeTools = (n: WorkNode, menu = false) => <>
     <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} type="button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16} aria-hidden="true"/></NodeToolButton>
     {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16} aria-hidden="true"/></NodeToolButton>}
@@ -2083,9 +2076,10 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           <button className="create-option" disabled={readOnly} onClick={() => { setCreateMenu(undefined); file.current?.click(); }}><Upload size={18}/>{t("Import file")}</button>
         </div>
       </>}
-      {props.toastTarget
-        ? createPortal(notices, props.toastTarget)
-        : <div className="workgraph-toast-viewport workgraph-notices" aria-label="Work Graph operation notifications">{notices}</div>}
+      <NotificationQueue items={notices} onDismiss={id => {
+        if (id === 'visualize-save') setVisualizeSaveNotice('');
+        else setUploads(jobs => jobs.filter(job => job.id !== id));
+      }}/>
       <div
         className="real-canvas-row"
         onCopyCapture={(e) => {

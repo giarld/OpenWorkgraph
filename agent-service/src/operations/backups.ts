@@ -91,6 +91,14 @@ function omitLocalState(db: DatabaseSync, revokedAt: number): number {
     changes += Number(db.prepare('UPDATE image_providers SET credential_revision=NULL WHERE credential_revision IS NOT NULL').run().changes);
     changes += Number(db.prepare('UPDATE image_provider_models SET verified_at=NULL WHERE verified_at IS NOT NULL').run().changes);
   }
+  if (hasTable(db, 'data_sources')) {
+    changes += Number(db.prepare('UPDATE data_sources SET credential_generation=NULL WHERE credential_generation IS NOT NULL').run().changes);
+    db.exec('UPDATE remote_temporary_targets SET writable=0; DELETE FROM data_source_host_challenges; DELETE FROM data_source_host_trust; UPDATE remote_transfers SET cache_path=NULL;');
+    for (const row of db.prepare('SELECT id,payload FROM remote_transfers').all()) {
+      const job = JSON.parse(String(row.payload));
+      if (['accepted','preparing','transferring','committing'].includes(job.state)) { job.state='interrupted'; job.error='Backup restored. Retry manually.'; job.revision++; db.prepare('UPDATE remote_transfers SET payload=? WHERE id=?').run(JSON.stringify(job), row.id!); changes++; }
+    }
+  }
   return changes;
 }
 function portableJournal(db: DatabaseSync): void {

@@ -1,3 +1,4 @@
+import { DataSourcesSettings } from './DataSourcesSettings';
 import { AgentSettingsPanel } from './AgentSettingsPanel';
 import { BackupRestoreDialog } from './BackupRestoreDialog';
 import { useWorkspaceAgents, type WorkspaceAgentStore } from './agent-state';
@@ -11,13 +12,13 @@ import { useI18n } from '../i18n/I18nProvider';
 import { errorCode } from './contracts';
 import './ManagementPanel.css';
 
-export type ManagementPage = 'projects' | 'add' | 'settings' | 'agents' | 'images' | 'storage' | 'backups' | 'sessions' | 'transfer';
+export type ManagementPage = 'projects' | 'add' | 'settings' | 'agents' | 'images' | 'storage' | 'backups' | 'sessions' | 'transfer' | 'data-sources';
 type SettingsPage = Exclude<ManagementPage, 'projects' | 'add' | 'settings'>;
 const pageTitles: Record<ManagementPage, string> = {
   projects: 'Project management', add: 'Add project', settings: 'More management',
   agents: 'Agent settings', images: 'Image generation agent · API providers',
   storage: 'Storage data management', backups: 'Workspace backups and restore',
-  sessions: 'Browser sessions', transfer: 'Work Graph import and export',
+  'data-sources': 'Data sources', sessions: 'Browser sessions', transfer: 'Work Graph import and export',
 };
 
 export interface ManagementPanelProps {
@@ -302,6 +303,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
       if (valid()) setRestorePreview(undefined);
     }); }}/> }
     <fieldset disabled={disabled} className="management-controls">
+    {page === 'data-sources' && <DataSourcesSettings request={props.request} disabled={writeDisabled} onBusyChange={props.onBusyChange} onDirtyChange={props.onDirtyChange}/> }
     {page === 'add' && <section className="management-section" aria-label={t('Add project')}>
       <button className="candidate-manual" type="button" disabled={writeDisabled} onClick={() => { setPath(''); setFailure(''); setManualOpen(true); }}><FolderPlus size={16} aria-hidden="true" />{t('Add a new project directory')}</button>
       <div className="candidate-heading">

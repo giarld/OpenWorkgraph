@@ -1,5 +1,7 @@
-.ow-skills-library { box-sizing: border-box; width: 100%; min-width: 0; overflow: auto; padding: 16px; color: var(--text); background: var(--panel); font-size: 13px; line-height: 1.5; }
+.ow-skills-library { box-sizing: border-box; width: 100%; min-width: 0; overflow: auto; padding: 16px; color: var(--text); background: var(--panel); font-size: 13px; line-height: 1.5; container-type: inline-size; }
 .real-sidebar .ow-skills-library { padding-top: 0; }
+.real-sidebar .sidebar-content .ow-skills-library { padding-top: 0; }
+.real-sidebar .sidebar-content .ow-skills-controls { padding-top: 8px; }
 .sidebar-tabs.has-skills { flex-wrap: nowrap; gap: 14px; height: 54px; overflow-x: auto; }
 .sidebar-tabs.has-skills > button { flex-shrink: 0; white-space: nowrap; }
 .sidebar-tabs.has-skills > .sidebar-collapse { position: sticky; right: 0; background: inherit; }
@@ -21,13 +23,10 @@
 .ow-skills-search:focus-within { outline: 2px solid var(--active); outline-offset: 2px; }
 .ow-skills-library .ow-skills-search input:focus-visible { outline: none; }
 .ow-skills-library .ow-skills-clear { display: grid; place-items: center; flex: none; width: 30px; min-height: 34px; padding: 0; border: 0; background: transparent; }
-.ow-skills-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.ow-skills-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .ow-skills-library .ow-skills-refresh { display: grid; place-items: center; flex: none; width: 36px; min-height: 36px; margin-left: auto; padding: 0; border-radius: 6px; }
 .ow-skills-workspace { display: block; margin-top: 8px; }
 .ow-skills-filter, .ow-skills-actions, .ow-skills-badges { display: flex; flex-wrap: wrap; gap: 8px; }
-.ow-skills-filter { min-width: 0; gap: 3px; padding: 3px; border-radius: 8px; background: color-mix(in srgb, var(--fill) 60%, var(--panel)); }
-.ow-skills-library .ow-skills-filter button { min-height: 30px; padding: 4px 10px; border-color: transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; }
-.ow-skills-library .ow-skills-filter button[aria-pressed=true] { border-color: var(--stroke); background: var(--panel); color: var(--text); box-shadow: 0 1px 2px #00000008; }
 .ow-skills-list { list-style: none; padding: 0; display: grid; gap: 10px; }
 .ow-skills-list li { position: relative; min-width: 0; padding: 12px; border: 1px solid var(--stroke); border-radius: 10px; overflow-wrap: anywhere; transition: border-color 150ms, background 150ms; }
 .ow-skills-list li:has(.ow-skills-open:hover:not(:disabled)), .ow-skills-list li:focus-within { border-color: var(--muted); background: var(--fill); }

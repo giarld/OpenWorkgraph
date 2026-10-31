@@ -39,7 +39,7 @@ export function VisualizeAssetPreview({ request, path, asset, onClose, onError }
   useEffect(() => {
     const priorInert = new Map<HTMLElement, boolean>();
     const isolate = () => { for (const child of document.body.children) {
-      if (!(child instanceof HTMLElement) || child === backdrop.current || child.classList.contains('workgraph-toast-viewport')) continue;
+      if (!(child instanceof HTMLElement) || child === backdrop.current) continue;
       if (!priorInert.has(child)) priorInert.set(child, child.inert); child.inert = true;
     } };
     isolate(); const observer = new MutationObserver(isolate); observer.observe(document.body, { childList: true });

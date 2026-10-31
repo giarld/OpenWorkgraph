@@ -247,10 +247,6 @@
   height: 100%;
   min-height: 0;
 }
-.workgraph-notices > p {
-  padding: 4px 16px;
-  margin: 0;
-}
 .real-canvas-mount {
   flex: 1;
   min-height: 420px;
@@ -431,7 +427,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-sidebar h2 { color: var(--muted); font-size: 12px; }
 .real-graph-item.graph-row { border: 0; font-size: 12px; }
 .real-main { overflow: hidden; }
-.workgraph-status-dock { position: absolute; right: 16px; top: 106px; z-index: 30; display: flex; flex-direction: column; gap: 10px; width: 300px; max-width: calc(100% - 32px); max-height: calc(100% - 122px); pointer-events: none; }
+.workgraph-status-dock { position: absolute; right: 16px; top: 106px; z-index: 30; display: flex; flex-direction: column; gap: 10px; width: 320px; max-width: calc(100% - 32px); max-height: calc(100% - 122px); pointer-events: none; }
 .workgraph-notifications { min-height: 0; display: flex; flex-direction: column; gap: 8px; pointer-events: auto; }
 .workgraph-notifications > header { display: flex; align-items: center; gap: 7px; padding: 4px 10px; color: var(--muted); background: var(--toolbar); border-radius: 8px; }
 .workgraph-notifications h2 { flex: 1; margin: 0; font-size: 12px; font-weight: 500; }
@@ -440,22 +436,38 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .workgraph-notifications > footer { padding: 0 2px 2px; }
 .real-app .workgraph-notifications-clear { display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 36px; margin: 0; border-radius: 8px; background: var(--toolbar); color: var(--muted); font-size: 12px; }
 .workgraph-notifications-clear:focus-visible { outline: 2px solid var(--active); outline-offset: -3px; }
-.workgraph-notifications ul { display: grid; gap: 8px; margin: 0; padding: 2px; list-style: none; overflow-x: hidden; overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
-.workgraph-notification { display: flex; align-items: center; min-width: 0; border: 1px solid color-mix(in srgb, var(--stroke) 65%, transparent); border-radius: 12px; box-shadow: 0 3px 12px #00000008; transition: border-color 150ms; }
+.workgraph-notifications ul { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 2px; list-style: none; overflow-x: hidden; overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+.workgraph-notification { --notice-color: var(--muted); position: relative; display: flex; align-items: flex-start; flex-shrink: 0; min-width: 0; padding: 12px 8px 12px 12px; gap: 9px; border: 1px solid color-mix(in srgb, var(--stroke) 65%, transparent); border-radius: 12px; box-shadow: 0 3px 12px #00000008; transition: border-color 150ms; }
 .workgraph-notification { animation: workgraph-notification-enter 260ms cubic-bezier(.2,.8,.2,1) both; }
 .workgraph-notification[data-phase=exit] { animation: workgraph-notification-exit 220ms ease-in both; pointer-events: none; }
 @keyframes workgraph-notification-enter { from { opacity: 0; transform: translateX(calc(100% + 16px)); } to { opacity: 1; transform: translateX(0); } }
 @keyframes workgraph-notification-exit { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(calc(100% + 16px)); } }
 .workgraph-notification:hover, .workgraph-notification:focus-within { border-color: var(--stroke); }
 .real-app .workgraph-notification button { border: 0; background: transparent; min-height: 44px; margin: 0; }
-.real-app .workgraph-notification button:hover:not(:disabled) { background: transparent; }
-.real-app .workgraph-notification-open { display: grid; gap: 6px; flex: 1; min-width: 0; padding: 12px; border-radius: 11px; text-align: left; }
+.real-app .workgraph-notification-open { display: grid; gap: 6px; width: 100%; min-width: 0; padding: 0; border-radius: 11px; text-align: left; }
 .workgraph-notification-status { display: flex; align-items: center; gap: 7px; font-size: 13px; }
 .workgraph-notification-status > svg { flex-shrink: 0; }
 .workgraph-notification-status > svg:last-child { margin-left: auto; color: var(--muted); }
 .workgraph-notification-source { overflow-wrap: anywhere; font-size: 12px; color: var(--muted); }
-.workgraph-notification time { font-size: 11px; color: var(--muted); }
-.real-app .workgraph-notification-dismiss { display: grid; place-items: center; flex: 0 0 44px; align-self: stretch; padding: 0; border-left: 1px solid color-mix(in srgb, var(--stroke) 45%, transparent); border-radius: 0 11px 11px 0; color: var(--muted); }
+.workgraph-notification time { font-size: 12px; color: var(--muted); }
+.real-app .workgraph-notification-dismiss { display: grid; place-items: center; flex: 0 0 28px; width: 28px; min-height: 28px; margin-top: -5px; padding: 0; border-radius: 6px; color: var(--muted); }
+/* Semantic accents pair color with an accessible type icon. */
+.workgraph-notification[data-kind=info], .workgraph-notification[data-kind=progress] { --notice-color: var(--active); }
+.workgraph-notification[data-kind=success] { --notice-color: var(--notice-success); }
+.workgraph-notification[data-kind=warning], .workgraph-notification[data-kind=action] { --notice-color: var(--notice-warning); }
+.workgraph-notification[data-kind=error] { --notice-color: var(--notice-error); }
+.workgraph-notification { border-inline-start: 3px solid color-mix(in srgb, var(--notice-color) 70%, var(--stroke)); }
+.workgraph-notification-icon { display: grid; place-items: center; flex: 0 0 18px; height: 22px; color: var(--notice-color); }
+.workgraph-notification-body { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+.workgraph-notification-body > div { min-width: 0; }
+.real-app .workgraph-notification-body button:not(.workgraph-notification-open) { justify-self: start; min-height: 32px; padding: 4px 8px; border: 1px solid var(--stroke); border-radius: 6px; font: inherit; }
+.real-app .workgraph-notification button:hover:not(:disabled) { background: color-mix(in srgb, var(--fill) 48%, transparent); }
+.real-pending-request-notification .workgraph-notification-body { display: grid; gap: 8px; }
+.real-upload-status progress { width: 100%; height: 5px; accent-color: var(--notice-color); }
+.workgraph-notification[data-kind=progress] .workgraph-notification-icon svg { animation: notification-spin 1.2s linear infinite; }
+@keyframes notification-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .workgraph-notification[data-kind=progress] .workgraph-notification-icon svg { animation: none; } }
+@media (pointer: coarse) { .real-app .workgraph-notification-dismiss { flex-basis: 44px; width: 44px; min-height: 44px; } .real-app .workgraph-notification-body button:not(.workgraph-notification-open) { min-height: 44px; } }
 .workgraph-notification button:focus-visible { outline: 2px solid var(--active); outline-offset: -3px; }
 @media (prefers-reduced-motion: reduce) { .workgraph-notification, .workgraph-notification[data-phase=exit] { transition: none; animation-duration: 1ms; } }
 .real-workspace { position: relative; }
@@ -465,7 +477,6 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-toolbar,
 .real-service-panel,
 .workgraph-notification,
-.workgraph-toast,
 .real-workspace .graph-main-menu,
 .real-workspace .graph-recent-menu,
 .real-workspace .workgraph-save-menu,
@@ -501,23 +512,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 
 .real-sidebar-open { position: absolute; top: 16px; left: 16px; z-index: 44; }
 .sidebar-closed .real-toolbar { left: 62px; }
-.workgraph-toast-viewport { display: grid; justify-items: center; gap: 8px; width: max-content; max-width: calc(100% - 32px); max-height: min(420px, calc(100% - 96px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; pointer-events: none; }
-.workgraph-toast-viewport > * { min-width: 0; max-width: 100%; pointer-events: auto; padding: 10px 14px; margin: 0; border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
-.real-toast-queue { position: absolute; top: 72px; left: 50%; transform: translateX(-50%); z-index: 110; }
-.real-pending-request-toast { display: grid; gap: 8px; }
-.real-pending-request-toast button { justify-self: start; }
-.workgraph-toast-dismiss { min-width: 32px; margin-inline-start: 8px; padding-inline: 9px; font-weight: 600; }
-.real-app .workgraph-toast button { background: transparent; }
-.real-app .workgraph-toast button:hover:not(:disabled), .real-app .workgraph-toast button:focus-visible { background: color-mix(in srgb, var(--fill) 48%, transparent); }
-.real-app .workgraph-toast .workgraph-toast-dismiss { border-color: transparent; text-align: center; }
-.workgraph-notices { position: absolute; top: 68px; left: 50%; transform: translateX(-50%); z-index: 45; max-height: min(240px, 40%); }
-.workgraph-toast { animation: workgraph-toast-enter 220ms cubic-bezier(.2,.8,.2,1) both; }
-.workgraph-toast[data-phase=exit] { animation: workgraph-toast-exit 180ms ease-in both; pointer-events: none; }
-@keyframes workgraph-toast-enter { from { opacity: 0; translate: 0 -10px; } to { opacity: 1; translate: 0 0; } }
-@keyframes workgraph-toast-exit { from { opacity: 1; translate: 0 0; } to { opacity: 0; translate: 0 -8px; } }
-@media (prefers-reduced-motion: reduce) { .workgraph-toast, .workgraph-toast[data-phase=exit] { animation-duration: 1ms; } }
-.workgraph-paste-status { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px 12px; }
-.real-upload-percent { color: var(--muted); font-variant-numeric: tabular-nums; }
+.workgraph-paste-status, .real-upload-status { display: grid; gap: 6px; min-width: 0; }
 .real-text-content { padding: 0; }
 @media (max-width: 1000px) {
   .real-sidebar.left-sidebar { width: 220px; }
@@ -746,6 +741,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .real-service-panel { top: 106px; }
 @media (max-width: 700px) {
   .real-toolbar { top: 154px; }
+  .workgraph-status-dock { top: 214px; max-height: calc(100% - 230px); }
   .real-search { top: 210px; }
   .graph-main-menu { top: 200px; max-height: calc(100dvh - 216px); }
   .workgraph-library { padding-top: 154px; }

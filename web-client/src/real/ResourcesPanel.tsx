@@ -433,7 +433,7 @@ function AssetPreviewDialog({ request, path, asset, onClose, onError }: { reques
     const priorInert = new Map<HTMLElement, boolean>();
     const isolateBackground = () => {
       for (const child of document.body.children) {
-        if (!(child instanceof HTMLElement) || child === backdrop.current || child.classList.contains('workgraph-toast-viewport')) continue;
+        if (!(child instanceof HTMLElement) || child === backdrop.current) continue;
         if (!priorInert.has(child)) priorInert.set(child, child.inert);
         child.inert = true;
       }
@@ -730,7 +730,7 @@ function ResourcesPanelScope({ ready = true, refreshToken = 0, request, projectI
     {pending && !busy && <div className="ow-resource-recovery">{canEnd ? <><p>{t('The resource version changed. End this attempt and choose again.')}</p><button disabled={readOnly} onClick={() => { if (locked.current || !pending.canEnd?.()) return; setPending(undefined); setCanEnd(false); setSelection(undefined); setChoice(''); setProgress(0); setError(''); setRefresh(v => v + 1); }}>{t('End this attempt and choose again')}</button></> : <><p>{t('The operation is not confirmed. Retrying will reuse the original submission.')}</p><button disabled={readOnly} onClick={() => void execute(pending)}>{t('Retry: {action}', { action: pending.label })}</button></>}</div>}
     <div className="ow-assets-groups">
       {loading ? <div className="ow-assets-empty" role="status">{ready ? t('Loading assets…') : t('Connecting to Workspace; assets will load automatically when ready…')}</div> : assets.length === 0 ? <div className="ow-assets-empty"><Archive size={24} /><strong>{error ? t('Assets are temporarily unavailable') : t('No matching assets')}</strong><p>{error ? t('Refresh and try again.') : t('No assets match the current filters.')}</p>{!error && <button onClick={() => { setSearch(''); setDeleted(false); setScope('available'); setPage(0); }}>{t('Reset filters')}</button>}</div> : groups.filter(g => g.items.length).map((group, index) => <React.Fragment key={group.id}>
-        <button className="ow-assets-group-heading" style={{ top: 'calc(var(--asset-controls-height, 140px) + ' + index * 32 + 'px)' }} aria-expanded={!collapsed[group.id]} onClick={() => setCollapsed(v => ({ ...v, [group.id]: !v[group.id] }))}><ChevronDown size={14} className={collapsed[group.id] ? 'is-collapsed' : ''} /><group.Icon size={15} /><strong>{group.label}</strong><span>{group.items.length}</span></button>
+        <button className="ow-assets-group-heading" style={{ top: 'calc(var(--asset-library-toolbar-height, 0px) + var(--asset-controls-height, 140px) + ' + index * 32 + 'px)' }} aria-expanded={!collapsed[group.id]} onClick={() => setCollapsed(v => ({ ...v, [group.id]: !v[group.id] }))}><ChevronDown size={14} className={collapsed[group.id] ? 'is-collapsed' : ''} /><group.Icon size={15} /><strong>{group.label}</strong><span>{group.items.length}</span></button>
         {!collapsed[group.id] && <ul className="ow-assets-list">{group.items.map(asset => <li key={asset.id} title={asset.name} className={'ow-assets-card' + (asset.shared && !asset.deleted ? ' is-shared' : '')} draggable={!disabled && !asset.deleted} onDragStart={event => {
             if (!dragAllowed.current || asset.deleted || (event.target as Element).closest('.ow-assets-card-menu, .ow-assets-quick-actions')) { event.preventDefault(); return; }
             cancelDrag.current?.();

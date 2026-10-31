@@ -1,3 +1,8 @@
+import { AssetLibraryPanel } from './AssetLibraryPanel';
+import { WorkspaceTransferNotifications } from './RemoteTransferNotifications';
+import { useRemoteDeliveries } from './use-remote-deliveries';
+import { remoteAssetsCache } from './remote-assets-cache';
+import { withRemoteTemporaryTargets } from './remote-temporary-targets';
 import { workspaceAgentStore } from './agent-state';
 import { useWorkspaceMaintenance, WorkspaceMaintenanceDialog } from './WorkspaceMaintenance';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
@@ -7,6 +12,7 @@ import { Moon, Sun, PanelLeftClose, PanelLeftOpen, Settings, Settings2, Bell, Ch
 import { ArrowLeft, ChevronLeft, FolderPlus } from "lucide-react";
 import { randomId } from "../adapter/random";
 import { FILE_NODE_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
+import { defaultWorkgraphNodeSize } from '../../../packages/protocol/src/node-layout';
 import { runtimeStatus } from './runtime-status';
 import { runtimeNeedsUpgrade } from '../domain/runtime-version';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
@@ -30,7 +36,7 @@ import { graphPath, messageOf } from "./contracts";
 import { useTemporaryCanvases } from "./use-temporary-canvases";
 import type { GraphBundle } from '../../../packages/protocol/src/index';
 import { GraphWorkspace } from "./GraphWorkspace";
-import { appendToastQueueItem, ToastQueue, type ToastQueueItem } from './Toast';
+import { appendNotification, NotificationCenter, NotificationProvider, NotificationQueue, type NotificationItem } from './NotificationCenter';
 import { readRecentGraphs, rememberGraph, type RecentGraph } from './recent-graphs';
 import type { CanvasHandle, Point } from '../canvas/Canvas';
 import { executionUnavailableReason } from './execution-availability';
@@ -230,9 +236,8 @@ export function RealApp() {
       localStorage.setItem('openworkgraph:selection:v1', JSON.stringify({ temporary, activeService, projectId, graphId, filter }));
     } catch { /* Navigation remains available when browser storage is disabled. */ }
   }, [temporary, activeService, projectId, graphId, filter]);
-  const [toastItems, setToastItems] = useState<ToastQueueItem[]>([]);
-  const [toastViewport, setToastViewport] = useState<HTMLDivElement | null>(null);
-  const toastSequence = useRef(0);
+  const [actionNotices, setActionNotices] = useState<NotificationItem[]>([]);
+  const noticeSequence = useRef(0);
   const [refresh, setRefresh] = useState(0);
   const [assetsRevision, setAssetsRevision] = useState(0);
   const [modelRevision, setModelRevision] = useState(0);
@@ -262,19 +267,19 @@ export function RealApp() {
     association?: () => Promise<GraphSnapshot>;
     uncertain: boolean;
   }>());
-  const enqueueToast = useCallback((content: string, role: 'status' | 'alert' = 'alert') => {
-    const id = `toast-${++toastSequence.current}`;
-    setToastItems(items => appendToastQueueItem(items, { id, content, role, duration: role === 'alert' ? 10000 : 5000, dismissLabel: t('Close') }));
+  const enqueueNotice = useCallback((content: string, role: 'status' | 'alert' = 'alert') => {
+    const id = `notice-${++noticeSequence.current}`;
+    setActionNotices(items => appendNotification(items, { id, content, kind: role === 'alert' ? 'error' : 'info', dismissLabel: t('Close') }));
   }, [t]);
-  const dismissToast = useCallback((id: string) => {
-    setToastItems(items => items.filter(item => item.id !== id));
+  const dismissNotice = useCallback((id: string) => {
+    setActionNotices(items => items.filter(item => item.id !== id));
   }, []);
   const onError = useCallback((e: unknown) => {
     if (!isLifecycleCancellation(e)) {
       const message = messageOf(e);
-      enqueueToast(message === 'The visualization file version is unsupported by this Workspace.' ? t('The visualization file version is unsupported by this Workspace.') : message);
+      enqueueNotice(message === 'The visualization file version is unsupported by this Workspace.' ? t('The visualization file version is unsupported by this Workspace.') : message);
     }
-  }, [enqueueToast, t]);
+  }, [enqueueNotice, t]);
   const local = useTemporaryCanvases(onError);
   const changed = useCallback(() => setRefresh((n) => n + 1), []);
   const serviceRefreshers = useRef(new Map<string, (created?: GraphSnapshot) => void>());
@@ -403,8 +408,8 @@ export function RealApp() {
   );
   const current = data[serviceId];
   useEffect(() => {
-    if (current?.error) enqueueToast(current.error);
-  }, [serviceId, current?.error, enqueueToast]);
+    if (current?.error) enqueueNotice(current.error);
+  }, [serviceId, current?.error, enqueueNotice]);
   const project =
     current?.projects.find((p) => p.projectId === projectId) ??
     current?.projects[0];
@@ -603,6 +608,7 @@ export function RealApp() {
   }, [request, online, current?.revision]);
   const bridgeScope = JSON.stringify([serviceId, connection?.generation, project?.projectId, graph?.graphId, online, navigation.current]);
   const bridgeContext = useRef(bridgeScope); bridgeContext.current = bridgeScope;
+  const remoteBrowserId = useRemoteDeliveries({ store: local.store, request, serviceId, ready: !!online && connection?.info.capabilities.remoteAssets?.status === 'available', refreshToken: local.revision, onChanged: () => { void local.refresh().then(() => editor.current?.refresh()); }, onError });
   const localBridge = useMemo(() => {
     if (!localMode || !graph) return undefined;
     const binding = online && connection && project?.state === "active" ? {
@@ -1005,7 +1011,7 @@ export function RealApp() {
     .list()
     .filter((t) => services.some((c) => c.serviceId === t.serviceId));
   return (
-    <main inert={!!maintenance} className={"app real-app " + (leftOpen ? "" : "sidebar-closed")}>
+    <NotificationProvider><main inert={!!maintenance} className={"app real-app " + (leftOpen ? "" : "sidebar-closed")}>
       {maintenance && <WorkspaceMaintenanceDialog state={maintenance} onAcknowledge={acknowledgeRestore}/>}
       {confirmTrashGraphs && <ConfirmationDialog title={t('Confirm move to trash')}
         text={confirmTrashGraphs.length === 1
@@ -1102,13 +1108,13 @@ export function RealApp() {
             onClick={() => {
               if (desktopNotificationsEnabled) {
                 notifications.disableDesktop();
-                enqueueToast(t('Desktop notifications disabled'), 'status');
+                enqueueNotice(t('Desktop notifications disabled'), 'status');
                 return;
               }
               void notifications
                 .enableDesktop()
                 .then((p) => {
-                  enqueueToast(
+                  enqueueNotice(
                     p === "granted"
                       ? t('Desktop notifications enabled')
                       : p === "unsupported"
@@ -1155,20 +1161,23 @@ export function RealApp() {
           </button>
         </div>
       </header>
-      <div ref={setToastViewport} className="workgraph-toast-viewport real-toast-queue" aria-label={t('Action notifications')}/>
-      <ToastQueue
-        target={toastViewport}
+      {services.map(c => <WorkspaceTransferNotifications
+        key={c.serviceId + ':' + c.generation} registry={registry} connection={c}
+        ready={c.status === 'paired' && data[c.serviceId]?.eventStatus === 'connected' && c.info.capabilities.remoteAssets?.status === 'available'}
+        browserId={remoteBrowserId} onError={onError}
+      />)}
+      <NotificationQueue
         items={[
-          ...toastItems,
+          ...actionNotices,
           ...pendingTransports.flatMap(source => source.pending().map(p => ({
-            id: `pending-${p.id}`,
-            role: 'alert' as const,
+            id: `pending-${source.serviceId}-${p.id}`,
+            kind: 'warning' as const,
             duration: null,
-            className: 'real-pending-request-toast',
+            className: 'real-pending-request-notification',
             content: <><strong>{t('Request with unknown result')}</strong><span>{p.persistence === 'memory' ? t('The original request is stored only in this tab. Do not close the page or repeat the import; reconnect to reconcile it here.') : t('Do not create another operation. Reconnect and use the original request to reconcile it; runs are not resubmitted automatically.')}</span><code>{p.path}</code><button disabled={registry.get(source.serviceId)?.status !== 'paired' || busy || !!reconcilingRequest} onClick={() => act(() => reconcilePendingRequest(source, p))}>{t('Reconcile with the original key and body')}</button></>,
           }))),
         ]}
-        onDismiss={dismissToast}
+        onDismiss={dismissNotice}
       />
       <div className="real-layout">
         <aside className={'real-sidebar left-sidebar' + (leftOpen && page === 'editor' ? '' : ' left-sidebar-collapsed')} aria-label={t('Work Graph sidebar')} aria-hidden={!leftOpen || page !== 'editor'} inert={!leftOpen || page !== 'editor'} style={{ '--sidebar-minimum-width': `${sidebarMinimumWidth}px`, width: leftOpen && page === 'editor' ? Math.max(sidebarMinimumWidth, leftSidebarWidth ?? 280) : 0 } as CSSProperties}>
@@ -1185,7 +1194,30 @@ export function RealApp() {
           {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position, kind) => { void placeProjectFile(path, position, kind).catch(onError); }}/>}
                     {tab === "assets" && assetsAvailable &&
             (graph ? (
-              <ResourcesPanel
+              <AssetLibraryPanel
+                serviceId={serviceId}
+                remoteRequest={request}
+                remoteMutationBlocked={!!transport?.pending().some(p => p.path === '/v1/remote-transfers') || reconcilingRequest?.path === '/v1/remote-transfers'}
+                visible={leftOpen && page === 'editor' && tab === 'assets'}
+                onSettings={() => { setSettingsEntry({ workspaceId: serviceId, page: 'data-sources', sequence: Date.now() }); setSettingsOpen(true); }}
+                getRemoteTarget={async (action) => {
+                  const targetGraph = graph;
+                  const targetProjectId = localMode ? project?.projectId : graph.projectId;
+                  if (!targetProjectId) throw Error(t('Select a project first'));
+                  if (action === 'library') return { kind: 'library', projectId: targetProjectId };
+                  if (targetGraph.archived || targetGraph.trashed || !canvas.current) throw Error(t('The current Work Graph is read-only.'));
+                  const position = canvas.current?.getPlacementPosition(defaultWorkgraphNodeSize('file')) ?? { x: 0, y: 0 };
+                  if (localMode) {
+                    const browserId = remoteBrowserId || await remoteAssetsCache.browserId();
+                    await withRemoteTemporaryTargets(serviceId, browserId, async () => {
+                      const latest = await local.store.request<GraphSnapshot>(graphPath('temporary',targetGraph.graphId));
+                      if (latest.archived || latest.trashed) throw Error(t('The current Work Graph is read-only.'));
+                      await request('/v1/remote-transfers/temporary-targets', { browserId, graphId: targetGraph.graphId, projectId: targetProjectId, revision: latest.executionRevision + latest.layoutRevision }, 'POST', { journal: 'memory' });
+                    });
+                    return { kind: 'temporary', projectId: targetProjectId, graphId: targetGraph.graphId, browserId, ...position };
+                  }
+                  return { kind: 'graph', projectId: targetProjectId, graphId: targetGraph.graphId, ...position };
+                }}
                 ready={!!online}
                 refreshToken={assetsRevision}
                 key={
@@ -1435,10 +1467,11 @@ export function RealApp() {
           {creationPending && <ProgressDialog title={t('Creating Work Graph…')} />}
           {!leftOpen && <button className="icon-button panel real-sidebar-open" aria-label={t('Expand sidebar')} onClick={() => setLeftOpen(true)}><PanelLeftOpen size={18}/></button>}
           <div className="workgraph-status-dock">
-            {page === 'editor' && <RunNotifications todos={todos}
+            <NotificationCenter/>
+            <RunNotifications todos={todos}
               onOpen={id => { void notifications.open(id).catch(onError); }}
               onDismiss={id => { void notifications.dismiss(id).catch(onError); }}
-              onDismissAll={() => { void notifications.dismissAll().catch(onError); }} />}
+              />
           </div>
           {graph && page === 'editor' && (
             <div
@@ -1533,7 +1566,6 @@ export function RealApp() {
                 onDelete={() => setActionDialog('trash')}
                 onExport={() => act(() => exportGraph(graph))}
                 sidebarTarget={nodeSidebar}
-                toastTarget={toastViewport}
                 theme={theme}
                 request={canvasRequest}
                 serviceRequest={localMode ? localBridge?.request : graphRequest}
@@ -1667,7 +1699,7 @@ export function RealApp() {
           )}
         </aside>
       </div>
-    </main>
+    </main></NotificationProvider>
   );
 }
 function ServiceMonitor({
@@ -1834,6 +1866,8 @@ function ServiceMonitor({
           onEvent: async (event) => {
             // Preparing/copying resource bytes does not change graph topology.
             // The subsequent graph.changed event publishes the atomic placement.
+            if (event.type === 'remote-transfer.changed') { window.dispatchEvent(new CustomEvent('openworkgraph:remote-transfers-changed', {detail:{serviceId:event.serviceId,payload:event.payload}})); return; }
+            if (event.type === 'data-source.changed') { window.dispatchEvent(new CustomEvent('openworkgraph:data-sources-changed')); return; }
             if (event.type.startsWith('canvas_resource.')) return;
             window.dispatchEvent(new CustomEvent('openworkgraph:service-event', {detail:event}));
             if (event.type === 'project.files.changed') window.dispatchEvent(new CustomEvent('openworkgraph:project-files-changed', { detail:{ serviceId:event.serviceId, projectId:event.projectId, payload:event.payload } }));

@@ -1,0 +1,116 @@
+/* Keep these controls scoped: settings and sidebar defaults have different insets. */
+.asset-library-panel { min-width: 0; container: asset-library / inline-size; }
+/* Fill the visible content area while the first remote listing is pending. */
+.sidebar-content:has(.remote-assets-loading),
+.sidebar-content > div:has(> .asset-library-panel .remote-assets-loading),
+.asset-library-panel:has(.remote-assets-loading),
+.asset-library-panel > [role=tabpanel]:has(.remote-assets-loading),
+.remote-assets-browser:has(.remote-assets-loading) { display: flex; flex-direction: column; flex: 1; }
+.remote-assets-loading { display: grid; place-items: center; flex: 1; min-height: 80px; color: var(--muted); }
+.remote-assets-loading svg { animation: remote-assets-loading-spin 1s linear infinite; }
+@keyframes remote-assets-loading-spin { to { transform: rotate(360deg); } }
+.remote-library-toolbar,
+.remote-source-toolbar,
+.remote-source-actions { display: flex; align-items: center; gap: 8px; }
+/* This height is observed so wrapped labels also reserve the correct sticky offset. */
+.remote-library-toolbar { position: sticky; top: 0; z-index: 9; padding: 8px 0; background: var(--panel); }
+/* Keep the search inset inside the sticky header so it cannot scroll away. */
+.real-sidebar .asset-library-panel .ow-resources-panel { padding-top: 0; }
+.real-sidebar .sidebar-content .asset-library-panel .ow-assets-controls { top: var(--asset-library-toolbar-height, 52px); padding-top: 8px; }
+.remote-library-toolbar button,
+.remote-assets-browser button,
+.remote-source-settings button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-width: 0; min-height: 36px; margin: 0; padding: 7px 10px;
+  border: 1px solid var(--stroke); border-radius: 8px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 13px; line-height: 1.4;
+  cursor: pointer; transition: background 150ms, border-color 150ms;
+}
+.remote-library-toolbar button:hover:not(:disabled),
+.remote-assets-browser button:hover:not(:disabled),
+.remote-source-settings button:hover:not(:disabled) { background: var(--fill); }
+.remote-library-toolbar button:focus-visible,
+.remote-assets-browser :is(button, select):focus-visible,
+.remote-source-settings :is(button, input, select):focus-visible { outline: 2px solid var(--active); outline-offset: 2px; }
+.remote-library-toolbar button:disabled,
+.remote-assets-browser button:disabled,
+.remote-source-settings button:disabled { opacity: .5; cursor: not-allowed; }
+.remote-assets-browser { min-width: 0; padding: 4px 0 16px; font-size: 13px; line-height: 1.5; }
+.remote-source-toolbar { min-width: 0; }
+.remote-assets-browser .remote-source-toolbar select { width: 0; flex: 1; min-width: 0; text-overflow: ellipsis; }
+.remote-assets-browser .remote-source-toolbar > button { flex: 0 0 36px; width: 36px; height: 36px; padding: 0; }
+.remote-assets-browser select {
+  box-sizing: border-box; min-height: 36px; padding: 7px 8px;
+  border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas, var(--panel)); color: var(--text); font: inherit; font-size: 12px;
+}
+.remote-breadcrumbs { display: flex; align-items: flex-start; gap: 4px; margin: 8px 0 12px; min-width: 0; }
+.remote-breadcrumbs ol { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; list-style: none; padding: 0; margin: 0; }
+.remote-breadcrumbs li { display: flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; }
+.remote-breadcrumbs svg { flex-shrink: 0; color: var(--muted); }
+.remote-assets-browser .remote-breadcrumbs button { min-height: 32px; max-width: 100%; padding: 5px 6px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+.remote-assets-browser .remote-breadcrumbs li button { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-assets-browser .remote-breadcrumbs button[aria-current] { color: var(--text); font-weight: 600; }
+/* The grid, tiles and thumbnails use ProjectFilesPanel.css without size overrides. */
+.remote-assets-browser .ow-project-file-tile { line-height: inherit; }
+.remote-asset-card[draggable=true] .remote-entry-main { cursor: grab; }
+.remote-assets-browser div.remote-entry-main:hover { background: var(--fill); border-color: transparent; }
+.remote-asset-card:focus-within .remote-entry-main { background: var(--fill); border-color: var(--muted); }
+.remote-entry-actions { position: absolute; top: 4px; right: 4px; left: 4px; display: flex; justify-content: flex-end; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 150ms ease; }
+.remote-assets-browser .remote-entry-actions .ow-project-file-add { flex: 0 1 28px; min-width: 0; height: 28px; min-height: 28px; padding: 0; border-radius: 6px; }
+.remote-asset-card:hover .remote-entry-actions, .remote-asset-card:focus-within .remote-entry-actions { opacity: 1; }
+.remote-entry-error { width: 100%; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.remote-assets-browser p { margin: 10px 0; overflow-wrap: anywhere; font-size: 13px; }
+.remote-assets-empty { display: grid; justify-items: center; gap: 10px; padding: 28px 12px; border: 1px dashed var(--stroke); border-radius: 12px; color: var(--muted); text-align: center; }
+.remote-assets-empty p { margin: 0; }
+
+/* Explicit field sizing prevents management-panel margins from doubling row gaps. */
+.remote-source-settings { width: 100%; max-width: 720px; min-width: 0; container: source-settings / inline-size; font-size: 14px; line-height: 1.5; }
+.remote-source-settings .remote-source-toolbar { align-items: flex-end; padding-bottom: 20px; border-bottom: 1px solid var(--stroke); }
+.remote-source-settings .remote-source-toolbar > label { flex: 1; }
+.remote-source-settings .remote-source-toolbar > button { flex: 0 0 40px; width: 40px; height: 40px; padding: 0; }
+.remote-source-settings :is(.remote-source-fields, .remote-source-toolbar, .remote-host-challenge) label { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 0; margin: 0; font-size: 13px; }
+.remote-source-settings .remote-source-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px 16px; min-width: 0; margin: 20px 0 0; padding: 0; border: 0; }
+.remote-source-wide, .remote-source-actions { grid-column: 1 / -1; }
+.remote-source-address { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 16px; min-width: 0; }
+.remote-source-settings label :is(input, select) {
+  box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; height: 40px; min-height: 40px;
+  padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 14px;
+}
+.remote-source-settings button[type] { margin: 0; min-height: 40px; padding: 8px 12px; font-size: 14px; }
+.remote-source-settings button svg { flex-shrink: 0; }
+.remote-source-credential { display: grid; gap: 8px; min-width: 0; }
+.remote-source-settings button.remote-credential-remove { justify-self: start; min-height: 32px; padding: 4px 0; border: 0; background: transparent; color: var(--muted); font-size: 12px; text-align: start; }
+.remote-source-actions { flex-wrap: wrap; padding-top: 20px; border-top: 1px solid var(--stroke); }
+.remote-source-settings .remote-source-save { min-width: 72px; background: var(--active); color: var(--panel); border-color: var(--active); }
+.remote-source-settings .remote-source-save:hover:not(:disabled) { background: var(--text); }
+.remote-source-settings button.remote-source-remove { margin-inline-start: auto; color: var(--muted); }
+.remote-host-challenge { display: grid; gap: 12px; min-width: 0; padding: 16px; margin-top: 20px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--canvas, var(--panel)); }
+.remote-host-challenge strong, .remote-host-challenge code { overflow-wrap: anywhere; }
+.remote-host-challenge code { display: block; padding: 8px 10px; border-radius: 6px; background: var(--fill); font-size: 12px; }
+.remote-host-challenge button { justify-self: start; max-width: 100%; }
+.remote-source-settings p { overflow-wrap: anywhere; }
+.remote-source-settings [role=alert], .remote-assets-browser [role=alert] { padding: 10px 12px; border: 1px solid var(--stroke); border-inline-start: 3px solid var(--muted); border-radius: 8px; background: var(--fill); color: var(--text); }
+@container source-settings (max-width: 480px) {
+  .remote-source-settings .remote-source-fields { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .remote-source-settings button.remote-source-remove { margin-inline-start: 0; }
+}
+@media (hover: none), (pointer: coarse) {
+  .remote-library-toolbar button, .remote-assets-browser button,
+  .remote-library-toolbar [role=tab], .remote-assets-browser .remote-breadcrumbs button,
+  .remote-source-settings button[type],
+  .remote-source-settings label :is(input, select) { min-height: 44px; }
+  .remote-assets-browser .remote-source-toolbar > button { flex-basis: 44px; width: 44px; height: 44px; }
+  .remote-source-settings .remote-source-toolbar > button { flex-basis: 44px; width: 44px; height: 44px; }
+  .remote-source-settings label :is(input, select) { height: 44px; }
+  .remote-assets-grid { grid-template-columns: repeat(auto-fill, minmax(min(144px, 100%), 1fr)); }
+  .remote-entry-actions { opacity: 1; }
+  .remote-assets-browser .remote-entry-actions .ow-project-file-add { flex: 0 0 44px; width: 44px; height: 44px; min-height: 44px; }
+  .remote-assets-browser .remote-asset-thumbnail { margin-top: 36px; }
+  .remote-assets-browser select { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .remote-assets-loading svg { animation: none; }
+  .remote-library-toolbar button, .remote-assets-browser button, .remote-source-settings button,
+  .remote-entry-actions { transition: none; }
+}

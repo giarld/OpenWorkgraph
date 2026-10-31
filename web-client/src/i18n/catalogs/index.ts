@@ -3,6 +3,8 @@
 import { zhCN } from '../messages';
 import { adaptersZhCN } from './adapters';
 import './app';
+import './settings';
+import './remote-assets';
 import './agent-configuration';
 import { componentsZhCN } from './components';
 import managementZhCN from './management';

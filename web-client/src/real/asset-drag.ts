@@ -2,7 +2,8 @@ import { randomId } from '../adapter/random';
 import type { Point } from '../canvas/geometry';
 
 const assetDragType = 'application/x-openworkgraph-library-asset';
-type Context = { request: unknown; projectId: string; graphId: string };
+export type AssetDragContext = { request: unknown; projectId: string; graphId: string };
+type Context = AssetDragContext;
 let active: (Context & { token: string; place: (position: Point) => void }) | undefined;
 
 /** Only a live drag from this page may invoke its pinned copy operation. */

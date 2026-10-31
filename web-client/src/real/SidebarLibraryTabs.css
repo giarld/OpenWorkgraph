@@ -1,0 +1,8 @@
+/* Shared segmented tabs for the asset and skill libraries. */
+.ow-library-tabs[role] { display: flex; flex: 0 1 auto; flex-wrap: nowrap; align-items: stretch; min-width: 0; max-width: 100%; gap: 3px; padding: 3px; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--fill) 60%, var(--panel)); }
+.ow-library-tabs[role] > button { flex: 0 1 auto; min-width: 0; min-height: 30px; margin: 0; padding: 4px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 400; line-height: 18px; cursor: pointer; }
+.ow-library-tabs[role] > button:hover:not(:disabled) { background: var(--fill); }
+.ow-library-tabs[role] > button:is([aria-selected=true], [aria-pressed=true]) { border-color: var(--stroke); background: var(--panel); color: var(--text); box-shadow: 0 1px 2px #00000008; }
+.ow-library-tabs[role] > button:focus-visible { outline: 2px solid var(--active); outline-offset: -2px; }
+@container (max-width: 235px) { .ow-library-tabs[role] > button { padding-inline: 6px; } }
+@media (hover: none), (pointer: coarse) { .ow-library-tabs[role] > button { min-height: 44px; } }

@@ -21,7 +21,11 @@ export class WorkspaceRestore {
   private state: WorkspaceMaintenance;
   private readonly challenges = new Map<string, Challenge>();
   private work: Promise<void> = Promise.resolve();
-  constructor(private readonly db: DatabaseSync, private readonly directories: DataDirectories, private readonly lock: OperationsLock | undefined, private readonly logger: Logger, private readonly backups: () => Backups, private readonly hooks: RestoreHooks) { this.state = readRestoreState(directories.root); }
+  constructor(private readonly db: DatabaseSync, private readonly directories: DataDirectories, private readonly lock: OperationsLock | undefined, private readonly logger: Logger, private readonly backups: () => Backups, private readonly hooks: RestoreHooks) {
+    const previous = readRestoreState(directories.root);
+    // Completion is reported to observers of this process; a new process starts idle.
+    this.state = previous.state === 'completed' && !previous.blocked ? { state: 'idle', blocked: false } : previous;
+  }
   get status(): WorkspaceMaintenance { return { ...this.state }; }
   settled(): Promise<void> { return this.work; }
   async runtimeFailed(error: unknown): Promise<void> {

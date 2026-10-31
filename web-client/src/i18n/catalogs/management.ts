@@ -240,7 +240,7 @@ export const managementZhCN: Record<string, string> = {
   "Drag a file in, or click": "拖入文件，或点击",
   "plus": "加号",
   "to add a reference": "添加引用",
-  "Double-click a folder to open it": "双击文件夹进入目录",
+  "Click a folder to open it": "单击文件夹进入目录",
   "Resource": "资源",
   "Loading preview…": "正在加载预览…",
   "Retry preview": "重试预览",

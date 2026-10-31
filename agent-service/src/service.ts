@@ -125,6 +125,7 @@ export function createService(
       projects: unavailable,
       graphs: unavailable,
       assets: unavailable,
+      remoteAssets: { status: 'available', reason: 'Git and SFTP assets with durable Workspace transfers', verifiedAt: null },
       visualizeLibrary: { status: 'available', reason: 'Visualize page v2 and portable interactive asset v1', verifiedAt: null },
       execution: unavailable,
       imageGeneration: {
@@ -247,7 +248,8 @@ export function createService(
       const skillsRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/]skills(?:[/]search)?(?:[?]|$)/.test(rawPath) || /^[/]v1[/]agents[/][a-z][a-z0-9._-]*[/]skills(?:[?]|$)/.test(rawPath);
       const skillsManagementRoute = /^[/]v1[/]skills(?:[/][^/?#]+(?:[/](?:install|update|uninstall|config|files))?)?(?:[?]|$)/.test(rawPath);
       const mediaRoute = /^[/]v1[/]projects[/][a-zA-Z0-9_-]+[/](?:assets[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*|graphs[/][a-zA-Z0-9_-]+[/]resources[/][a-zA-Z0-9_-]+[/]versions[/][1-9][0-9]*)[/](?:thumbnail|preview|content|visualize-logo)(?:[?]|$)/.test(rawPath);
-      const queryRoute = fileRoute || skillsRoute || skillsManagementRoute || mediaRoute;
+      const remoteAssetRoute = /^[/]v1[/]data-sources[/][a-zA-Z0-9_-]+[/](?:download|thumbnail)(?:[?]|$)/.test(rawPath);
+      const queryRoute = remoteAssetRoute || fileRoute || skillsRoute || skillsManagementRoute || mediaRoute;
       const path = queryRoute ? rawPath.split('?')[0]! : rawPath;
       if (
         !path.startsWith("/") ||

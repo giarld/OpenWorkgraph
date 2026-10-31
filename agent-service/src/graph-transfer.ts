@@ -68,6 +68,9 @@ export class GraphTransfer {
     const bundle = atomic(this.graphs.db,()=>{
       const snapshot=this.graphs.snapshot(scope);
       const portableNodes=snapshot.nodes.map(portableNode);
+      for(const node of portableNodes) if(['text','image','file'].includes(node.type) && record(node.content) && !Object.hasOwn(node.content,'remoteProvenance')) {
+        for(const link of resourceLinks(node.content,node.type)) {const origin=this.graphs.db.prepare("SELECT provenance FROM remote_resource_provenance WHERE kind='canvas' AND resource_id=?").get(link.resourceId);if(origin){node.content.remoteProvenance=JSON.parse(String(origin.provenance)) as Json;break;}}
+      }
       const links=new Map<string,{resourceId:string;version:number}>();
       for(const node of snapshot.nodes) for(const link of resourceLinks(node.content,node.type)) links.set(key(link.resourceId,link.version),link);
       // Include explicit unplaced graph resources, not unrelated Run/history versions.

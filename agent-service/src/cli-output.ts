@@ -1,6 +1,7 @@
 import { ServiceError } from './errors.js';
 
 const fields: Record<string, string> = {
+  maintenance: 'Maintenance',
   deleted: 'Deleted',
   connectedClients: 'Connected clients',
   acceptedTasksUnaffected: 'Accepted tasks unaffected', activeRuns: 'Active runs', available: 'Available', backupId: 'Backup ID', browserName: 'Client name', bytes: 'Size', capacity: 'Capacity', code: 'Pairing code', createdAt: 'Created at', current: 'Current session', currentVersion: 'Current version', endpoints: 'Runtime endpoints', event: 'Event', expiresAt: 'Expires at', fingerprint: 'Public key fingerprint SHA-256', id: 'ID', instanceId: 'Instance ID', integrity: 'Integrity', invalidatesAllSessions: 'Invalidates all sessions', lastUsedAt: 'Last used at', latestVersion: 'Latest version', listenHost: 'Listen address', localEndpoint: 'Local endpoint', location: 'Storage location', mode: 'Mode', occupied: 'Occupied', origin: 'Web origin', output: 'Output file', packageName: 'Package', pairedAt: 'Paired at', pairingCommand: 'Pairing command', pausesQueuedRuns: 'Pauses queued runs', pluginId: 'Plugin ID', registered: 'Registered', requiresMaintenance: 'Requires maintenance', restarted: 'Runtime restarted', restored: 'Restored', revoked: 'Revoked session', schemaVersion: 'Schema version', serviceId: 'Runtime ID', sha256: 'SHA-256', state: 'State', time: 'Time', typeId: 'Type ID', updateAvailable: 'Update available', updated: 'Package updated', version: 'Version',
@@ -63,7 +64,12 @@ function scalar(key: string, value: unknown): string {
   return String(value);
 }
 function recordLines(value: Record<string, unknown>, indent = '  '): string[] {
-  const entries = Object.entries(value).filter(([, item]) => item !== undefined);
+  const entries = Object.entries(value).filter(([key, item]) => {
+    if (item === undefined) return false;
+    if (key !== 'maintenance' || !item || typeof item !== 'object') return true;
+    const state = item as { state?: string; blocked?: boolean };
+    return state.blocked !== false || !['idle', 'completed'].includes(state.state ?? '');
+  });
   const scalarEntries = entries.filter(([, item]) => item === null || ['string', 'number', 'boolean'].includes(typeof item));
   const labelWidth = Math.max(0, ...scalarEntries.map(([key]) => displayWidth(fields[key] ?? key)));
   const lines = scalarEntries.map(([key, item]) => indent + padLabel(fields[key] ?? key, labelWidth) + '  ' + scalar(key, item));

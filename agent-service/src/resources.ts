@@ -173,6 +173,8 @@ export class Resources {
    return await this.prepareBytes(bytes,mime);
   } finally {await file.close();}
  }
+ /** Trusted Workspace temporary-delivery writer; caller must insert its hold in this transaction. */
+ registerRemoteDelivery(blob: PreparedBlob): void { this.register(blob); }
  private register(blob: PreparedBlob): void {
   this.tx();this.blobs.assertPrepared(this.visualizePrepared.get(blob)?.original ?? blob);
   if(this.db.prepare('SELECT 1 FROM resource_file_deletions WHERE path=?').get(blob.path)) conflict('Prepared file was retired; prepare again');
@@ -289,9 +291,19 @@ export class Resources {
   if(!this.db.prepare("SELECT 1 FROM canvas_resource_references WHERE resource_id=? AND resource_version=? AND owner_kind='node' UNION ALL SELECT 1 FROM node_resource_history WHERE resource_id=? AND resource_version=? LIMIT 1").get(resourceId,version,resourceId,version)) invalid('Attach node/history ownership before consuming graph holds');
   return Number(this.db.prepare("DELETE FROM canvas_resource_references WHERE graph_id=? AND resource_id=? AND resource_version=? AND owner_kind='graph'").run(scope.graphId,resourceId,version).changes);
  }
+ private copyRemoteProvenance(fromKind: 'asset'|'canvas', fromId: string, toKind: 'asset'|'canvas', toId: string): void {
+  const row=this.db.prepare('SELECT provenance FROM remote_resource_provenance WHERE kind=? AND resource_id=?').get(fromKind,fromId)
+   ?? (fromKind==='canvas'?this.db.prepare("SELECT json_extract(v.content,'$.remoteProvenance') provenance FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE json_extract(v.content,'$.resourceId')=? AND json_type(v.content,'$.remoteProvenance')='object' LIMIT 1").get(fromId):undefined);
+  if(row) {
+   const origin=JSON.parse(String(row.provenance)) as Record<string,unknown>;
+   if(typeof origin.sourceName!=='string'||typeof origin.relativePath!=='string'||typeof origin.importedAt!=='string') return;
+   const provenance={sourceName:origin.sourceName,relativePath:origin.relativePath,importedAt:origin.importedAt,...(typeof origin.commit==='string'?{commit:origin.commit}:{})};
+   this.db.prepare('INSERT OR IGNORE INTO remote_resource_provenance VALUES(?,?,?)').run(toKind,toId,JSON.stringify(provenance));
+  }
+ }
  copyAssetToCanvas(scope: CanvasScope, assetId: string, expectedAssetVersion: number): CanvasCreated {
   this.tx();this.writableGraph(scope);const asset=this.getAsset(scope,assetId);if(asset.deleted) missing();if(asset.current.version!==expectedAssetVersion) conflict();
-  return this.createCanvasFromReadyBlob(scope,asset.current.sha256,asset.current.mime,asset.name);
+  const created=this.createCanvasFromReadyBlob(scope,asset.current.sha256,asset.current.mime,asset.name);this.copyRemoteProvenance('asset',assetId,'canvas',created.resource.id);return created;
  }
  /** Clipboard copies a pinned, authorized canvas version into a new identity.
   * Never expose an arbitrary blob-hash copy API or resurrect a collected source. */
@@ -300,15 +312,15 @@ export class Resources {
   const source={...scope,graphId:sourceGraphId};
   const resource=this.getCanvas(source,resourceId);
   const pinned=this.readCanvasVersion(source,resourceId,version);
-  return this.createCanvasFromReadyBlob(scope,pinned.sha256,pinned.mime,resource.name);
+  const created=this.createCanvasFromReadyBlob(scope,pinned.sha256,pinned.mime,resource.name);this.copyRemoteProvenance('canvas',resourceId,'canvas',created.resource.id);return created;
  }
  saveCanvasToLibrary(scope: CanvasScope, resourceId: string, expectedResourceVersion: number, title: string): LibraryAsset {
   this.tx();this.writableGraph(scope);const resource=this.getCanvas(scope,resourceId);if(resource.current.version!==expectedResourceVersion) conflict();
-  return this.libraryFromBlob({...scope,mode:'new',name:title},resource.current.sha256,resource.current.mime);
+  const asset=this.libraryFromBlob({...scope,mode:'new',name:title},resource.current.sha256,resource.current.mime);this.copyRemoteProvenance('canvas',resourceId,'asset',asset.id);return asset;
  }
  copyAssetToProject(scope: ResourceScope, assetId: string, expectedVersion: number, title?: string): LibraryAsset {
   this.tx();this.writable(scope);const asset=this.getAsset(scope,assetId);if(asset.deleted) missing();if(asset.current.version!==expectedVersion) conflict();
-  return this.libraryFromBlob({...scope,mode:'new',name:title ?? asset.name},asset.current.sha256,asset.current.mime);
+  const copied=this.libraryFromBlob({...scope,mode:'new',name:title ?? asset.name},asset.current.sha256,asset.current.mime);this.copyRemoteProvenance('asset',assetId,'asset',copied.id);return copied;
  }
  private version(row: Row): ResourceVersion {return {version:Number(row['version']),sha256:String(row['sha256']),bytes:Number(row['bytes']),mime:String(row['mime']),state:'ready',representationVersion:row['representation_version']===null?null:Number(row['representation_version'])};}
  getAsset(scope: ResourceScope, id: string): LibraryAsset {
@@ -476,7 +488,7 @@ export class Resources {
    if(Number(row['unreferenced_since'])>now-30*DAY) continue;
    this.db.prepare('DELETE FROM asset_versions WHERE asset_id=?').run(id);this.db.prepare('DELETE FROM assets WHERE id=?').run(id);this.event('asset.changed',{projectId:String(row['project_id'])},null,id,Number(row['current_version']),'collected');counts.assets++;
   }
-  const candidates=this.db.prepare('SELECT b.sha256,f.path FROM blobs b JOIN resource_blob_files f USING(sha256) WHERE NOT EXISTS(SELECT 1 FROM asset_versions WHERE sha256=b.sha256) AND NOT EXISTS(SELECT 1 FROM canvas_resource_versions WHERE sha256=b.sha256) AND NOT EXISTS(SELECT 1 FROM resource_read_leases WHERE sha256=b.sha256)').all();
+  const candidates=this.db.prepare('SELECT b.sha256,f.path FROM blobs b JOIN resource_blob_files f USING(sha256) WHERE NOT EXISTS(SELECT 1 FROM asset_versions WHERE sha256=b.sha256) AND NOT EXISTS(SELECT 1 FROM canvas_resource_versions WHERE sha256=b.sha256) AND NOT EXISTS(SELECT 1 FROM resource_read_leases WHERE sha256=b.sha256) AND NOT EXISTS(SELECT 1 FROM remote_temporary_deliveries WHERE sha256=b.sha256)').all();
   for(const row of candidates) {
    const hash=String(row['sha256']);if((only&&!only.blobHashes.includes(hash))||this.snapshotMentions(hash)) continue;
    this.db.exec('SAVEPOINT resource_gc_blob');

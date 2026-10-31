@@ -1,3 +1,4 @@
+import { RemoteAssetsApi } from './remote-assets-api.js';
 import type { IncomingMessage } from 'node:http';
 import type { DatabaseSync } from 'node:sqlite';
 import type { DeleteGraph, GraphCommand, GraphHistoryTravel } from '@openworkgraph/protocol';
@@ -34,6 +35,7 @@ import { silentLogger, type Logger } from './logger.js';
 export interface ApiResult { handled:boolean; body?:unknown; status?:number; binary?:Buffer; binaryParts?:Uint8Array[]; binaryStream?:Readable; dispose?:()=>Promise<void>; headers?:Record<string,string> }
 export class BusinessApi {
   readonly graphs:Graphs;
+  private remoteAssetsApi?: RemoteAssetsApi;
   private queries?:GraphQueries;
   private outputsApi?:RunOutputsApi;
   readonly resources:ResourceApi; readonly runApi:RunApi;
@@ -49,6 +51,8 @@ export class BusinessApi {
   private agentConfigurationApi?: AgentConfigurationApi;
   constructor(readonly db:DatabaseSync,readonly serviceId:string,readonly auth:Auth,readonly runtime:WorkflowRuntime,logger:Logger=silentLogger){this.graphs=runtime.graphs;this.resources=new ResourceApi(runtime.resources,this.graphs,auth);this.runApi=new RunApi(runtime,auth);this.backups=new Backups(db,runtime.directories,{logger,withBlobLease:work=>runtime.resources.withBlobLease(work)});this.backupApi=new BackupApi(this.backups,auth);}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
+    this.remoteAssetsApi ??= new RemoteAssetsApi(this.runtime.remoteAssets,this.auth);
+    const remoteAssets = await this.remoteAssetsApi.handle(request,path,token,origin); if(remoteAssets.handled)return remoteAssets;
     this.outputsApi??=new RunOutputsApi(this.runtime,this.auth);
     const outputs=await this.outputsApi.handle(request,path,token,origin);if(outputs.handled)return outputs;
     const query=/^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]graphs(?:[/]([a-zA-Z0-9_-]+))?[/](query|summary|subgraph|nodes-query|node-content)$/.exec(path);

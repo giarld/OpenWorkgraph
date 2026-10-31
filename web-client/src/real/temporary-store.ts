@@ -484,6 +484,24 @@ export class TemporaryCanvasStore {
       return { resource: { id, name: file.name, current: { version: 1, mime: file.type || 'application/octet-stream', bytes: file.size } }, referenceId: id };
     });
   };
+  hasRemoteDelivery(graphId: string, key: string): Promise<boolean> {
+    return this.access(graphId, false, record => !!record.serviceOperations?.['remote-delivery:' + key]?.result);
+  }
+  async receiveRemoteDelivery(graphId: string, key: string, delivery: { node: import('../../../packages/protocol/src/index').Node; mime: string; name: string; bytes: number; sha256: string }, blob: Blob): Promise<void> {
+    if (blob.size !== delivery.bytes || blob.size > FILE_NODE_MAX_BYTES || bytesToHex(sha256(new Uint8Array(await blob.arrayBuffer()))) !== delivery.sha256) throw Error('Remote delivery content integrity check failed.');
+    await this.access(graphId, true, record => {
+      const identity = 'remote-delivery:' + key;
+      if (record.serviceOperations?.[identity]?.result) return;
+      if (record.graph.archived || record.graph.trashed) throw Error('The temporary Work Graph is read-only.');
+      if (record.graph.nodes.some(node => node.id === delivery.node.id)) throw conflict();
+      const resourceId = randomId();
+      record.resources[resourceId] = { name: delivery.name, blob: new Blob([blob], { type: delivery.mime }) };
+      const node = structuredClone(delivery.node);
+      node.content = { ...node.content as Record<string, Json>, resourceId, resourceVersion: 1 };
+      recordDocumentVersion(record, applyTemporaryOperations(record.graph, [{ type: 'node.create', node }]));
+      (record.serviceOperations ??= {})[identity] = { signature: delivery.sha256, result: { nodeId: node.id } };
+    });
+  }
   readResource(graphId: string, resourceId: string, version: number) {
     return this.access(graphId, false, record => {
       if (version !== 1 || !Object.hasOwn(record.resources, resourceId)) throw Error(translate("The temporary Work Graph resource version does not exist."));

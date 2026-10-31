@@ -12,10 +12,16 @@ import { SkillReadme } from './SkillReadme';
 import { clearSkillCatalogCache, readSkillCatalogCache, skillCatalogCacheOwner, writeSkillCatalogCache } from './skill-catalog-cache';
 import '../components/content.css';
 import './SkillsLibrary.css';
+import './SidebarLibraryTabs.css';
 
 type SkillClient = Pick<Transport, 'listSkills' | 'skillDetail' | 'installSkill' | 'updateSkill' | 'uninstallSkill' | 'readSkillConfig' | 'writeSkillConfig' | 'clearSkillConfig'> & Partial<Pick<Transport, 'readSkillFile' | 'serviceId' | 'readSkillLibrarySettings' | 'writeSkillLibrarySettings'>>;
 type Copy = (english: string, chinese: string) => string;
 const SKILL_DESCRIPTION_LIMIT = 100;
+const SKILL_LIBRARY_FILTER_STORAGE_KEY = 'openworkgraph:skill-library-filter:v1';
+function readInstalledOnly(): boolean {
+  try { return localStorage.getItem(SKILL_LIBRARY_FILTER_STORAGE_KEY) === 'installed'; }
+  catch { return false; }
+}
 const notifySkillsChanged = () => window.dispatchEvent(new Event('openworkgraph:skills-changed'));
 function errorText(error: unknown, copy: Copy): string {
   if (isLifecycleCancellation(error)) return copy('Workspace connection changed. Reload to continue.', '工作空间连接已改变，请重新加载。');
@@ -56,12 +62,12 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true,
   const { language, locale } = useI18n();
   const copy: Copy = (en, zh) => language === 'zh-CN' ? zh : en;
   const cacheOwner = transport ? skillCatalogCacheOwner(transport, workspaceName) : undefined;
-  const [catalog, setCatalog] = useState<SkillCatalog | undefined>(() => readSkillCatalogCache(cacheOwner, '', false));
+  const [installedOnly, setInstalledOnly] = useState(readInstalledOnly);
+  const [catalog, setCatalog] = useState<SkillCatalog | undefined>(() => readSkillCatalogCache(cacheOwner, '', installedOnly));
   const [refreshAnimationKey, setRefreshAnimationKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
-  const [installedOnly, setInstalledOnly] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState('');
   const library = useRef<HTMLElement>(null);
@@ -78,6 +84,10 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true,
   const catalogOwner = useRef({ transport, cacheOwner, query, installedOnly });
   const catalogSnapshot = useRef<SkillCatalog | undefined>(catalog);
   const listsInFlight = useRef(0);
+  useEffect(() => {
+    try { localStorage.setItem(SKILL_LIBRARY_FILTER_STORAGE_KEY, installedOnly ? 'installed' : 'all'); }
+    catch { /* Skill browsing remains available without storage. */ }
+  }, [installedOnly]);
   const load = useCallback(async (refresh = false, append = false, preserve = false) => {
     if (!transport || !ready || (append && (listsInFlight.current > 0 || mutation.current))) return;
     const previous = catalogSnapshot.current;
@@ -171,11 +181,11 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true,
   return <section ref={library} className="ow-skills-library" aria-label={copy('Skill library', '技能库')}>
     {!transport ? <>{addButton}<p className="ow-skills-empty">{copy('Select and connect a Workspace to browse skills.', '选择并连接工作空间后即可查看技能库。')}</p></> : <>
       <div className="ow-skills-controls">
-        <label className="ow-skills-search"><Search size={15} aria-hidden="true"/><input type="search" aria-label={copy('Search skills', '搜索技能')} value={query} onChange={event => setQuery(event.target.value)} placeholder={copy('Search name or description', '搜索名称或简介')}/>{query && <button className="ow-skills-clear" type="button" aria-label={copy('Clear skill search', '清除技能搜索')} onClick={() => setQuery('')}><X size={14} aria-hidden="true"/></button>}</label>
         <div className="ow-skills-toolbar">
-          <div className="ow-skills-filter" role="group" aria-label={copy('Skill filter', '技能筛选')}><button type="button" aria-pressed={!installedOnly} onClick={() => setInstalledOnly(false)}>{copy('All', '全部')}</button><button type="button" aria-pressed={installedOnly} onClick={() => setInstalledOnly(true)}>{copy('Installed', '已安装')}</button></div>
+          <div className="ow-skills-filter ow-library-tabs" role="group" aria-label={copy('Skill filter', '技能筛选')}><button type="button" aria-pressed={!installedOnly} onClick={() => setInstalledOnly(false)}>{copy('All', '全部')}</button><button type="button" aria-pressed={installedOnly} onClick={() => setInstalledOnly(true)}>{copy('Installed', '已安装')}</button></div>
           <div className="ow-skills-toolbar-actions"><button className="ow-skills-refresh" type="button" disabled={!ready || !!pending || !transport.readSkillLibrarySettings || !transport.writeSkillLibrarySettings} aria-label={copy('Skill library settings', '技能库设置')} onClick={() => setLibraryDialog('settings')}><Settings2 size={16} aria-hidden="true"/></button><button className="ow-skills-refresh" type="button" disabled={!ready || !transport || loading || !!pending} aria-busy={loading} aria-label={copy('Refresh skills', '刷新技能')} onClick={() => { setRefreshAnimationKey(n => n + 1); void load(true); }}><RefreshIcon animationKey={refreshAnimationKey} spinning={loading} /></button></div>
         </div>
+        <label className="ow-skills-search"><Search size={15} aria-hidden="true"/><input type="search" aria-label={copy('Search skills', '搜索技能')} value={query} onChange={event => setQuery(event.target.value)} placeholder={copy('Search name or description', '搜索名称或简介')}/>{query && <button className="ow-skills-clear" type="button" aria-label={copy('Clear skill search', '清除技能搜索')} onClick={() => setQuery('')}><X size={14} aria-hidden="true"/></button>}</label>
         <small className="ow-skills-workspace">{copy('Workspace', '工作空间')} · {workspaceName || copy('Not connected', '未连接')}</small>
       </div>
       {!ready && <p role="status">{copy('Workspace is disconnected. Reconnect to manage skills.', '工作空间已断开，重新连接后可管理技能。')}</p>}

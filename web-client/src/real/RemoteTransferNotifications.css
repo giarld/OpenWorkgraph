@@ -1,0 +1,9 @@
+.remote-transfer-notice { display: grid; flex: 1; gap: 8px; min-width: 0; }
+.remote-transfer-notice-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; }
+.remote-transfer-notice-title strong { flex-shrink: 0; }
+.remote-transfer-notice-title span { min-width: 0; overflow-wrap: anywhere; }
+.remote-transfer-notice progress { width: 100%; height: 5px; accent-color: var(--notice-color); }
+.remote-transfer-notice button { justify-self: start; margin: 0; padding: 4px 8px; font: inherit; }
+@media (hover: none), (pointer: coarse) {
+  .remote-transfer-notification button { min-height: 44px; min-width: 44px; }
+}

@@ -177,6 +177,15 @@ export class Transport {
         (key === 'source' ? ['builtin-feature', 'openworkgraph', 'codex', 'agent'].includes(value) : key === 'settingsGeneration' ? value === 'agent-configuration-v1' && skillParams.get('source') === 'agent' : key === 'backendId' ? /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(value) && value.length <= 128 : key === 'query' && pathname.endsWith('/search') && value.length <= 100)) &&
       (skillParams.get('source') === 'agent' ? skillParams.has('backendId') : !skillParams.has('backendId'));
     const mediaQuery = parts.length === 2 && parts[1] !== undefined && parts[1].length > 0 && immutableMediaPath(pathname);
+    const remoteParams = new URLSearchParams(parts[1]);
+    const remotePath = remoteParams.get('path') ?? '';
+    const remoteRevision = remoteParams.get('locationRevision') ?? '';
+    const remoteFileQuery = parts.length === 2 &&
+      /^\/v1\/data-sources\/[A-Za-z0-9_-]{1,128}\/(?:download|thumbnail)$/.test(pathname) &&
+      remoteParams.size === 2 && remoteParams.getAll('path').length === 1 && remoteParams.getAll('locationRevision').length === 1 &&
+      /^[1-9][0-9]*$/.test(remoteRevision) && Number.isSafeInteger(Number(remoteRevision)) &&
+      remotePath.length > 0 && remotePath.length <= 4096 && !/[\\\u0000-\u001f]/.test(remotePath) &&
+      !remotePath.split('/').some(part => !part || part === '.' || part === '..');
     // Stable skill identities may contain source separators and repository paths.
     // Permit exactly one encoded identity segment, never arbitrary encoded API paths.
     const skillPath = /^\/v1\/skills\/((?:[A-Za-z0-9_.!~*'()-]|%[0-9a-fA-F]{2})+)(?:\/(?:install|update|uninstall|config|files))?$/.exec(pathname);
@@ -207,7 +216,7 @@ export class Transport {
       parts.length > 2 || path.includes('#') ||
       (!/^\/(?:health|v1(?:\/[A-Za-z0-9_.-]+)*)$/.test(pathname) && !encodedSkillPath) ||
       pathname.split("/").some((p) => p === "." || p === "..") ||
-      (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery && !catalogQuery && !detailQuery && !resourceQuery)
+      (parts.length === 2 && !fileQuery && !skillsQuery && !mediaQuery && !remoteFileQuery && !catalogQuery && !detailQuery && !resourceQuery)
     )
       throw new TransportError("INVALID_REQUEST", translate("Only standard API paths for this Workspace are allowed"));
   }

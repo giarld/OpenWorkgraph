@@ -1,3 +1,4 @@
+import { REMOTE_ASSETS_SCHEMA } from './remote-assets-schema.js';
 import { RESOURCE_SCHEMA, ASSET_PRESENTATION_SCHEMA } from './resource-schema.js';
 import { WORKFLOW_SCHEMA } from './workflow-schema.js';
 import { ASSET_BUSINESS_SCHEMA } from './asset-business-schema.js';
@@ -261,5 +262,5 @@ CREATE TABLE cli_authorizations(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REF
 CREATE TABLE cli_auto_grants(run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,decided_by TEXT NOT NULL REFERENCES sessions(id),created_at INTEGER NOT NULL) STRICT;
 CREATE TABLE resource_upload_ids(id TEXT PRIMARY KEY) STRICT;
 INSERT INTO resource_upload_ids(id) SELECT id FROM resource_uploads;
-` }];
-export const SCHEMA_VERSION = 30;
+` }, { version: 31, sql: REMOTE_ASSETS_SCHEMA }];
+export const SCHEMA_VERSION = 31;

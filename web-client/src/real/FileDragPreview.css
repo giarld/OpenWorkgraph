@@ -1,0 +1,3 @@
+.ow-file-drag-preview { position: fixed; left: -10000px; top: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px; border: 0; background: transparent; box-shadow: none; color: var(--text); font-size: 12px; line-height: 1.4; text-align: center; pointer-events: none; }
+.ow-file-drag-preview > .ow-project-file-tile-icon { margin: 0; }
+.ow-file-drag-preview > .ow-project-file-label { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; width: 100%; white-space: normal; overflow-wrap: anywhere; }
