@@ -1,4 +1,4 @@
-const sniffedMediaMimes = new Set(['image/png','image/jpeg','image/gif','image/webp','application/pdf','video/mp4','video/webm']);
+const sniffedMediaMimes = new Set(['image/png','image/jpeg','image/gif','image/webp','application/pdf','video/mp4','video/webm','video/x-flv']);
 const textResourceMimes = new Set(['text/plain','text/markdown','text/csv','application/json','application/xml','text/xml','text/yaml','text/x-yaml','application/yaml','application/x-yaml']);
 /** Formats without a byte detector retain their declared MIME across storage and transfer. */
 export function isOpaqueResourceMime(mime: string): boolean {
@@ -16,6 +16,8 @@ export function sniffResourceMime(bytes: Uint8Array): string {
   if (text(0,5) === '%PDF-') return 'application/pdf';
   if (text(4,8) === 'ftyp') return 'video/mp4';
   if (starts([26,69,223,163])) return 'video/webm';
+  if (bytes.length >= 9 && text(0,3) === 'FLV' && bytes[3] === 1 && (bytes[4]! & ~5) === 0 &&
+      new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(5) >= 9) return 'video/x-flv';
   try {
     const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     let printable = true;

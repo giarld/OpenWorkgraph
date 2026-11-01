@@ -31,9 +31,9 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
     if (!binding) throw failure('SERVICE_UNAVAILABLE', translate("Connect a Workspace and select the project that owns the asset library."));
     if (!binding.isCurrent()) throw failure('REQUEST_CANCELLED', translate("The Work Graph, project, or Workspace connection for this request changed."));
   };
-  const send: Request = async <T>(path: string, body?: unknown, method?: string) => {
+  const send: Request = async <T>(path: string, body?: unknown, method?: string, options?: Parameters<Request>[3]) => {
     guard();
-    const result = await binding!.request<T>(path, body, method);
+    const result = await binding!.request<T>(path, body, method, options);
     guard();
     return result;
   };
@@ -96,7 +96,7 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
     pending.set(key, { signature, promise });
     try { return await promise; } finally { pending.delete(key); }
   }
-  const request: Request = async <T>(path: string, body?: unknown, method?: string): Promise<T> => {
+  const request: Request = async <T>(path: string, body?: unknown, method?: string, options?: Parameters<Request>[3]): Promise<T> => {
     const visualizeSave = path.startsWith(local + '/visualize/') && /^[/]visualize[/]([^/]+)[/]save-to-library$/.exec(path.slice(local.length));
     if (visualizeSave && body !== undefined) return await transfer('visualize-save', { ...body as Record<string, unknown>, nodeId: decodeURIComponent(visualizeSave[1]) }) as T;
     if (path === local + '/visualize-assets/install' && body !== undefined) {
@@ -127,10 +127,10 @@ export function createTemporaryServiceBridge(store: Store, graphId: string, bind
     if (projectRoute) {
       // A library upload may never accidentally create a remote canvas resource.
       if (projectRoute[1] === 'uploads' && body && typeof body === 'object' && 'mode' in body && body.mode === 'canvas') throw failure('INVALID_REQUEST', translate("Work Graph uploads should use browser storage."));
-      return send<T>(remote + '/' + projectRoute[1] + (projectRoute[2] ?? ''), body, method);
+      return send<T>(remote + '/' + projectRoute[1] + (projectRoute[2] ?? ''), body, method, options);
     }
     if (path !== local && !path.startsWith(local + '/')) throw failure('REQUEST_CANCELLED', translate("The request does not belong to the current temporary Work Graph."));
-    return store.request<T>(path, body, method);
+    return store.request<T>(path, body, method, options);
   };
   return { request, capabilities: { models: false, assets: Boolean(binding), execution: false, executionReason: translate(temporaryExecutionReason) } };
 }

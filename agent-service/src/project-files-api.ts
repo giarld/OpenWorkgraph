@@ -190,7 +190,7 @@ export class ProjectFilesApi {
       const thumbnail = await this.files.thumbnail(projectId, path, size);
       this.auth.withSession(token, origin, () => undefined);
       // Video covers may be replaced independently of the video's change token.
-      const video = /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(path);
+      const video = /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv|flv)$/i.test(path);
       return { handled:true, binary:thumbnail.bytes, status:200, headers:{ 'Content-Type':thumbnail.mime, 'Content-Length':String(thumbnail.bytes.length), 'Cache-Control':video ? 'private, no-cache' : 'private, max-age=31536000, immutable', 'X-Content-Type-Options':'nosniff' } };
     }
     if (action === 'search') {

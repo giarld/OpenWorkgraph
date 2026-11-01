@@ -17,16 +17,66 @@ function integer(value: unknown): number { if (!Number.isSafeInteger(value) || N
 export class RemoteAssetsApi {
   constructor(readonly assets: RemoteAssets, readonly auth: Auth) {}
   async handle(request: IncomingMessage, path: string, token: string, origin: string): Promise<ApiResult> {
-    if (!path.startsWith('/v1/data-sources') && !path.startsWith('/v1/remote-transfers')) return { handled: false };
-    const match = /^\/v1\/(data-sources|remote-transfers)(?:\/([a-zA-Z0-9_-]+))?(?:\/(test|list|remove|trust|retry|cancel|download|thumbnail|delivery|content|ack|sync))?$/.exec(path);
+    if (!path.startsWith('/v1/data-sources') && !path.startsWith('/v1/remote-transfers') && !path.startsWith('/v1/remote-previews')) return { handled: false };
+    const match = /^\/v1\/(data-sources|remote-transfers|remote-previews)(?:\/([a-zA-Z0-9_-]+))?(?:\/(test|list|remove|trust|retry|cancel|download|thumbnail|preview|delivery|content|ack|sync))?$/.exec(path);
     if (!match) throw new ServiceError('NOT_FOUND', 'Remote asset endpoint not found.');
     this.auth.assertActive(token, origin);
     const [, section, id, action] = match;
     const body = request.method === 'POST' ? await readJson(request, 96 * 1024) : {};
     const read = <T>(work: () => T) => this.auth.withSession(token, origin, work);
     const reply = (value: unknown): ApiResult => ({ handled: true, body: value });
+    if (section === 'remote-previews') {
+      const owner = this.auth.withSession(token, origin, session => session.id);
+      if (id && request.method === 'POST' && action === 'remove') { fields(body, []); this.assets.previews.remove(id, owner); return reply({ removed: true }); }
+      if (id && request.method === 'GET' && !action) {
+        if (new URL(request.url!, 'http://localhost').search) throw new ServiceError('INVALID_REQUEST', 'Invalid remote preview byte range.');
+        const range = /^bytes=([0-9]+)-([0-9]+)$/.exec(request.headers.range ?? '');
+        if (!range) throw new ServiceError('INVALID_REQUEST', 'Invalid remote preview byte range.');
+        const abort = new AbortController(), disconnected = () => abort.abort();
+        request.once('aborted', disconnected); request.socket.once('close', disconnected);
+        try {
+          const result = await this.assets.previews.read(id, owner, Number(range[1]), Number(range[2]), abort.signal);
+          return read(() => ({ handled: true, binary: result.bytes, status: 206, headers: {
+            'Content-Type': result.mime, 'Content-Length': String(result.bytes.length), 'Accept-Ranges': 'bytes',
+            'Content-Range': 'bytes ' + result.start + '-' + result.end + '/' + result.total,
+            'Cache-Control': 'no-store', 'Content-Disposition': 'attachment', 'X-Content-Type-Options': 'nosniff',
+          } }));
+        } finally { request.removeListener('aborted', disconnected); request.socket.removeListener('close', disconnected); }
+      }
+      throw new ServiceError('NOT_FOUND', 'Remote preview expired. Open it again.');
+    }
     if (section === 'data-sources') {
+      if (id && request.method === 'POST' && action === 'preview') {
+        fields(body, ['locationRevision', 'path'], ['previewId']); if (typeof body.path !== 'string' || body.previewId !== undefined && typeof body.previewId !== 'string') throw new ServiceError('INVALID_REQUEST', 'Invalid file path.');
+        const owner = this.auth.withSession(token, origin, session => session.id);
+        const abort = new AbortController(), disconnected = () => abort.abort();
+        request.once('aborted', disconnected); request.socket.once('close', disconnected);
+        let previewId: string | undefined;
+        try {
+          const result = await this.assets.previews.open(id, integer(body.locationRevision), body.path, owner, abort.signal, body.previewId === undefined ? undefined : remoteId(body.previewId as string)); previewId = result.id;
+          return reply(read(() => result));
+        } catch (error) { if (previewId) this.assets.previews.remove(previewId, owner); throw error; }
+        finally { request.removeListener('aborted', disconnected); request.socket.removeListener('close', disconnected); }
+      }
       if (request.method === 'GET' && !id) return reply(read(() => this.assets.sources()));
+      if (request.method === 'POST' && id === 'test' && !action) {
+        fields(body, ['config'], ['sourceId', 'expectedRevision', 'credentials']);
+        if (body.sourceId !== undefined && typeof body.sourceId !== 'string' || body.sourceId === undefined && body.expectedRevision !== undefined) throw new ServiceError('INVALID_REQUEST', 'Invalid data source request.');
+        const owner = this.auth.withSession(token, origin, session => session.id);
+        const result = await this.assets.testDraft({ config: body.config, ...(body.sourceId === undefined ? {} : { sourceId: remoteId(body.sourceId as string), expectedRevision: integer(body.expectedRevision) }), ...(body.credentials === undefined ? {} : { credentials: body.credentials }) }, owner);
+        return reply(read(() => result));
+      }
+      if (request.method === 'POST' && id === 'test' && action === 'trust') {
+        fields(body, ['challengeId']); if (typeof body.challengeId !== 'string') throw new ServiceError('INVALID_REQUEST', 'Invalid host challenge.');
+        return reply(this.auth.withSession(token, origin, session => { this.assets.trust.confirmDraft(session.id, remoteId(body.challengeId as string)); return { confirmed: true }; }));
+      }
+      if (request.method === 'POST' && id === 'smb-shares' && !action) {
+        fields(body, ['config'], ['sourceId', 'expectedRevision', 'credentials']);
+        if (body.sourceId !== undefined && typeof body.sourceId !== 'string') throw new ServiceError('INVALID_REQUEST', 'Invalid data source request.');
+        if (body.sourceId === undefined && body.expectedRevision !== undefined) throw new ServiceError('INVALID_REQUEST', 'Invalid data source request.');
+        const result = await this.assets.smbShares({ config: body.config, ...(body.sourceId === undefined ? {} : { sourceId: remoteId(body.sourceId as string), expectedRevision: integer(body.expectedRevision) }), ...(body.credentials === undefined ? {} : { credentials: body.credentials }) });
+        return reply(read(() => result));
+      }
       if (request.method === 'POST' && !action) {
         fields(body, ['config'], id ? ['expectedRevision', 'credentials'] : ['credentials']); if (id) integer(body.expectedRevision);
         return reply(read(() => this.assets.save({ ...(id ? { id, expectedRevision: integer(body.expectedRevision) } : {}), config: body.config, ...(body.credentials === undefined ? {} : { credentials: body.credentials }) })));
@@ -38,20 +88,23 @@ export class RemoteAssetsApi {
       if ((request.method === 'POST' || request.method === 'GET') && id && (action === 'download' || action === 'thumbnail')) {
         if (request.method === 'GET') { const query = new URL(request.url!, 'http://localhost').searchParams; if ([...query.keys()].some(k => !['path','locationRevision'].includes(k)) || query.getAll('path').length !== 1 || query.getAll('locationRevision').length !== 1) throw new ServiceError('INVALID_REQUEST', 'Invalid remote file query.'); body.path = query.get('path'); body.locationRevision = Number(query.get('locationRevision')); }
         fields(body, ['locationRevision', 'path']); if (typeof body.path !== 'string') throw new ServiceError('INVALID_REQUEST', 'Invalid file path.');
-        const abort = new AbortController(); request.once('aborted', () => abort.abort());
-        const result = await this.assets.download(id, integer(body.locationRevision), body.path, AbortSignal.any([abort.signal, AbortSignal.timeout(10 * 60_000)]), action === 'thumbnail' ? 32 * 1024 * 1024 : undefined);
+        const abort = new AbortController(), disconnected = () => abort.abort();
+        request.once('aborted', disconnected); request.socket.once('close', disconnected);
         try {
-          this.auth.assertActive(token, origin);
-          if (action === 'thumbnail') {
-            const file = await open(result.path, 'r'), prefix = Buffer.alloc(Math.min(result.bytes, 65536)); try { await file.read(prefix, 0, prefix.length, 0); } finally { await file.close(); }
-            const mime = sniffMime(prefix); let binary: Buffer;
-            if (mime.startsWith('image/')) binary = await sharp(result.path, { limitInputPixels: 40_000_000 }).rotate().resize(320, 320, { fit: 'inside', withoutEnlargement: true }).webp().toBuffer();
-            else if (mime.startsWith('video/')) binary = await videoThumbnail(result.path, 320);
-            else throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', 'Thumbnail unavailable.');
-            await result.dispose(); return read(() => ({ handled: true, binary, headers: { 'Content-Type': 'image/webp', 'Cache-Control': 'no-store' } }));
-          }
-          return { handled: true, binaryStream: createReadStream(result.path), dispose: result.dispose, headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(result.bytes), 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(result.name), 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' } };
-        } catch (e) { await result.dispose(); throw e; }
+          const result = await this.assets.download(id, integer(body.locationRevision), body.path, AbortSignal.any([abort.signal, AbortSignal.timeout(10 * 60_000)]), action === 'thumbnail' ? 10 * 1024 * 1024 : undefined);
+          try {
+            this.auth.assertActive(token, origin);
+            if (action === 'thumbnail') {
+              const file = await open(result.path, 'r'), prefix = Buffer.alloc(Math.min(result.bytes, 65536)); try { await file.read(prefix, 0, prefix.length, 0); } finally { await file.close(); }
+              const mime = sniffMime(prefix); let binary: Buffer;
+              if (mime.startsWith('image/')) binary = await sharp(result.path, { limitInputPixels: 40_000_000 }).rotate().resize(320, 320, { fit: 'inside', withoutEnlargement: true }).webp().toBuffer();
+              else if (mime.startsWith('video/')) binary = await videoThumbnail(result.path, 320);
+              else throw new ServiceError('UNSUPPORTED_MEDIA_TYPE', 'Thumbnail unavailable.');
+              await result.dispose(); return read(() => ({ handled: true, binary, headers: { 'Content-Type': 'image/webp', 'Cache-Control': 'no-store' } }));
+            }
+            return { handled: true, binaryStream: createReadStream(result.path), dispose: result.dispose, headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(result.bytes), 'Content-Disposition': "attachment; filename*=UTF-8''" + encodeURIComponent(result.name), 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store' } };
+          } catch (e) { await result.dispose(); throw e; }
+        } finally { request.removeListener('aborted', disconnected); request.socket.removeListener('close', disconnected); }
       }
     } else {
       if (id === 'temporary-targets' && request.method === 'POST') {

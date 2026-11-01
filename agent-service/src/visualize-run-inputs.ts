@@ -101,8 +101,7 @@ export function freezeVisualizeRunInputs(db: DatabaseSync, run: Run, submitted: 
     snapshot.inputMode = hasImage ? (snapshot.prompt.trim() ? 'text_image' : 'image') : 'text';
   }
   const textBytes = snapshot.resources.reduce((sum, resource) => sum + Buffer.byteLength(resource.text ?? ''), Buffer.byteLength(snapshot.prompt));
-  const resourceBytes = snapshot.resources.reduce((sum, resource) => sum + (resource.resource?.bytes ?? 0), 0);
-  if (snapshot.resources.length + snapshot.projectFiles.length > 64 || textBytes > 33_554_432 || resourceBytes > 134_217_728 || snapshot.resources.some(resource => Buffer.byteLength(resource.text ?? '') > 8_388_608 || (resource.resource?.bytes ?? 0) > 52_428_800))
+  if (snapshot.resources.length + snapshot.projectFiles.length > 64 || textBytes > 33_554_432 || snapshot.resources.some(resource => Buffer.byteLength(resource.text ?? '') > 8_388_608))
     throw new ServiceError('INPUT_BUDGET_EXCEEDED', '启动时的可视化表单超过输入预算。');
   snapshot.frozenVisualizeInputs = frozen;
   const { inputDigest: baseInputDigest, ...body } = snapshot;

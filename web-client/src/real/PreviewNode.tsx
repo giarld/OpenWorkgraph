@@ -180,7 +180,7 @@ function FilePreview({ request, path, name, mime, download=false, preferredMode,
 function StreamVideoContent({request,path,bytes,name,mime,showName,download}: {request:Request;path:string;bytes:number;name:string;mime?:string;showName:boolean;download:boolean}) {
   return <>
     {showName && <header className="ow-preview-controls"><span title={name} data-canvas-draggable>{name}</span></header>}
-    <PreviewLayout scrollable={false}><StreamingVideoPreview request={request} path={path} bytes={bytes} name={name}/></PreviewLayout>
+    <PreviewLayout scrollable={false}><StreamingVideoPreview request={request} path={path} bytes={bytes} name={name} mime={mime}/></PreviewLayout>
     {download && <StreamFileDownload request={request} path={path} bytes={bytes} name={name} mime={mime}/>}
   </>;
 }
@@ -213,7 +213,7 @@ function StreamFileDownload({request,path,bytes,name,mime,children}: {request:Re
   return <footer className="ow-preview-download"><FilePreviewMetadata bytes={bytes} name={name}/><PreviewActionButton action="download" busy={progress!==undefined} progress={progress} onClick={() => void download()}/>{children}{error && <span role="status">{error}</span>}</footer>;
 }
 
-function FileContent({ blob, name, mime, preferredMode, onModeChange, showName=true }: { blob: Blob; name: string; mime: string; preferredMode?:PreviewMode; onModeChange?:(mode:PreviewMode)=>void; showName?:boolean }) {
+export function FileContent({ blob, name, mime, preferredMode, onModeChange, showName=true }: { blob: Blob; name: string; mime: string; preferredMode?:PreviewMode; onModeChange?:(mode:PreviewMode)=>void; showName?:boolean }) {
   useSyncExternalStore(subscribePreviewRegistry, getPreviewRegistryVersion, getPreviewRegistryVersion);
   const renderer = resolvePreviewRenderer({name,mime});
   return <FilePresentation key={renderer.id} blob={blob} name={name} mime={mime} renderer={renderer} preferredMode={preferredMode} onModeChange={onModeChange} showName={showName}/>;

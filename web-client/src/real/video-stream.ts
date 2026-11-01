@@ -6,7 +6,7 @@ const VIDEO_RANGE_BYTES = 1024 * 1024;
 const PROBE_BYTES = 128 * 1024;
 const STREAM_PATH = '/__workgraph_media/';
 type ConnectionHint = { saveData?: boolean; effectiveType?: string; downlink?: number };
-type Stream = { request: Request; path: string; total: number };
+type Stream = { request: Request; path: string; total: number; abort: AbortController };
 const streams = new Map<string,Stream>();
 let ready: Promise<void> | undefined;
 let listening = false;
@@ -52,7 +52,7 @@ function listen() {
     const entry = streams.get(event.data.id);
     const range = entry && rangeFor(event.data.range,entry.total);
     if (!entry || !range) { port.postMessage({error:'Video range is unavailable'}); return; }
-    void entry.request<RangeBlob>(entry.path,undefined,'RANGE',{range}).then(async result => {
+    void entry.request<RangeBlob>(entry.path,undefined,'RANGE',{range,signal:entry.abort.signal}).then(async result => {
       if (result.start !== range.start || result.total !== entry.total) throw Error('Video changed while streaming');
       const bytes = await result.blob.arrayBuffer();
       port.postMessage({bytes,start:result.start,end:result.end,total:result.total,mime:result.mime || result.blob.type || 'video/mp4'},[bytes]);
@@ -81,6 +81,7 @@ export async function registerVideoStream(request: Request, path: string, total:
   if (!Number.isSafeInteger(total) || total <= 0) throw Error('Video size is unavailable');
   await ensureWorker();
   const id = crypto.randomUUID();
-  streams.set(id,{request,path,total});
-  return {src:location.origin+STREAM_PATH+id,release:()=>{streams.delete(id);}};
+  const abort = new AbortController();
+  streams.set(id,{request,path,total,abort});
+  return {src:location.origin+STREAM_PATH+id,release:()=>{abort.abort();streams.delete(id);}};
 }

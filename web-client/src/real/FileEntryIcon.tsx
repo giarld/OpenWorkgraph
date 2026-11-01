@@ -1,6 +1,6 @@
 import { File, FileArchive, FileCode2, FileImage, FileJson, FileText, FileVideo, Folder, FolderOpen } from 'lucide-react';
 
-const isVideoFile = (name: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(name);
+const isVideoFile = (name: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv|flv)$/i.test(name);
 
 export function FileEntryIcon({ item, open = false, size = 17 }: { item: { name: string; kind: 'file' | 'directory' }; open?: boolean; size?: number }) {
   const extension = item.name.split('.').at(-1)?.toLowerCase() ?? '';

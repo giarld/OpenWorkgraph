@@ -1,7 +1,7 @@
 {
   "name": "openworkgraph-web-client",
   "private": true,
-  "version": "0.5.20",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "prebuild": "node ../scripts/check-versions.mjs --quiet && node ../scripts/check-web-dependencies.mjs",
@@ -17,6 +17,7 @@
     "@noble/hashes": "2.4.0",
     "fflate": "^0.8.2",
     "lucide-react": "1.45.0",
+    "mpegts.js": "1.8.2",
     "pdfjs-dist": "6.3.289",
     "prismjs": "1.30.0",
     "react": "19.3.0",

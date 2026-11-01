@@ -1314,7 +1314,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       if (intended === 'text' && job.file.size > 8 * 1024 * 1024) throw Error(t('The text file exceeds the node content limit of 8 MiB.'));
       if (intended === 'text') job.text ??= await job.file.text();
       // Unknown browser MIME types are stored as octet-stream, never trusted as active content.
-      const normalizedMime = detectedType === 'file' && !['application/pdf','video/mp4','video/webm'].includes(fileMime(job.file)) ? 'application/octet-stream' : fileMime(job.file);
+      const normalizedMime = detectedType === 'file' && !['application/pdf','video/mp4','video/webm','video/x-flv'].includes(fileMime(job.file)) ? 'application/octet-stream' : fileMime(job.file);
       const uploadFile = job.transferredFile ??= job.file.type !== normalizedMime
         ? new File([job.file], job.file.name, {type:normalizedMime}) : job.file;
       job.created ??= props.uploadFile ? await props.uploadFile(uploadFile) : await uploadCanvas(

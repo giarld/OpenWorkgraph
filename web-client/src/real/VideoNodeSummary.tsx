@@ -48,7 +48,7 @@ export function VideoNodeSummary({ request, name, mime, bytes, resourcePath, pro
     return () => { live = false; if (url) URL.revokeObjectURL(url); };
   }, [visible, request, resourcePath, projectId, relativePath, bytes]);
   const extension = (relativePath ?? name).split('.').at(-1)?.toUpperCase();
-  const format = mime.startsWith('video/') ? mime.slice(6).toUpperCase() : extension;
+  const format = mime === 'video/x-flv' ? 'FLV' : mime.startsWith('video/') ? mime.slice(6).toUpperCase() : extension;
   return <div ref={container} className="node-content ow-video-node">
     <div className="ow-video-node-cover">
       {cover && !failed ? <img src={cover} alt={name} draggable={false} decoding="async" onError={() => setFailed(true)}/>

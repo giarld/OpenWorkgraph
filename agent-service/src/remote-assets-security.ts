@@ -18,7 +18,7 @@ export interface RemoteSftpClient {
   realpath(path: string, callback: (error: Error | undefined, result: string) => void): void;
   stat(path: string, callback: (error: Error | undefined, result: RemoteSftpStats) => void): void;
   readdir(path: string, callback: (error: Error | undefined, result: RemoteSftpEntry[]) => void): void;
-  createReadStream(path: string, options: { autoClose: boolean }): Readable;
+  createReadStream(path: string, options: { autoClose: boolean; start?: number; end?: number }): Readable;
   end(): void;
 }
 export interface RemoteSshConnection {
@@ -79,8 +79,41 @@ export class DataSourceCredentialStore {
   status(id: string, generation?: string | null): { token: boolean; password: boolean; passphrase: boolean } { const values = this.read(id, generation); return { token: !!values.token, password: !!values.password, passphrase: !!values.passphrase }; }
 }
 export const fingerprint = (key: string): string => 'SHA256:' + createHash('sha256').update(Buffer.from(key, 'base64')).digest('base64').replace(/=+$/, '');
+export interface RemoteHostTrust { verify(sourceId: string, sourceRevision: number, endpoint: string, key: Buffer): boolean }
+interface DraftHostChallenge { owner: string; source?: { id: string; revision: number }; endpoint: string; publicKey: string; previousKey: string | null; expiresAt: number }
 export class DataSourceHostTrust {
+  private readonly drafts = new Map<string, DraftHostChallenge>();
   constructor(readonly db: DatabaseSync) {}
+  draft(owner: string, source?: { id: string; revision: number }): { trust: RemoteHostTrust; challenges: () => HostTrustChallenge[] } {
+    const ids = new Map<string, string>();
+    return {
+      trust: { verify: (_id, _revision, endpoint, key) => {
+        if (source && this.db.prepare('SELECT revision FROM data_sources WHERE id=?').get(source.id)?.revision !== source.revision) return false;
+        const publicKey = key.toString('base64'), previousKey = this.db.prepare('SELECT public_key FROM data_source_host_trust WHERE endpoint=?').get(endpoint)?.public_key as string | undefined;
+        if (publicKey === previousKey) return true;
+        for (const [id, value] of this.drafts) if (value.expiresAt <= Date.now()) this.drafts.delete(id);
+        const previousId = ids.get(endpoint); if (previousId) this.drafts.delete(previousId);
+        while (this.drafts.size >= 256) this.drafts.delete(this.drafts.keys().next().value!);
+        const id = randomUUID();
+        this.drafts.set(id, { owner, ...(source ? { source } : {}), endpoint, publicKey, previousKey: previousKey ?? null, expiresAt: Date.now() + 5 * 60_000 }); ids.set(endpoint, id);
+        return false;
+      } },
+      challenges: () => [...ids.values()].flatMap(id => {
+        const row = this.drafts.get(id);
+        return row && row.expiresAt > Date.now() ? [{ id, endpoint: row.endpoint, fingerprint: fingerprint(row.publicKey), previousFingerprint: row.previousKey ? fingerprint(row.previousKey) : null, expiresAt: new Date(row.expiresAt).toISOString() }] : [];
+      }),
+    };
+  }
+  confirmDraft(owner: string, challengeId: string): void {
+    const row = this.drafts.get(challengeId);
+    atomic(this.db, () => {
+      const current = row && this.db.prepare('SELECT public_key FROM data_source_host_trust WHERE endpoint=?').get(row.endpoint)?.public_key;
+      if (!row || row.owner !== owner || row.expiresAt <= Date.now() || (current ?? null) !== row.previousKey || (row.source && this.db.prepare('SELECT revision FROM data_sources WHERE id=?').get(row.source.id)?.revision !== row.source.revision)) throw new ServiceError('REVISION_CONFLICT', 'Host confirmation expired. Test the connection again.');
+      this.db.prepare('INSERT INTO data_source_host_trust VALUES(?,?) ON CONFLICT(endpoint) DO UPDATE SET public_key=excluded.public_key').run(row.endpoint, row.publicKey);
+      this.db.prepare('DELETE FROM data_source_host_challenges WHERE endpoint=?').run(row.endpoint);
+    });
+    for (const [id, challenge] of this.drafts) if (challenge.endpoint === row!.endpoint) this.drafts.delete(id);
+  }
   verify(sourceId: string, sourceRevision: number, endpoint: string, key: Buffer): boolean {
     return atomic(this.db, () => {
       if (this.db.prepare('SELECT revision FROM data_sources WHERE id=?').get(sourceId)?.revision !== sourceRevision) return false;
@@ -105,7 +138,7 @@ export class DataSourceHostTrust {
     });
   }
 }
-export async function connectRemoteSsh(options: { host: string; port: number; username: string; auth: 'key' | 'password'; credentials: DataSourceCredentials; trust: DataSourceHostTrust; sourceId: string; revision: number; signal: AbortSignal; keyPath?: string }): Promise<RemoteSshConnection> {
+export async function connectRemoteSsh(options: { host: string; port: number; username: string; auth: 'key' | 'password'; credentials: DataSourceCredentials; trust: RemoteHostTrust; sourceId: string; revision: number; signal: AbortSignal; keyPath?: string }): Promise<RemoteSshConnection> {
   options.signal.throwIfAborted();
   const client = new Client();
   let rejectedHost = false;
@@ -113,7 +146,7 @@ export async function connectRemoteSsh(options: { host: string; port: number; us
   if (options.auth === 'key') {
     try { const fd = openSync(options.keyPath ?? join(homedir(), '.ssh', 'id_rsa'), constants.O_RDONLY | constants.O_NOFOLLOW); try { if (!fstatSync(fd).isFile() || fstatSync(fd).size > 1024 * 1024) throw Error(); config.privateKey = readFileSync(fd); } finally { closeSync(fd); } } catch { throw new ServiceError('CONFLICT', 'Cannot read ~/.ssh/id_rsa for this Workspace user.'); }
     if (options.credentials.passphrase) config.passphrase = options.credentials.passphrase;
-  } else { if (!options.credentials.password) throw new ServiceError('CONFLICT', 'Save the SFTP password in data source settings.'); config.password = options.credentials.password; }
+  } else { if (!options.credentials.password) throw new ServiceError('CONFLICT', 'Enter the SFTP password in data source settings.'); config.password = options.credentials.password; }
   return new Promise((resolve, reject) => {
     const abort = () => { client.destroy(); reject(new ServiceError('CONFLICT', 'Transfer cancelled.')); };
     options.signal.addEventListener('abort', abort, { once: true });

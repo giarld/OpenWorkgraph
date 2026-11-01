@@ -28,7 +28,7 @@ export interface PendingRequest {
   persistence: "session" | "memory";
 }
 interface PendingRequestEntry extends PendingRequest { body: string; payload?: Blob }
-export interface TransportRequestOptions { journal?: "session" | "memory"; range?: { start: number; end: number } }
+export interface TransportRequestOptions { journal?: "session" | "memory"; range?: { start: number; end: number }; signal?: AbortSignal }
 export interface RangeBlob { blob: Blob; start: number; end: number; total: number; mime: string }
 export interface TransportOptions {
   pendingStorage?: StorageLike | null;
@@ -39,7 +39,7 @@ function immutableMediaPath(path: string): boolean {
   const pathname = path.split('?')[0] ?? path;
   if (pathname.endsWith('/thumbnail') && new URLSearchParams(path.slice(pathname.length + 1)).get('video') === '1') return false;
   if (/^\/v1\/projects\/[A-Za-z0-9_-]+\/files\/thumbnail$/.test(pathname) &&
-      /\.(?:mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(new URLSearchParams(path.slice(pathname.length + 1)).get('path') ?? ''))
+      /\.(?:mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv|flv)$/i.test(new URLSearchParams(path.slice(pathname.length + 1)).get('path') ?? ''))
     return false;
   return /^\/v1\/projects\/[A-Za-z0-9_-]+\/(?:assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*|graphs\/[A-Za-z0-9_-]+\/resources\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*)\/(?:thumbnail|preview|content)$/.test(pathname)
     || /^\/v1\/projects\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_-]+\/versions\/[1-9][0-9]*\/visualize-logo$/.test(pathname)
@@ -363,7 +363,7 @@ export class Transport {
         }
       }
       this.begin(entry);
-      try { return await this.send<T>(path, entry.payload ?? serialized, verb, entry, { replaying: !!existing }); }
+      try { return await this.send<T>(path, entry.payload ?? serialized, verb, entry, { ...options, replaying: !!existing }); }
       finally { this.end(entry); }
     }
     return this.send<T>(path, payload ?? serialized, verb, undefined, options);
@@ -383,6 +383,7 @@ export class Transport {
         accept: method === 'GET' && path.endsWith('/export') ? GRAPH_BINARY_MIME : undefined,
         range: method === "RANGE" ? options.range : undefined,
         cache: method === "BLOB" && immutableMediaPath(path) ? "force-cache" : "no-store",
+        signal: options.signal,
       });
       readingBody = true;
       const result =

@@ -28,7 +28,7 @@ class ProjectFileIoSemaphore {
 }
 const projectFileIo = new ProjectFileIoSemaphore(8);
 const videoThumbnailIo = new ProjectFileIoSemaphore(2);
-const isVideoPath = (path: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(path);
+const isVideoPath = (path: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv|flv)$/i.test(path);
 export const PROJECT_FILE_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 export const PROJECT_IMAGE_THUMBNAIL_LEVELS = [80, 160, 320, 640, 1280, 2560, 4096] as const;
 
@@ -53,7 +53,7 @@ export interface ProjectFileObservation {
 export function classifyProjectFile(name: string): { mime: string; type: 'text' | 'image' | 'file' } {
   const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
   const mime: Record<string, string> = { md:'text/markdown',markdown:'text/markdown',txt:'text/plain',json:'application/json',xml:'application/xml',yaml:'application/yaml',yml:'application/yaml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',csv:'text/csv',pdf:'application/pdf' };
-  const videoMime: Record<string, string> = {mp4:'video/mp4',m4v:'video/mp4',webm:'video/webm',mov:'video/quicktime',mkv:'video/x-matroska',avi:'video/x-msvideo'};
+  const videoMime: Record<string, string> = {mp4:'video/mp4',m4v:'video/mp4',webm:'video/webm',mov:'video/quicktime',mkv:'video/x-matroska',avi:'video/x-msvideo',flv:'video/x-flv'};
   const value = mime[extension] ?? videoMime[extension] ?? 'application/octet-stream';
   return { mime:value, type:['png','jpg','jpeg','gif','webp','svg'].includes(extension) ? 'image' : ['md','markdown','txt','json','xml','yaml','yml'].includes(extension) ? 'text' : 'file' };
 }

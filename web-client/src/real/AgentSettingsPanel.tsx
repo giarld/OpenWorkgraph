@@ -153,7 +153,7 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   return <section className="management-section agent-settings" aria-label={text('Agent 设置', 'Agent settings')}>
     {state.mode === 'loading' && <p role="status">{text('正在加载 Agent…', 'Loading Agents…')}</p>}
     {state.error && <p role="alert">{state.error}</p>}
-    <div className="agent-settings-toolbar agent-settings-intro"><span>{text('配置运行权限与可用模型', 'Configure permissions and available models')}</span><button type="button" disabled={busy} onClick={() => void save(store.refresh, text('Agent 目录已刷新。', 'Agent catalog refreshed.'))}><RefreshCw size={16} aria-hidden="true"/>{text('刷新 Agent 目录', 'Refresh Agent catalog')}</button></div>
+    <div className="agent-settings-toolbar agent-settings-intro"><span>{text('配置运行权限与可用模型', 'Configure permissions and available models')}</span><button type="button" disabled={busy} onClick={() => void save(store.refresh, text('Agent 配置已刷新。', 'Agent configuration refreshed.'))}><RefreshCw size={16} aria-hidden="true"/>{text('刷新 Agent 配置', 'Refresh Agent configuration')}</button></div>
     {configuration?.default.selection && !state.descriptors.some(item => item.id === configuration.default.selection!.backendId) && <p role="alert">{text('已保存默认 Agent 不可用，请明确重选。', 'The saved default Agent is unavailable. Choose another explicitly.')}</p>}
     {state.configurationError && <p role="alert">{state.configurationError}</p>}
     {error && <p role="alert" tabIndex={-1} ref={errorRef}>{error}</p>}

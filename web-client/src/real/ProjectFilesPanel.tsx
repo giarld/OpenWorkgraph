@@ -14,7 +14,7 @@ type Entry = { name: string; relativePath: string; kind: 'file' | 'directory'; h
 type Listing = { path: string; items: Entry[]; nextCursor: string | null };
 type Page = Listing & { loading: boolean; error?: string };
 type View = 'tree' | 'grid';
-const isVideoFile = (name: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv)$/i.test(name);
+const isVideoFile = (name: string): boolean => /[.](mp4|m4v|mov|webm|mkv|avi|mpg|mpeg|ogv|flv)$/i.test(name);
 const PROJECT_FILES_VIEW_STORAGE_KEY = 'openworkgraph:project-files-view:v1';
 const PROJECT_FILES_SHOW_HIDDEN_STORAGE_KEY = 'openworkgraph:project-files-show-hidden:v1';
 

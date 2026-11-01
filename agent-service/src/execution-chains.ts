@@ -185,8 +185,7 @@ export class ExecutionChains {
             for(const file of files)snapshot.projectFiles.push({kind:'file',relativePath:String(file.relative_path),sourceNodeIds:[predecessor.nodeId],edgeIds:[]});
           }
           const textBytes=snapshot.resources.reduce((sum,r)=>sum+Buffer.byteLength(r.text??''),Buffer.byteLength(snapshot.prompt));
-          const resourceBytes=snapshot.resources.reduce((sum,r)=>sum+(r.resource?.bytes??0),0);
-          if(snapshot.resources.length>64 || textBytes>33554432 || resourceBytes>134217728 || snapshot.resources.some(r=>Buffer.byteLength(r.text??'')>8388608 || (r.resource?.bytes??0)>52428800))throw new ServiceError('INPUT_BUDGET_EXCEEDED','串联输入超过预算。');
+          if(snapshot.resources.length>64 || textBytes>33554432 || snapshot.resources.some(r=>Buffer.byteLength(r.text??'')>8388608))throw new ServiceError('INPUT_BUDGET_EXCEEDED','串联输入超过预算。');
           const {inputDigest:_old,...body}=snapshot;
           snapshot.inputDigest=createHash('sha256').update(canonicalJson({baseInputDigest:_old,predecessorRunIds:dependencies.map(r=>r.id),...body} as unknown as Json)).digest('hex');
           atomic(this.db,()=>{

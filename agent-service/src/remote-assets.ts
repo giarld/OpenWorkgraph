@@ -2,12 +2,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, rm, readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
+import { isIP } from 'node:net';
 import type { DatabaseSync } from 'node:sqlite';
 import { WORKGRAPH_UPLOAD_MAX_BYTES, importedNodeType, defaultWorkgraphNodeSize } from '@openworkgraph/protocol';
 import type { DataSource, DataSourceConfig, DataSourceCredentials, Json, Node, RemoteListing, RemoteTransfer, RemoteTransferRequest, RemoteTransferTarget } from '@openworkgraph/protocol';
 import { DataSourceCredentialStore, DataSourceHostTrust, remoteId } from './remote-assets-security.js';
 import { createRemoteConnector, remotePath, verifiedRemoteCache } from './remote-assets-connectors.js';
 import type { RemoteConnector } from './remote-assets-connectors.js';
+import { smbPath } from './remote-assets-smb.js';
+import { ftpPath } from './remote-assets-ftp.js';
 import type { DataDirectories } from './directories.js';
 import { atomic } from './persistence/database.js';
 import { canonicalJson, Repositories } from './persistence/repositories.js';
@@ -16,6 +19,7 @@ import { assertProjectWritable, Graphs } from './graphs.js';
 import { Resources } from './resources.js';
 import { sniffMime, supportsText, readBounded } from './blob-store.js';
 import type { PreparedBlob } from './blob-store.js';
+import { RemoteAssetPreviews } from './remote-assets-preview.js';
 
 async function readCacheBytes(path: string): Promise<Buffer> { const file=await open(path,'r'); try { return await readBounded(file,WORKGRAPH_UPLOAD_MAX_BYTES); } finally { await file.close(); } }
 const active = (state: string) => ['accepted', 'preparing', 'transferring', 'committing'].includes(state);
@@ -40,6 +44,23 @@ export function validateDataSource(input: unknown): DataSourceConfig {
     if (/[\s/@\\?#]/.test(host) || !Number.isInteger(b.port) || Number(b.port) < 1 || Number(b.port) > 65535 || !root.startsWith('/') || root.split('/').some(p => p === '..' || p === '.') || root.includes('\\') || !['key', 'password'].includes(String(b.auth))) invalid('Invalid SFTP address, port or root directory.');
     return { kind: 'sftp', name, host, port: Number(b.port), username, root: root === '/' ? '/' : root.replace(/\/+$/, ''), auth: b.auth as 'key' | 'password' };
   }
+  if (b.kind === 'ftp') {
+    if (Object.keys(b).some(k => !['name', 'kind', 'host', 'port', 'username', 'root', 'auth', 'security'].includes(k))) invalid();
+    const host = text(b.host, 253).toLowerCase(), username = text(b.username, 256), rawRoot = text(b.root, 4096);
+    if (/[\s/@\\?#"<>|*\[\]\x7f]/.test(host) || (host.includes(':') && isIP(host) !== 6) || !Number.isInteger(b.port) || Number(b.port) < 1 || Number(b.port) > 65535 || !rawRoot.startsWith('/') || b.auth !== 'password' || !['none', 'explicit', 'implicit'].includes(String(b.security)) || /\x7f/.test(username)) invalid('Invalid FTP address, port, security or root directory.');
+    const root = rawRoot.replace(/\/+$/, '') || '/';
+    ftpPath(root.slice(1));
+    return { kind: 'ftp', name, host, port: Number(b.port), username, root, auth: 'password', security: b.security as 'none' | 'explicit' | 'implicit' };
+  }
+  if (b.kind === 'smb') {
+    if (Object.keys(b).some(k => !['name', 'kind', 'host', 'port', 'share', 'domain', 'username', 'root', 'auth'].includes(k))) invalid();
+    const host = text(b.host, 253).toLowerCase(), username = text(b.username, 256), share = b.share === undefined || b.share === '' ? '' : text(b.share, 255);
+    const domain = b.domain === undefined || b.domain === '' ? '' : text(b.domain, 256);
+    if (typeof b.root !== 'string' || b.root.length > 4096) invalid();
+    const root = smbPath((b.root as string).replace(/^[/]|[/]$/g, ''));
+    if (/[\s/@\\?#"<>|*]/.test(host) || (host.includes(':') && isIP(host) !== 6) || !Number.isInteger(b.port) || Number(b.port) < 1 || Number(b.port) > 65535 || b.auth !== 'password' || /[\\/]/.test(username) || /[\\/@]/.test(domain) || share.includes('/') || (share !== '' && !smbPath(share))) invalid('Invalid SMB address, port, share or root directory.');
+    return { kind: 'smb', name, host, port: Number(b.port), username, share, domain, root, auth: 'password' };
+  }
   return invalid();
 }
 function location(config: DataSourceConfig): string { const { name: _, auth: __, ...value } = config; return canonicalJson(asJson(value)); }
@@ -60,8 +81,10 @@ export class RemoteAssets {
   private closed = false;
   private readonly readers = new Map<string, number>();
   readonly cacheRoot: string;
+  readonly previews: RemoteAssetPreviews;
   constructor(readonly db: DatabaseSync, readonly serviceId: string, readonly dirs: DataDirectories, readonly resources: Resources, readonly graphs: Graphs, readonly options: { connector?: typeof createRemoteConnector; keyPath?: string; gitCaFile?: string } = {}) {
     this.credentials = new DataSourceCredentialStore(dirs.config, serviceId); this.trust = new DataSourceHostTrust(db); this.cacheRoot = join(dirs.staging, 'remote-assets');
+    this.previews = new RemoteAssetPreviews(id => this.source(id), (source, signal) => this.connector(source, signal));
   }
   private event(type: 'data-source.changed' | 'remote-transfer.changed', id: string, revision: number, projectId: string | null = null, state?: RemoteTransfer['state']): void {
     new Repositories(this.db).appendEvent({ eventId: randomUUID(), type, projectId, graphId: null, entityId: id, revision, occurredAt: new Date().toISOString(), payload: state ? {state} : {} });
@@ -69,13 +92,54 @@ export class RemoteAssets {
   private sourceRow(id: string) { const row = this.db.prepare('SELECT * FROM data_sources WHERE id=?').get(remoteId(id)); if (!row) throw new ServiceError('NOT_FOUND', 'Data source was removed. Select another source.'); return row; }
   source(id: string): DataSource { const row = this.sourceRow(id); return { id, serviceId: this.serviceId, revision: Number(row.revision), locationRevision: Number(row.location_revision), config: JSON.parse(String(row.config)) as DataSourceConfig, credentials: this.credentials.status(id, row.credential_generation as string | null), busy: this.busy(id) }; }
   sources(): DataSource[] { return this.db.prepare('SELECT id FROM data_sources ORDER BY id').all().map(row => this.source(String(row.id))); }
+  async testDraft(input: { config: unknown; sourceId?: string; expectedRevision?: number; credentials?: unknown }, owner: string): Promise<{ ok: boolean; error?: string; challenges: ReturnType<DataSourceHostTrust['challenges']> }> {
+    const config = validateDataSource(input.config);
+    const previous = input.sourceId === undefined ? undefined : this.source(input.sourceId);
+    const checkRevision = () => { if (previous && this.source(previous.id).revision !== input.expectedRevision) throw new ServiceError('REVISION_CONFLICT', 'Data source changed. Reload settings.'); };
+    checkRevision(); if (!previous && input.expectedRevision !== undefined) invalid();
+    const saved = previous?.config.kind === config.kind ? this.credentials.read(previous.id, this.sourceRow(previous.id).credential_generation as string | null) : {};
+    const credentials = { ...saved, ...(input.credentials === undefined ? {} : this.credentials.validate(input.credentials)) };
+    const id = randomUUID(), cacheRoot = join(this.cacheRoot, 'tests', id);
+    const source: DataSource = { id, serviceId: this.serviceId, revision: 1, locationRevision: 1, config, credentials: { token: !!credentials.token, password: !!credentials.password, passphrase: !!credentials.passphrase }, busy: false };
+    const draft = this.trust.draft(owner, previous ? { id: previous.id, revision: previous.revision } : undefined);
+    let connector: RemoteConnector | undefined;
+    try {
+      connector = (this.options.connector ?? createRemoteConnector)(source, { credentials, trust: draft.trust, signal: AbortSignal.timeout(120_000), cacheRoot, ...(this.options.keyPath ? { keyPath: this.options.keyPath } : {}), ...(this.options.gitCaFile ? { gitCaFile: this.options.gitCaFile } : {}) });
+      await connector.list(''); checkRevision();
+      return { ok: true, challenges: [] };
+    } catch (error) {
+      checkRevision();
+      return { ok: false, error: error instanceof ServiceError ? error.message : 'Connection test failed.', challenges: draft.challenges() };
+    } finally { connector?.close(); await rm(cacheRoot, { recursive: true, force: true }); }
+  }
+  async smbShares(input: { config: unknown; sourceId?: string; expectedRevision?: number; credentials?: unknown }): Promise<string[]> {
+    const config = validateDataSource(input.config);
+    if (config.kind !== 'smb') invalid();
+    const previous = input.sourceId === undefined ? undefined : this.source(input.sourceId);
+    if (previous && previous.revision !== input.expectedRevision) throw new ServiceError('REVISION_CONFLICT', 'Data source changed. Reload settings.');
+    if (!previous && input.expectedRevision !== undefined) invalid();
+    const saved = previous?.config.kind === 'smb' ? this.credentials.read(previous.id, this.sourceRow(previous.id).credential_generation as string | null) : {};
+    const credentials = { ...saved, ...(input.credentials === undefined ? {} : this.credentials.validate(input.credentials)) };
+    const source: DataSource = { id: previous?.id ?? randomUUID(), serviceId: this.serviceId, revision: previous?.revision ?? 1, locationRevision: previous?.locationRevision ?? 1, config, credentials: { password: !!credentials.password, token: false, passphrase: false }, busy: false };
+    const connector = (this.options.connector ?? createRemoteConnector)(source, { credentials, trust: this.trust, signal: AbortSignal.timeout(30_000), cacheRoot: this.cacheRoot });
+    try {
+      if (!connector.shares) throw new ServiceError('CONFLICT', 'SMB shared folder listing is unavailable.');
+      const shares = await connector.shares();
+      if (previous && this.source(previous.id).revision !== previous.revision) throw new ServiceError('REVISION_CONFLICT', 'Data source changed. Reload settings.');
+      return shares;
+    } finally { connector.close(); }
+  }
   private busy(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM remote_transfers WHERE source_id=? AND json_extract(payload,'$.state') IN ('accepted','preparing','transferring','committing') LIMIT 1").get(id); }
   private editable(id: string, expectedRevision: number): DataSource { const source = this.source(id); if (source.revision !== expectedRevision) throw new ServiceError('REVISION_CONFLICT', 'Data source changed. Reload settings.'); if (source.busy) throw new ServiceError('CONFLICT', 'Wait for this source’s transfers to finish, or cancel them before editing or removing it.'); return source; }
   save(input: { id?: string; expectedRevision?: number; config: unknown; credentials?: unknown }): DataSource {
-    const config = validateDataSource(input.config), patch = input.credentials === undefined ? undefined : this.credentials.validate(input.credentials);
+    const config = validateDataSource(input.config), requestedPatch = input.credentials === undefined ? undefined : this.credentials.validate(input.credentials);
     const id = input.id ? remoteId(input.id) : randomUUID();
     return atomic(this.db, () => {
       const previous = input.id ? this.editable(id, input.expectedRevision!) : undefined;
+      // Credentials belong to the saved protocol. Match draft tests even when
+      // the caller switches protocols without supplying a credential patch.
+      const patch: DataSourceCredentials | undefined = previous && previous.config.kind !== config.kind
+        ? { token: null, password: null, passphrase: null, ...requestedPatch } : requestedPatch;
       const oldGeneration = previous ? this.sourceRow(id).credential_generation as string | null : null;
       const old = patch ? this.credentials.read(id, oldGeneration) : undefined;
       try {
@@ -91,7 +155,7 @@ export class RemoteAssets {
   private connector(source: DataSource, signal: AbortSignal, progress?: (received: number, total: number | null) => void): RemoteConnector {
     const connector = (this.options.connector ?? createRemoteConnector)(source, { credentials: this.credentials.read(source.id, this.sourceRow(source.id).credential_generation as string | null), trust: this.trust, signal, cacheRoot: join(this.cacheRoot, 'git'), ...(progress ? { progress } : {}), ...(this.options.keyPath ? { keyPath: this.options.keyPath } : {}), ...(this.options.gitCaFile ? { gitCaFile: this.options.gitCaFile } : {}) });
     const key = source.id + '-' + source.locationRevision; this.readers.set(key, (this.readers.get(key) ?? 0) + 1); let released = false;
-    return { list: path => connector.list(path), pin: (path, destination, max, original) => connector.pin(path, destination, max, original), close: () => { connector.close(); if (!released) { released = true; this.readers.set(key, (this.readers.get(key) ?? 1) - 1); if (!this.closed) void this.pruneCaches().catch(() => {}); } } };
+    return { list: path => connector.list(path), pin: (path, destination, max, original) => connector.pin(path, destination, max, original), ...(connector.preview ? { preview: (path: string) => connector.preview!(path) } : {}), close: () => { connector.close(); if (!released) { released = true; this.readers.set(key, (this.readers.get(key) ?? 1) - 1); if (!this.closed) void this.pruneCaches().catch(() => {}); } } };
   }
   async list(id: string, locationRevision: number, path: string): Promise<RemoteListing> {
     const source = this.source(id); if (source.locationRevision !== locationRevision) throw new ServiceError('REVISION_CONFLICT', 'Data source location changed. Browse it again.');
@@ -209,8 +273,8 @@ export class RemoteAssets {
     for (const entry of await readdir(join(this.cacheRoot,'git'),{withFileTypes:true}).catch(() => [])) if (entry.isFile() && /^askpass-[a-f0-9-]{36}\.(sh|cmd)$/.test(entry.name)) await rm(join(this.cacheRoot,'git',entry.name),{force:true});
   }
   async settled(): Promise<void> { while (this.running.size) await Promise.allSettled([...this.running.values()].map(x => x.done)); }
-  disposeUnstarted(): void { this.closed = true; for (const value of this.running.values()) value.abort.abort(); }
-  close(): void { if (this.closed) return; this.recover(); this.closed = true; for (const value of this.running.values()) value.abort.abort(); }
+  disposeUnstarted(): void { this.closed = true; this.previews.close(); for (const value of this.running.values()) value.abort.abort(); }
+  close(): void { if (this.closed) return; this.recover(); this.closed = true; this.previews.close(); for (const value of this.running.values()) value.abort.abort(); }
   private async execute(id: string, signal: AbortSignal): Promise<void> {
     let prepared: PreparedBlob | undefined, connector: RemoteConnector | undefined, cache: string | undefined;
     const check = () => { signal.throwIfAborted(); if (this.closed || !active(this.rawTransfer(id).state)) throw new Error('cancelled'); };

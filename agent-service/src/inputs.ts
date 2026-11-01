@@ -10,7 +10,7 @@ import { readVisualizeBusinessForm, resolveVisualizeFormAssets } from './visuali
 import { canonicalJson } from './persistence/repositories.js';
 import type { VisualizeFormSnapshot, VisualizeInputSnapshot, VisualizeNodeContent } from '@openworkgraph/protocol';
 
-export interface InputBudget { maxItemBytes: number; maxTotalBytes: number; maxResourceItemBytes: number; maxResourceTotalBytes: number; maxResources: number }
+export interface InputBudget { maxItemBytes: number; maxTotalBytes: number; maxResources: number }
 /** Form versions/resources identify visualize business output. The node version
  * remains provenance, but also changes for view state and generation settings. */
 export function visualizeInputDigest(graphId: string, nodeId: string, inputs: VisualizeInputSnapshot['inputs']): string {
@@ -30,7 +30,9 @@ export type BuildInputOptions = { skillAuthoring?: 'create' | 'convert'; expecte
   { model: ModelSelection; imageRoute?: Extract<ImageRoute,{type:'codex'}> }
   | { imageRoute: FrozenApiImageRoute; model?: never }
 );
-const DEFAULT_BUDGET: InputBudget = {maxItemBytes:8_388_608,maxTotalBytes:33_554_432,maxResourceItemBytes:52_428_800,maxResourceTotalBytes:134_217_728,maxResources:64};
+// File bytes are materialized separately, not inlined into the Agent prompt.
+// Upload limits and native attachment capabilities are enforced by their owners.
+const DEFAULT_BUDGET: InputBudget = {maxItemBytes:8_388_608,maxTotalBytes:33_554_432,maxResources:64};
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value); }
   return value;
@@ -106,7 +108,7 @@ export class InputPreparation {
     const content = this.options.targetInput?.nodeId === nodeId ? mergeRunInput(storedContent, this.options.targetInput.fields) : storedContent;
     const promptValue = readField(content,'prompt'); const prompt = typeof promptValue === 'string' ? promptValue : '';
     const result: InputPreview = {graphId,nodeId,executionRevision:Number(graph['execution_revision']),prompt,resources:[],projectFiles:[],sources:[],issues:[],canSubmit:false,predecessorCount:0,totalBytes:Buffer.byteLength(prompt)};
-    let textBudgetBytes=result.totalBytes,resourceBudgetBytes=0;
+    let textBudgetBytes=result.totalBytes;
     const issue = (id: string, reason: string, code: InputIssue['code'] = 'INPUT_BLOCKED') => result.issues.push({code,nodeId:id,reason});
     if (graph['archived']||graph['trashed']) issue(nodeId,'Graph is archived or trashed');
     if (!(visualize ? ['visualize'] : ['text','image','execution','visualize']).includes(String(target['type']))) issue(nodeId,'Target is not generatable');
@@ -152,15 +154,14 @@ export class InputPreparation {
           const representation = this.options.readRepresentation?.(business.resource);
           if (this.options.readRepresentation && (!representation || representation.state !== 'ready' || representation.resourceSha256 !== business.resource.sha256 || representation.representationVersion !== business.resource.representationVersion)) { issue(id, '业务表单资源尚未就绪或固定版本不匹配。'); continue; }
           const text = canonicalJson(business.form.data), textBytes = Buffer.byteLength(text), resourceBytes = business.resource.bytes;
-          if (textBytes > this.budget.maxItemBytes || resourceBytes > this.budget.maxResourceItemBytes) { issue(id, '业务表单超过单项输入预算。', 'INPUT_BUDGET_EXCEEDED'); continue; }
+          if (textBytes > this.budget.maxItemBytes) { issue(id, '业务表单超过单项输入预算。', 'INPUT_BUDGET_EXCEEDED'); continue; }
           audit.form = business.form;
           const assets = resolveVisualizeFormAssets(this.db, { projectId: String(graph['project_id']), graphId }, business.form.data);
           for (const asset of assets.resources) {
             const resourceBytes = asset.resource!.bytes;
-            if (resourceBytes > this.budget.maxResourceItemBytes) { issue(id, '表单引用资产超过单项文件预算。', 'INPUT_BUDGET_EXCEEDED'); continue; }
             const key = JSON.stringify([asset.kind, asset.text, asset.resource]);
             let index = dedup.get(key);
-            if (index === undefined) { index = result.resources.length; dedup.set(key, index); result.resources.push({ ...asset, sourceNodeIds: [id] }); result.totalBytes += resourceBytes; resourceBudgetBytes += resourceBytes; }
+            if (index === undefined) { index = result.resources.length; dedup.set(key, index); result.resources.push({ ...asset, sourceNodeIds: [id] }); result.totalBytes += resourceBytes; }
             else if (!result.resources[index]!.sourceNodeIds.includes(id)) result.resources[index]!.sourceNodeIds.push(id);
             audit.resourceIndexes.push(index);
           }
@@ -181,7 +182,7 @@ export class InputPreparation {
           } else {
             const index = result.resources.length; dedup.set(key, index); audit.resourceIndexes.push(index);
             result.resources.push({ kind: 'text', sourceNodeIds: [id], text, resource: business.resource });
-            result.totalBytes += textBytes + resourceBytes; textBudgetBytes += textBytes; resourceBudgetBytes += resourceBytes;
+            result.totalBytes += textBytes + resourceBytes; textBudgetBytes += textBytes;
           }
         } catch (error) { issue(id, error instanceof Error ? error.message : '业务表单不可读'); }
         continue;
@@ -243,7 +244,6 @@ export class InputPreparation {
         const textBytes=Buffer.byteLength(text ?? ''),resourceBytes=resource?.bytes ?? 0,itemBytes=textBytes+resourceBytes;
         if (!Number.isSafeInteger(itemBytes) || itemBytes < 0) issue(id,'Resource size is invalid','INPUT_BUDGET_EXCEEDED');
         if(textBytes>this.budget.maxItemBytes)issue(id,'参考文本超过单项文本预算。','INPUT_BUDGET_EXCEEDED');
-        if(resourceBytes>this.budget.maxResourceItemBytes)issue(id,'参考文件超过单项文件预算。','INPUT_BUDGET_EXCEEDED');
         const key = JSON.stringify([mapping.kind,text,resource]);
         const existing = dedup.get(key);
         if (existing !== undefined) {
@@ -252,7 +252,7 @@ export class InputPreparation {
           audit.resourceIndexes.push(existing);
         } else {
           const index = result.resources.length; dedup.set(key,index); audit.resourceIndexes.push(index);
-          result.resources.push({kind:mapping.kind,sourceNodeIds:[id],text,resource}); result.totalBytes += itemBytes;textBudgetBytes+=textBytes;resourceBudgetBytes+=resourceBytes;
+          result.resources.push({kind:mapping.kind,sourceNodeIds:[id],text,resource}); result.totalBytes += itemBytes;textBudgetBytes+=textBytes;
         }
       }
     }
@@ -272,7 +272,6 @@ export class InputPreparation {
     }
     if (result.resources.length + result.projectFiles.length > this.budget.maxResources) issue(nodeId,'参考资源数量超过限制。','INPUT_BUDGET_EXCEEDED');
     if (textBudgetBytes > this.budget.maxTotalBytes) issue(nodeId,'文本内容总量超过预算。','INPUT_BUDGET_EXCEEDED');
-    if (resourceBudgetBytes > this.budget.maxResourceTotalBytes) issue(nodeId,'参考文件总量超过预算。','INPUT_BUDGET_EXCEEDED');
     // Image-only generation needs an actual frozen direct-predecessor image, not merely an edge or text.
     if (!visualize && !prompt.trim() && !(target['type']==='image' && (result.resources.some(item=>item.kind==='image' && item.resource) || result.projectFiles.some(item=>item.kind==='image')))) issue(nodeId,'Own prompt must be nonempty unless an image node has a reference image');
     result.canSubmit = result.issues.length === 0; return result;

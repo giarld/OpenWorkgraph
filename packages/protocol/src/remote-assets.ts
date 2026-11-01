@@ -1,14 +1,16 @@
 /** Remote assets are Workspace operations, independent of Agent Runs. */
 export type DataSourceConfig = { name: string; root: string } & (
   { kind: 'git'; url: string; branch: string; auth: 'public' | 'token' | 'key' } |
-  { kind: 'sftp'; host: string; port: number; username: string; auth: 'password' | 'key' }
+  { kind: 'sftp'; host: string; port: number; username: string; auth: 'password' | 'key' } |
+  { kind: 'ftp'; host: string; port: number; username: string; auth: 'password'; security: 'none' | 'explicit' | 'implicit' } |
+  { kind: 'smb'; host: string; port: number; share: string; domain: string; username: string; auth: 'password' }
 );
-/** Write only. Omitted fields retain their value; null removes it. */
+/** Write only. Omitted fields retain their value unless the source kind changes; null removes it. */
 export interface DataSourceCredentials { token?: string | null; password?: string | null; passphrase?: string | null }
 export interface DataSource { id: string; serviceId: string; revision: number; locationRevision: number; config: DataSourceConfig; credentials: { token: boolean; password: boolean; passphrase: boolean }; busy: boolean }
 export interface RemoteEntry { name: string; path: string; kind: 'file' | 'directory' | 'unavailable'; bytes: number | null; error?: string }
 export interface RemoteListing { serviceId: string; sourceId: string; locationRevision: number; path: string; entries: RemoteEntry[]; observedAt: string }
-export type RemoteFileVersion = { kind: 'git'; commit: string; blob: string; sha256: string; bytes: number } | { kind: 'sftp'; sha256: string; bytes: number };
+export type RemoteFileVersion = { kind: 'git'; commit: string; blob: string; sha256: string; bytes: number } | { kind: 'sftp'; sha256: string; bytes: number } | { kind: 'smb'; sha256: string; bytes: number } | { kind: 'ftp'; sha256: string; bytes: number };
 export interface HostTrustChallenge { id: string; endpoint: string; fingerprint: string; previousFingerprint: string | null; expiresAt: string }
 export type RemoteTransferTarget = { kind: 'library'; projectId: string } | { kind: 'graph'; projectId: string; graphId: string; x: number; y: number } | { kind: 'temporary'; projectId: string; browserId: string; graphId: string; x: number; y: number };
 export type RemoteTransferState = 'accepted' | 'preparing' | 'transferring' | 'committing' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';

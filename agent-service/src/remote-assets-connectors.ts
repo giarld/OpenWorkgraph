@@ -5,10 +5,16 @@ import { createReadStream } from 'node:fs';
 import { mkdir, open, rm, stat, writeFile } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Readable } from 'node:stream';
 import type { DataSource, DataSourceCredentials, RemoteEntry, RemoteFileVersion } from '@openworkgraph/protocol';
 import { ServiceError } from './errors.js';
-import { connectRemoteSsh, DataSourceHostTrust } from './remote-assets-security.js';
+import { connectRemoteSsh } from './remote-assets-security.js';
+import type { RemoteHostTrust } from './remote-assets-security.js';
 import type { RemoteSshConnection, RemoteSftpClient, RemoteSftpStats, RemoteSftpEntry } from './remote-assets-security.js';
+import { SmbConnector } from './remote-assets-smb.js';
+import { FtpConnector } from './remote-assets-ftp.js';
+import type { RemoteFtpClient } from './remote-assets-ftp.js';
+import type { connectRemoteSmb } from './remote-assets-smb.js';
 
 export const remoteFailure = (message: string): never => { throw new ServiceError('CONFLICT', message); };
 export function remotePath(input: unknown, allowRoot = true): string {
@@ -20,12 +26,13 @@ const within = (root: string, path: string) => path === root || path.startsWith(
 const quote = (input: string) => "'" + input.replaceAll("'", "'\"'\"'") + "'";
 const commandQuote = (input: string) => process.platform === 'win32' ? '"' + input.replaceAll('"', '\\"') + '"' : quote(input);
 export interface RemotePinnedFile { version: RemoteFileVersion; path: string }
-export interface RemoteConnector { list(path: string): Promise<RemoteEntry[]>; pin(path: string, destination: string, maxBytes: number, original?: RemoteFileVersion): Promise<RemotePinnedFile>; close(): void }
-type ConnectionOptions = { credentials: DataSourceCredentials; trust: DataSourceHostTrust; signal: AbortSignal; cacheRoot: string; progress?: (received: number, total: number | null) => void; keyPath?: string; gitCaFile?: string };
+export interface RemotePreviewReader { bytes: number; read(start: number, end: number, signal: AbortSignal): Promise<Buffer> }
+export interface RemoteConnector { list(path: string): Promise<RemoteEntry[]>; pin(path: string, destination: string, maxBytes: number, original?: RemoteFileVersion): Promise<RemotePinnedFile>; preview?(path: string): Promise<RemotePreviewReader>; shares?(): Promise<string[]>; close(): void }
+export type ConnectionOptions = { credentials: DataSourceCredentials; trust: RemoteHostTrust; signal: AbortSignal; cacheRoot: string; progress?: (received: number, total: number | null) => void; keyPath?: string; gitCaFile?: string; smbConnect?: typeof connectRemoteSmb; ftpClient?: () => RemoteFtpClient };
 // Requests share a bare repository, so every cache writer uses the same queue.
 const gitCacheWrites = new Map<string, Promise<void>>();
 
-async function spool(chunks: AsyncIterable<Uint8Array>, destination: string | undefined, maxBytes: number, signal: AbortSignal, progress?: (received: number) => void): Promise<{ sha256: string; bytes: number }> {
+export async function spool(chunks: AsyncIterable<Uint8Array>, destination: string | undefined, maxBytes: number, signal: AbortSignal, progress?: (received: number) => void): Promise<{ sha256: string; bytes: number }> {
   const file = destination ? await open(destination, 'wx', 0o600) : undefined;
   let bytes = 0, complete = false; const hash = createHash('sha256');
   try {
@@ -193,6 +200,30 @@ class GitConnector implements RemoteConnector {
     if (content.bytes < 1024) { const file = await open(destination, 'r'); try { if ((await file.readFile()).toString().startsWith('version https://git-lfs.github.com/spec/v1')) remoteFailure('Git LFS content is unavailable from this source.'); } finally { await file.close(); } }
     return { path: destination, version };
   }
+  async preview(path: string): Promise<RemotePreviewReader> {
+    remotePath(path, false); await this.initialize(true);
+    const entry = await this.resolve(path); if (entry.type !== 'blob' || entry.mode === '160000') remoteFailure('Select a readable file.');
+    const bytes = Number((await this.run(['cat-file', '-s', entry.oid])).toString());
+    if (!Number.isSafeInteger(bytes) || bytes < 0) remoteFailure('Unsupported remote entry.');
+    if (bytes < 1024 && (await this.run(['cat-file', 'blob', entry.oid], 1024)).toString().startsWith('version https://git-lfs.github.com/spec/v1')) remoteFailure('Git LFS content is unavailable from this source.');
+    return { bytes, read: async (start, end, signal) => {
+      signal.throwIfAborted();
+      const { child, done } = this.process(['cat-file', 'blob', entry.oid]);
+      const abort = () => child.kill(); signal.addEventListener('abort', abort, { once: true });
+      let offset = 0, size = 0; const chunks: Buffer[] = [];
+      try {
+        for await (const chunk of child.stdout) {
+          signal.throwIfAborted();
+          if (offset + chunk.length > start) { const part = chunk.subarray(Math.max(0, start - offset), Math.min(chunk.length, end + 1 - offset)); chunks.push(part); size += part.length; }
+          offset += chunk.length;
+          if (offset > end) break;
+        }
+        signal.throwIfAborted(); this.options.signal.throwIfAborted();
+        if (size !== end - start + 1) { await done; remoteFailure('Remote file is missing or unreadable.'); }
+        return Buffer.concat(chunks, size);
+      } finally { signal.removeEventListener('abort', abort); child.kill(); await done.catch(() => {}); }
+    } };
+  }
   close(): void { this.client?.end(); for (const socket of this.sockets) socket.destroy(); this.server?.close(); if (this.askpassFile) void rm(this.askpassFile, { force: true }).catch(() => {}); }
 }
 
@@ -206,10 +237,38 @@ class SftpConnector implements RemoteConnector {
     this.root = await this.realpath(config.root);
     if (!(await this.info(this.root)).isDirectory()) remoteFailure('Configured root is not a directory.');
   }
-  private realpath(path: string): Promise<string> { return new Promise((resolve, reject) => this.sftp!.realpath(path, (err, result) => err ? reject(new ServiceError('CONFLICT', 'Remote path is missing, unreadable, or has a broken/cyclic link.')) : resolve(result))); }
-  private info(path: string): Promise<RemoteSftpStats> { return new Promise((resolve, reject) => this.sftp!.stat(path, (err, result) => err ? reject(new ServiceError('CONFLICT', 'Remote file is missing or unreadable.')) : resolve(result))); }
-  private async resolve(path: string): Promise<string> {
-    remotePath(path); await this.initialize(); const actual = await this.realpath(posix.join(this.root, path));
+  private async waitFor<T>(work: () => Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted();
+    let abort!: () => void;
+    const cancelled = new Promise<never>((_, reject) => { abort = () => reject(signal.reason); signal.addEventListener('abort', abort, { once: true }); });
+    // Stop waiting for an individual SFTP operation without closing the shared
+    // channel. The race also consumes any late reply or error.
+    try { const result = await Promise.race([work(), cancelled]); signal.throwIfAborted(); return result; }
+    finally { signal.removeEventListener('abort', abort); }
+  }
+  private realpath(path: string, signal = this.options.signal): Promise<string> { return this.waitFor(() => new Promise((resolve, reject) => this.sftp!.realpath(path, (err, result) => err ? reject(new ServiceError('CONFLICT', 'Remote path is missing, unreadable, or has a broken/cyclic link.')) : resolve(result))), signal); }
+  private info(path: string, signal = this.options.signal): Promise<RemoteSftpStats> { return this.waitFor(() => new Promise((resolve, reject) => this.sftp!.stat(path, (err, result) => err ? reject(new ServiceError('CONFLICT', 'Remote file is missing or unreadable.')) : resolve(result))), signal); }
+  private async withReadStream<T>(path: string, signal: AbortSignal, consume: (stream: Readable) => Promise<T>, range?: { start: number; end: number }): Promise<T> {
+    signal.throwIfAborted();
+    const stream = this.sftp!.createReadStream(path, { autoClose: true, ...range });
+    // ssh2 can emit OPEN errors before iteration starts and CLOSE errors after
+    // EOF removes the iterator's listeners. Keep this handler for the lifetime
+    // of the stream, and record early errors so the consumer still rejects.
+    stream.on('error', error => { stream.destroy(error); });
+    const abort = () => { stream.destroy(); };
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      signal.throwIfAborted();
+      // ssh2 delays destroy completion until a pending OPEN/CLOSE replies.
+      // Preview reads can stop waiting now; destroy still closes a late handle.
+      // Imports keep awaiting their consumer so local output cleanup finishes.
+      return await (range ? this.waitFor(() => consume(stream), signal) : consume(stream));
+    }
+    catch (error) { signal.throwIfAborted(); throw error; }
+    finally { signal.removeEventListener('abort', abort); stream.destroy(); }
+  }
+  private async resolve(path: string, signal = this.options.signal): Promise<string> {
+    remotePath(path); signal.throwIfAborted(); await this.initialize(); const actual = await this.realpath(posix.join(this.root, path), signal);
     if (!within(this.root, actual)) remoteFailure('Symbolic link is outside the configured root.'); return actual;
   }
   async list(path: string): Promise<RemoteEntry[]> {
@@ -226,18 +285,39 @@ class SftpConnector implements RemoteConnector {
     if (original && original.kind !== 'sftp') remoteFailure('Original version is unavailable. Select the file again.');
     const actual = await this.resolve(path), before = await this.info(actual); if (!before.isFile()) remoteFailure('Select a readable file.');
     if (before.size > maxBytes) throw new ServiceError('PAYLOAD_TOO_LARGE', 'Remote file exceeds the 300 MiB import limit.');
-    const content = await spool(this.sftp!.createReadStream(actual, { autoClose: true }), destination, maxBytes, this.options.signal, bytes => this.options.progress?.(bytes, before.size));
+    const content = await this.withReadStream(actual, this.options.signal, stream => spool(stream, destination, maxBytes, this.options.signal, bytes => this.options.progress?.(bytes, before.size)));
     const again = await this.resolve(path), after = await this.info(actual);
     if (again !== actual || before.size !== after.size || before.mtime !== after.mtime || before.mode !== after.mode || content.bytes !== before.size) remoteFailure('Remote file changed during transfer. Select the file again.');
-    const check = await spool(this.sftp!.createReadStream(actual, { autoClose: true }), undefined, maxBytes, this.options.signal);
+    const check = await this.withReadStream(actual, this.options.signal, stream => spool(stream, undefined, maxBytes, this.options.signal));
     const final = await this.info(actual);
     if (check.sha256 !== content.sha256 || check.bytes !== content.bytes || after.mtime !== final.mtime || after.size !== final.size || await this.resolve(path) !== actual) remoteFailure('Remote file changed during transfer. Select the file again.');
     if (original && (original.sha256 !== content.sha256 || original.bytes !== content.bytes)) remoteFailure('Original version is unavailable. Select the file again.');
     return { path: destination, version: { kind: 'sftp', ...content } };
   }
+  async preview(path: string): Promise<RemotePreviewReader> {
+    const actual = await this.resolve(path), before = await this.info(actual);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0) remoteFailure('Select a readable file.');
+    const check = async (signal: AbortSignal) => {
+      const current = await this.info(actual, signal);
+      if (await this.resolve(path, signal) !== actual || !current.isFile() || current.size !== before.size || current.mtime !== before.mtime || current.mode !== before.mode) remoteFailure('Remote file changed during preview. Open it again.');
+    };
+    return { bytes: before.size, read: async (start, end, signal) => {
+      signal = AbortSignal.any([this.options.signal, signal]);
+      signal.throwIfAborted(); await check(signal);
+      try {
+        return await this.withReadStream(actual, signal, async stream => {
+          const chunks: Buffer[] = []; let size = 0;
+          for await (const chunk of stream) { signal.throwIfAborted(); size += chunk.length; if (size > end - start + 1) remoteFailure('Remote file changed during preview. Open it again.'); chunks.push(chunk); }
+          signal.throwIfAborted(); await check(signal);
+          if (size !== end - start + 1) remoteFailure('Remote file changed during preview. Open it again.');
+          return Buffer.concat(chunks, size);
+        }, { start, end });
+      } catch (error) { signal.throwIfAborted(); if (error instanceof ServiceError) throw error; return remoteFailure('Remote file is missing or unreadable.'); }
+    } };
+  }
   close(): void { this.sftp?.end(); this.client?.end(); }
 }
-export function createRemoteConnector(source: DataSource, options: ConnectionOptions): RemoteConnector { return source.config.kind === 'git' ? new GitConnector(source, options) : new SftpConnector(source, options); }
+export function createRemoteConnector(source: DataSource, options: ConnectionOptions): RemoteConnector { return source.config.kind === 'git' ? new GitConnector(source, options) : source.config.kind === 'smb' ? new SmbConnector(source, options) : source.config.kind === 'ftp' ? new FtpConnector(source, options) : new SftpConnector(source, options); }
 export async function verifiedRemoteCache(path: string, version: RemoteFileVersion, signal: AbortSignal): Promise<boolean> {
   try { if ((await stat(path)).size !== version.bytes) return false; const result = await spool(createReadStream(path), undefined, version.bytes, signal); return result.sha256 === version.sha256 && result.bytes === version.bytes; } catch { signal.throwIfAborted(); return false; }
 }

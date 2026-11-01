@@ -31,7 +31,7 @@ export function previewFormat(name: string, mime = ''): PreviewFormat {
   if (imageMimeByExtension[ext]) return 'image';
   if (ext === 'pdf') return 'pdf';
   if (Object.hasOwn(audioMimeByExtension, ext)) return 'audio';
-  if (['mp4','m4v','mov','webm','mkv','avi','mpg','mpeg','ogv'].includes(ext)) return 'video';
+  if (['mp4','m4v','mov','webm','mkv','avi','mpg','mpeg','ogv','flv'].includes(ext)) return 'video';
   if (Object.hasOwn(languages, ext)) return 'code';
   if (ext === 'bin') return 'hex';
   if (mime === 'text/html') return 'html';

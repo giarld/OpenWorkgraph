@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { AlertCircle, LoaderCircle, Maximize, Minimize, Pause, Play, Volume2, VolumeX } from 'lucide-react';
 import { useI18n } from '../i18n/I18nProvider';
 import type { Request } from './contracts';
 import { registerVideoStream, VIDEO_FULL_LOAD_BYTES } from './video-stream';
+import { attachFlvPlayer, isFlvVideo, type FlvRangeSource } from './flv-player';
 import './video-preview.css';
 
 function videoTime(seconds: number): string {
@@ -13,10 +14,13 @@ function videoTime(seconds: number): string {
 }
 const fill = (value: number): CSSProperties => ({ '--video-fill': value * 100 + '%' } as CSSProperties);
 
-export function StreamingVideoPreview({request,path,bytes,name}: {request:Request;path:string;bytes:number;name:string}) {
+export function StreamingVideoPreview({request,path,bytes,name,mime,allowFullFallback=true}: {request:Request;path:string;bytes:number;name:string;mime?:string;allowFullFallback?:boolean}) {
   const {t} = useI18n();
   const [state,setState] = useState<{src?:string;blob?:Blob;error?:string}>({});
+  const flv = isFlvVideo(name, mime);
+  const rangeSource = useMemo(() => ({request,path,bytes}), [request,path,bytes]);
   useEffect(() => {
+    if (flv) return;
     let active = true;
     let release: (()=>void) | undefined;
     setState({});
@@ -24,7 +28,7 @@ export function StreamingVideoPreview({request,path,bytes,name}: {request:Reques
       if (active) { release = stream.release; setState({src:stream.src}); }
       else stream.release();
     }).catch(async error => {
-      if (bytes > VIDEO_FULL_LOAD_BYTES) { if (active) setState({error:error instanceof Error ? error.message : String(error)}); return; }
+      if (!allowFullFallback || bytes > VIDEO_FULL_LOAD_BYTES) { if (active) setState({error:error instanceof Error ? error.message : String(error)}); return; }
       try {
         let blob: Blob;
         if (path.includes('/files/content?')) {
@@ -35,12 +39,13 @@ export function StreamingVideoPreview({request,path,bytes,name}: {request:Reques
       } catch (cause) { if (active) setState({error:cause instanceof Error ? cause.message : String(cause)}); }
     });
     return () => { active=false; release?.(); };
-  },[request,path,bytes]);
-  if (state.error) return <p role="status">{t('Video preview failed: {error}',{error:state.error})}</p>;
+  },[request,path,bytes,allowFullFallback,flv]);
+  if (flv) return <VideoPreview key={path} name={name} mime={mime} rangeSource={rangeSource}/>;
+  if (state.error) return <p role="status">{t('Video preview failed: {error}',{error:t(state.error)})}</p>;
   return state.src ? <VideoPreview key={state.src} src={state.src} name={name}/> : state.blob ? <VideoPreview key={path} blob={state.blob} name={name}/> : <p role="status">{t('Preparing video stream…')}</p>;
 }
 
-export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:string}) {
+export function VideoPreview({ blob, name, src, mime, rangeSource }: {blob?:Blob;name:string;src?:string;mime?:string;rangeSource?:FlvRangeSource}) {
   const { t } = useI18n();
   const container = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
@@ -64,7 +69,20 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
     setFailed(false); setLoading(true); setFullscreenError(false);
     return () => URL.revokeObjectURL(next);
   }, [blob,src]);
-  const source = src || url;
+  const source = rangeSource?.path || src || url;
+  const flv = isFlvVideo(name, mime || blob?.type);
+  useEffect(() => {
+    if (!flv || !source || !video.current) return;
+    const abort = new AbortController();
+    let release: (() => void) | undefined;
+    setFailed(false); setLoading(true); setPlaying(false); setTime(0); setDuration(0);
+    void attachFlvPlayer(video.current, source, () => {
+      setFailed(true); setLoading(false); setPlaying(false);
+    }, abort.signal, rangeSource).then(cleanup => {
+      if (abort.signal.aborted) cleanup?.(); else release = cleanup;
+    }).catch(() => { if (!abort.signal.aborted) { setFailed(true); setLoading(false); } });
+    return () => { abort.abort(); release?.(); };
+  }, [flv, source, rangeSource]);
   useEffect(() => {
     const changed = () => setFullscreen(document.fullscreenElement === container.current);
     document.addEventListener('fullscreenchange', changed);
@@ -78,7 +96,7 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
       void element.play().catch((error: unknown) => {
         // A rapid pause or source switch may cancel a pending play request.
         if (error instanceof DOMException && error.name === 'AbortError') return;
-        if (video.current === element && element.getAttribute('src') === source) {
+        if (video.current === element && (flv || element.getAttribute('src') === source)) {
           setFailed(true); setLoading(false);
         }
       });
@@ -97,7 +115,7 @@ export function VideoPreview({ blob, name, src }: {blob?:Blob;name:string;src?:s
 
   return <div ref={container} className="ow-preview-video" data-canvas-interactive>
     <div className="ow-preview-video-stage">
-      {source && <video ref={video} src={source} preload="metadata" playsInline aria-label={name}
+      {source && <video ref={video} src={flv ? undefined : source} preload="metadata" playsInline aria-label={name}
         onLoadedMetadata={event => setDuration(event.currentTarget.duration)}
         onLoadedData={() => setLoading(false)} onCanPlay={() => setLoading(false)}
         onWaiting={() => setLoading(true)} onPlaying={() => setLoading(false)}

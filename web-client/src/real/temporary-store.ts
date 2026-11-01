@@ -642,7 +642,8 @@ export class TemporaryCanvasStore {
       });
     } catch (error) { throw failure ?? error; }
   }
-  request: Request = async <T>(path: string, body?: unknown, method?: string): Promise<T> => {
+  request: Request = async <T>(path: string, body?: unknown, method?: string, options?: Parameters<Request>[3]): Promise<T> => {
+    options?.signal?.throwIfAborted();
     if (path === '/v1/models') throw Object.assign(Error(translate("No model Workspace is connected.")), { code: 'SERVICE_UNAVAILABLE' });
     const match = /^[/]v1[/]projects[/]temporary[/]graphs[/]([^/]+)(.*)$/.exec(path);
     if (!match) throw Object.assign(Error(translate("This operation requires a Workspace connection.")), { code: 'SERVICE_UNAVAILABLE' });
@@ -936,6 +937,15 @@ export class TemporaryCanvasStore {
     if (resourceMatch && body === undefined) {
       const resource = await this.access(id, false, r => r.resources[resourceMatch[1]]);
       if (!resource) throw Error(translate("The temporary Work Graph resource does not exist."));
+      if (method === 'RANGE' && resourceMatch[2] === 'content') {
+        options?.signal?.throwIfAborted();
+        const range = options?.range;
+        if (!range || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
+            range.start < 0 || range.end < range.start || range.start >= resource.blob.size)
+          throw Object.assign(Error(translate('Invalid media byte range')), {code:'INVALID_REQUEST'});
+        const end = Math.min(range.end,resource.blob.size - 1);
+        return {blob:resource.blob.slice(range.start,end + 1),start:range.start,end,total:resource.blob.size,mime:resource.blob.type} as T;
+      }
       if (method === 'BLOB') return resource.blob as T;
       if (resourceMatch[2] === 'representation') {
         const text = resource.blob.type.startsWith('text/') || /[.](md|markdown|txt|json|csv|xml|yaml|yml)$/i.test(resource.name);

@@ -32,8 +32,8 @@ interface SettingsDialogProps {
 const pages = [
   { id: 'projects', title: 'Projects', icon: Folder },
   { id: 'agents', title: 'Agent', icon: Bot },
-  { id: 'data-sources', title: 'Data sources', icon: Folder },
   { id: 'images', title: 'Image generation', icon: Image },
+  { id: 'data-sources', title: 'Data sources', icon: Folder },
   { id: 'transfer', title: 'Import and export', icon: ArrowLeftRight },
   { id: 'storage', title: 'Storage', icon: HardDrive },
   { id: 'backups', title: 'Backups and restore', icon: Archive },

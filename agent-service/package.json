@@ -1,6 +1,6 @@
 {
   "name": "openworkgraph",
-  "version": "0.5.20",
+  "version": "0.6.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -30,6 +30,9 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@winlinux/auth": "1.1.0",
+    "@winlinux/smb2": "1.1.0",
+    "basic-ftp": "6.2.4",
     "sharp": "^0.35.4",
     "ssh2": "^1.17.0",
     "yaml": "^2.9.1",

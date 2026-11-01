@@ -39,6 +39,13 @@
 .remote-source-toolbar { min-width: 0; }
 .remote-assets-browser .remote-source-toolbar select { width: 0; flex: 1; min-width: 0; text-overflow: ellipsis; }
 .remote-assets-browser .remote-source-toolbar > button { flex: 0 0 36px; width: 36px; height: 36px; padding: 0; }
+.remote-assets-browser .remote-assets-search { display: flex; flex-direction: row; align-items: center; gap: 6px; min-width: 0; min-height: 36px; margin: 8px 0 0; padding-left: 10px; border: 1px solid var(--stroke); border-radius: 4px; background: var(--canvas, var(--panel)); }
+.remote-assets-search > svg { flex-shrink: 0; color: var(--muted); }
+.remote-assets-browser .remote-assets-search input { flex: 1; width: 0; min-width: 0; min-height: 34px; margin: 0; padding: 7px 2px; border: 0; background: transparent; color: var(--text); font: inherit; }
+.remote-assets-search input::-webkit-search-cancel-button { appearance: none; }
+.remote-assets-browser .remote-assets-search button { flex: 0 0 34px; width: 34px; min-height: 34px; padding: 0; border: 0; background: transparent; }
+.remote-assets-browser .remote-assets-search:focus-within { outline: 2px solid var(--active); outline-offset: 2px; }
+.remote-assets-browser .remote-assets-search input:focus-visible { outline: none; }
 .remote-assets-browser select {
   box-sizing: border-box; min-height: 36px; padding: 7px 8px;
   border: 1px solid var(--stroke); border-radius: 8px; background: var(--canvas, var(--panel)); color: var(--text); font: inherit; font-size: 12px;
@@ -53,7 +60,10 @@
 /* The grid, tiles and thumbnails use ProjectFilesPanel.css without size overrides. */
 .remote-assets-browser .ow-project-file-tile { line-height: inherit; }
 .remote-asset-card[draggable=true] .remote-entry-main { cursor: grab; }
-.remote-assets-browser div.remote-entry-main:hover { background: var(--fill); border-color: transparent; }
+.remote-assets-browser :is(div, button).remote-entry-main:hover { background: var(--fill); border-color: transparent; }
+.remote-asset-preview-dialog { margin: auto; max-width: calc(100vw - 40px); max-height: calc(100dvh - 40px); }
+.remote-asset-preview-dialog::backdrop { background: #0008; }
+.remote-asset-preview-dialog .ow-preview-node > .ow-preview-video { flex: 1; min-height: 0; }
 .remote-asset-card:focus-within .remote-entry-main { background: var(--fill); border-color: var(--muted); }
 .remote-entry-actions { position: absolute; top: 4px; right: 4px; left: 4px; display: flex; justify-content: flex-end; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 150ms ease; }
 .remote-assets-browser .remote-entry-actions .ow-project-file-add { flex: 0 1 28px; min-width: 0; height: 28px; min-height: 28px; padding: 0; border-radius: 6px; }
@@ -72,6 +82,9 @@
 .remote-source-settings .remote-source-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px 16px; min-width: 0; margin: 20px 0 0; padding: 0; border: 0; }
 .remote-source-wide, .remote-source-actions { grid-column: 1 / -1; }
 .remote-source-address { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 16px; min-width: 0; }
+.remote-source-shares { display: grid; grid-template-columns: minmax(0, 1fr) 40px; align-items: end; gap: 8px; min-width: 0; }
+.remote-source-settings .remote-source-shares > button { width: 40px; padding: 0; }
+.remote-source-shares-spinner { animation: remote-assets-loading-spin 1s linear infinite; }
 .remote-source-settings label :is(input, select) {
   box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; height: 40px; min-height: 40px;
   padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px;
@@ -85,9 +98,11 @@
 .remote-source-settings .remote-source-save { min-width: 72px; background: var(--active); color: var(--panel); border-color: var(--active); }
 .remote-source-settings .remote-source-save:hover:not(:disabled) { background: var(--text); }
 .remote-source-settings button.remote-source-remove { margin-inline-start: auto; color: var(--muted); }
-.remote-host-challenge { display: grid; gap: 12px; min-width: 0; padding: 16px; margin-top: 20px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--canvas, var(--panel)); }
+.remote-source-feedback { display: grid; gap: 16px; margin: 20px 0; min-width: 0; }
+.remote-source-settings .remote-source-feedback > p { margin: 0; }
+.remote-host-challenge { display: grid; gap: 12px; min-width: 0; }
 .remote-host-challenge strong, .remote-host-challenge code { overflow-wrap: anywhere; }
-.remote-host-challenge code { display: block; padding: 8px 10px; border-radius: 6px; background: var(--fill); font-size: 12px; }
+.remote-host-challenge code { display: block; padding: 8px 10px; border-radius: 6px; background: var(--panel); font-size: 12px; }
 .remote-host-challenge button { justify-self: start; max-width: 100%; }
 .remote-source-settings p { overflow-wrap: anywhere; }
 .remote-source-settings [role=alert], .remote-assets-browser [role=alert] { padding: 10px 12px; border: 1px solid var(--stroke); border-inline-start: 3px solid var(--muted); border-radius: 8px; background: var(--fill); color: var(--text); }
@@ -96,6 +111,10 @@
   .remote-source-settings button.remote-source-remove { margin-inline-start: 0; }
 }
 @media (hover: none), (pointer: coarse) {
+  .remote-assets-browser .remote-assets-search input, .remote-assets-browser .remote-assets-search button { min-height: 44px; }
+  .remote-assets-browser .remote-assets-search button { flex-basis: 44px; width: 44px; }
+  .remote-source-shares { grid-template-columns: minmax(0, 1fr) 44px; }
+  .remote-source-settings .remote-source-shares > button { width: 44px; }
   .remote-library-toolbar button, .remote-assets-browser button,
   .remote-library-toolbar [role=tab], .remote-assets-browser .remote-breadcrumbs button,
   .remote-source-settings button[type],
@@ -110,7 +129,7 @@
   .remote-assets-browser select { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .remote-assets-loading svg { animation: none; }
+  .remote-assets-loading svg, .remote-source-shares-spinner { animation: none; }
   .remote-library-toolbar button, .remote-assets-browser button, .remote-source-settings button,
   .remote-entry-actions { transition: none; }
 }
