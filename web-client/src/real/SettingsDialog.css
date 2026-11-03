@@ -55,11 +55,6 @@
 .settings-dialog .management-panel fieldset { min-width: 0; }
 .settings-dialog .management-panel .management-actions { gap: 8px; }
 .settings-dialog .management-panel input:not([type=checkbox]):not([type=radio]), .settings-dialog .management-panel select { min-height: 40px; }
-.settings-dialog .agent-settings-section { border: 0; padding: 0 0 24px; margin-bottom: 24px; border-bottom: 1px solid var(--stroke); border-radius: 0; background: transparent; }
-.settings-dialog .agent-settings-section > legend { margin-bottom: 16px; font-size: 15px; }
-.settings-dialog .agent-settings-toolbar h3 { font-size: 16px; margin: 0; }
-.settings-dialog .agent-settings-intro { margin-bottom: 24px; }
-.settings-dialog .agent-settings-section > label { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.4fr); align-items: center; gap: 16px; }
 .workspace-combobox { position: relative; min-width: 0; }
 .settings-dialog button.workspace-combobox-trigger { display: flex; justify-content: space-between; width: 100%; min-height: 44px; padding: 10px 12px; }
 .workspace-combobox-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -94,7 +89,6 @@
   .settings-content { flex: 1; padding: 22px 18px 28px; scrollbar-gutter: auto; }
   .settings-content h3, .settings-dialog .management-panel > header h2 { font-size: 20px; }
   .settings-preference-row { grid-template-columns: 80px minmax(0, 1fr); gap: 12px; }
-  .settings-dialog .agent-settings-section > label { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
   .settings-dialog .agent-settings-toolbar { flex-wrap: wrap; }
   .settings-offline { flex-wrap: wrap; }
 }

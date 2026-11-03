@@ -11,22 +11,22 @@ export function databaseAccessPort(root: string): number {
 
 /** A busy port must identify this database lock, rather than another workspace
  * or an unrelated application. A released owner can disappear before probing. */
-async function checkOwner(port: number, scope: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+const occupied = () => new Error('Database access lock port is occupied by another listener');
+async function checkOwner(port: number, scope: string): Promise<boolean> {
+  return new Promise<boolean>((resolve, reject) => {
     const socket = createConnection({ host: '127.0.0.1', port });
     let input = '', settled = false;
-    const done = (error?: Error) => {
+    const done = (error?: Error, verified = false) => {
       if (settled) return; settled = true; socket.destroy();
-      if (error) reject(error); else resolve();
+      if (error) reject(error); else resolve(verified);
     };
-    const occupied = () => new Error('Database access lock port is occupied by another listener');
     socket.setTimeout(1000, () => done(occupied()));
-    socket.on('error', error => done((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? undefined : error));
+    socket.on('error', error => done(['ECONNREFUSED', 'ECONNRESET'].includes((error as NodeJS.ErrnoException).code ?? '') ? undefined : error));
     socket.on('data', chunk => {
       input += chunk.toString();
-      if (input.includes('\n') || input.length > 65) done(input === scope + '\n' ? undefined : occupied());
+      if (input.includes('\n') || input.length > 65) done(input === scope + '\n' ? undefined : occupied(), input === scope + '\n');
     });
-    socket.on('close', () => done(occupied()));
+    socket.on('close', () => done());
   });
 }
 
@@ -36,6 +36,7 @@ async function checkOwner(port: number, scope: string): Promise<void> {
 export async function acquireDatabaseAccess(root: string, check: () => void = () => {}) {
   root = await realpath(await safePath(root));
   const port = databaseAccessPort(root), scope = digest('database-access:' + root);
+  let unidentified = 0;
   for (;;) {
     check();
     const server = createServer(socket => {
@@ -51,7 +52,12 @@ export async function acquireDatabaseAccess(root: string, check: () => void = ()
       });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
-      await checkOwner(port, scope);
+      if (unidentified >= 4) throw occupied();
+      // The old reader can release while this identity probe is in flight.
+      // Reset/EOF does not grant access: only a subsequent exclusive bind can.
+      // Bound unknown listeners that keep resetting or omit identification.
+      if (await checkOwner(port, scope)) unidentified = 0;
+      else unidentified++;
       await delay(25); continue;
     }
     let released: Promise<void> | undefined;

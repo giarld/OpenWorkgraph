@@ -16,6 +16,9 @@ export interface BackendCallbacks {
   onInteraction(interaction: BackendInteraction): void | Promise<void>;
   /** Native cancellation of a pending request, scoped to this Run/attempt. */
   onInteractionCancelled?(interactionId: string): void | Promise<void>;
+  /** Private lifecycle fence. drain waits for underlying host operations,
+   * including work whose public timeout has already rejected. */
+  hostWork?: { cancel(): void; drain(): Promise<void> };
   /** Independent title generation updates this Run's source while work proceeds. */
   setNodeTitle?(title: string): boolean | Promise<boolean>;
   /** Must authorize against this Run's project; no global graph/database endpoint. */

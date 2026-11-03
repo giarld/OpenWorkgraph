@@ -3,6 +3,9 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 // Dialogs and other previews outside the Work Graph remain active by default.
 const NodeViewportContext = createContext(true);
 export const useNodeViewport = () => useContext(NodeViewportContext);
+// Undefined distinguishes dialogs from an unselected Work Graph node.
+const NodeSelectedContext = createContext<boolean | undefined>(undefined);
+export const useNodeSelected = () => useContext(NodeSelectedContext);
 
 /** Defer expensive content, then retain its DOM and resources while offscreen. */
 export function NodeViewport({ render, contentKey, selected }: { render: () => ReactNode; contentKey: unknown; selected: boolean }) {
@@ -46,6 +49,8 @@ export function NodeViewport({ render, contentKey, selected }: { render: () => R
     return () => element.removeEventListener('play', onPlay, true);
   }, [visible, selected]);
   return <div ref={container} className="owg-node-viewport" data-node-viewport-active={visible}>
-    <NodeViewportContext.Provider value={visible}>{content}</NodeViewportContext.Provider>
+    <NodeViewportContext.Provider value={visible}>
+      <NodeSelectedContext.Provider value={selected}>{content}</NodeSelectedContext.Provider>
+    </NodeViewportContext.Provider>
   </div>;
 }

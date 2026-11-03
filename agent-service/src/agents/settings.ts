@@ -60,7 +60,7 @@ export class AgentSettingsStore {
     const row = this.db.prepare('SELECT value FROM settings WHERE key=?').get(this.key(backendId));
     const raw = row ? String(row.value) : null;
     let value: unknown;
-    try { value = raw === null ? { revision: 0, enabled: true, schemaVersion: descriptor.configuration.version, options: {}, model: null } : JSON.parse(raw); }
+    try { value = raw === null ? { revision: 0, enabled: descriptor.initiallyEnabled ?? true, schemaVersion: descriptor.configuration.version, options: {}, model: null } : JSON.parse(raw); }
     catch { throw new ServiceError('MAINTENANCE', '执行器设置损坏。'); }
     if (!isPlainRecord(value) || !exactKeys(value, ['revision', 'enabled', 'schemaVersion', 'options', 'model']) || !revision(value.revision) || (raw !== null && value.revision === 0) || typeof value.enabled !== 'boolean' || value.schemaVersion !== descriptor.configuration.version || !isPlainRecord(value.options) || (value.model !== null && !modelShape(value.model))) throw new ServiceError('MAINTENANCE', '执行器设置损坏或配置版本不兼容。');
     const local = value as unknown as Persisted;
@@ -143,7 +143,7 @@ export class AgentSettingsStore {
     const selected = selection?.model ?? current.model; if (selected === null) throw new AgentError('model_unavailable');
     const runtimeVersion = preparation.runtimeVersion ?? null;
     if (runtimeVersion !== null && !/^[0-9A-Za-z.+_-]{1,128}$/.test(runtimeVersion)) throw new AgentError('protocol_error');
-    return immutableFrozen({ backendId, apiVersion: plugin.descriptor.apiVersion, schemaVersion: plugin.descriptor.configuration.version, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion, configRevision: current.revision, options, model: this.freezeModel(backendId, selected, preparation.availableModels, options) });
+    return immutableFrozen(this.registry.freezeSelection({ backendId, apiVersion: plugin.descriptor.apiVersion, schemaVersion: plugin.descriptor.configuration.version, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion, configRevision: current.revision, options, model: this.freezeModel(backendId, selected, preparation.availableModels, options) }, device));
   }
   /** Use only for an independent new submission, in the accepting transaction. */
   assertCurrent(frozen: FrozenAgentSelection, expectedDefaultRevision?: number, platform: AgentPlatform = process.platform as AgentPlatform): void {
@@ -152,6 +152,7 @@ export class AgentSettingsStore {
     if (!current.enabled) throw new AgentError('runtime_unavailable');
     if (current.revision !== frozen.configRevision || current.schemaVersion !== frozen.schemaVersion) conflict();
     if (expectedDefaultRevision !== undefined && this.getDefault().revision !== expectedDefaultRevision) conflict();
+    this.registry.assertCurrentSelection(frozen);
   }
   private atomic<T>(work: () => T): T {
     const savepoint = 'agent_settings_' + (++transactionSerial);

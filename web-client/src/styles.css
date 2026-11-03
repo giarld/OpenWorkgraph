@@ -1322,7 +1322,7 @@ pre {
 }
 .document-dialog .document-body {
   overflow: auto;
-  max-height: 60vh;
+  max-height: none;
   height: auto;
   min-height: 180px;
   padding: 20px 28px;
@@ -1432,22 +1432,9 @@ pre {
 
 .prompt-reference-heading { display: flex; align-items: center; justify-content: space-between; padding-top: 8px; }
 .prompt-controls { display: flex; gap: 8px; min-width: 0; flex-wrap: wrap; }
-.prompt-controls:has(.image-prompt-settings) { flex: 1; container-type: inline-size; }
-.prompt-panel footer:has(.image-prompt-settings) { align-items: center; gap: 8px; }
-.prompt-panel footer:has(.image-prompt-settings) .run-button { flex-shrink: 0; height: 36px; min-width: 44px; padding: 0 12px; }
-.image-prompt-settings { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
-.image-toolbar-model { display: flex; flex: 1; min-width: 0; }
-.image-toolbar-route { display: flex; flex: 0 1 140px; min-width: 0; }
 .prompt-model-settings { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%; }
-.image-prompt-settings > select { flex: 1; min-width: 0; }
 .prompt-controls select { border: 1px solid var(--stroke); border-radius: 18px; background: var(--fill); color: var(--text); padding: 5px 10px; max-width: 220px; font-size: 12px; }
-.image-prompt-settings select { width: 100%; max-width: 100%; min-width: 0; height: 36px; text-overflow: ellipsis; }
-.image-settings-trigger { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 12px; border: 1px solid var(--stroke); background: var(--fill); color: var(--text); border-radius: 18px; white-space: nowrap; font-size: 12px; }
-.image-settings-trigger svg { flex-shrink: 0; }
-@container (max-width: 380px) {
-  .image-settings-trigger { width: 36px; padding: 0; }
-  .image-settings-trigger span { display: none; }
-}
+
 .prompt-project-links {
   display: flex;
   flex-wrap: wrap;
@@ -1470,27 +1457,6 @@ pre {
 }
 .prompt-project-links button:hover:not(:disabled) { border-color: var(--accent); }
 .prompt-project-links button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.image-settings-dialog { width: min(440px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 32px)); overflow: auto; border-radius: 18px; padding: 18px; }
-.image-settings-dialog .panel-heading { padding: 0 0 12px; }
-.image-settings-dialog > label + label { margin-top: 14px; }
-.image-settings-dialog fieldset { min-width: 0; margin: 14px 0; padding: 0; border: 0; }
-.image-settings-dialog legend, .image-settings-dialog label { display: grid; gap: 8px; margin: 0; font-size: 12px; color: var(--muted); }
-.image-settings-dialog select { width: 100%; padding: 10px 12px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--fill); color: var(--text); }
-.image-setting-options, .image-aspect-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
-.image-aspect-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.image-setting-options button, .image-aspect-options button { min-height: 42px; border-radius: 12px; background: var(--fill); }
-.image-setting-options button.active, .image-aspect-options button.active { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); }
-.image-setting-options button:disabled, .image-aspect-options button:disabled { cursor: not-allowed; opacity: .38; }
-.image-dimension-section { display: grid; gap: 10px; margin-top: 14px; }
-.image-setting-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
-.image-alignment-toggle { display: inline-flex !important; grid-auto-flow: column; align-items: center; gap: 7px !important; }
-.image-alignment-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--text); }
-.image-dimension-inputs { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px; }
-.image-dimension-inputs > span { color: var(--muted); }
-.image-dimension-inputs label { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 0; overflow: hidden; border: 1px solid var(--stroke); border-radius: 10px; background: var(--fill); }
-.image-dimension-inputs label span { display: grid; place-items: center; height: 38px; color: var(--muted); }
-.image-dimension-inputs input { width: 100%; min-width: 0; height: 38px; padding: 0 10px; border: 0; outline: 0; background: transparent; color: var(--text); }
-.image-setting-error { margin: 0; color: var(--danger, #d66); font-size: 11px; line-height: 1.4; }
 .prompt-status-row { display: flex; align-items: flex-start; gap: 6px; min-height: 28px; padding: 0 14px; }
 .prompt-status-row .prompt-mention-trigger {
   width: 28px;

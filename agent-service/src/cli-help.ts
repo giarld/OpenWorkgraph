@@ -203,7 +203,7 @@ export function formatHelp(): string {
     '    CLI flags override matching convenience fields; use only fields supported by the node type.',
     '  RunPreview: {nodeId, excludeFiles?:boolean, inputDraft?:RunInput}.',
     '  RunSubmit: {nodeId, kind, expectedExecutionRevision, idempotencyKey?, inputDraft?, nodeInputDrafts?, preserveHistoricalOutputs?:boolean, agent?, modelOverride?, imageRoute?}.',
-    '    kind: execution|text_generation|visualize_generation|image_generation; must match the node type.',
+    '    kind: execution|text_generation|visualize_generation; must match the node type.',
     '    RunInput: {prompt?:string, skillReferences?:array, features?:array, modelOverride?:object|null, agentModelOverride?:object|null, imageRoute?:object|null}.',
     '    Skill/feature entries follow the existing node contracts; preserve valid IDs, revisions, and reference offsets.',
     '    nodeInputDrafts: {ancestorNodeId:RunInput}; target draft belongs in inputDraft, not nodeInputDrafts.',

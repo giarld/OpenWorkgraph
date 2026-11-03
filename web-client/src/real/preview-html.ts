@@ -18,6 +18,20 @@ export const HTML_PREVIEW_CSP = [
  * This is not a CPU quota or a general network firewall (self-navigation is a
  * browser limitation). No postMessage bridge grants runtime or storage access.
  */
+function installFileContextMenu(config: { hostOrigin: string; sessionId: string }) {
+  let enabled = false;
+  window.addEventListener('message', event => {
+    const data = event.data;
+    if (event.source === window.parent && event.origin === config.hostOrigin && data?.channel === 'openworkgraph.file.contextmenu.enable' && data.sessionId === config.sessionId) enabled = data.enabled === true;
+  });
+  window.addEventListener('contextmenu', event => {
+    if (!enabled) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    window.parent.postMessage({ channel: 'openworkgraph.file.contextmenu', sessionId: config.sessionId, x: event.clientX, y: event.clientY }, config.hostOrigin);
+  }, true);
+}
+
 export function buildHtmlPreviewDocument(text: string, activity?: { hostOrigin: string; sessionId: string; nodeId: string }): string {
   const doc = new DOMParser().parseFromString(text, 'text/html');
   doc.querySelectorAll('iframe,frame,object,embed,base,meta,link').forEach(node => node.remove());
@@ -35,6 +49,9 @@ export function buildHtmlPreviewDocument(text: string, activity?: { hostOrigin: 
     const controller = doc.createElement('script');
     controller.textContent = '(' + installVisualizeActivityController.toString() + ')(' + JSON.stringify(activity).replaceAll('<', '\\u003c') + ');';
     doc.head.prepend(controller);
+    const menu = doc.createElement('script');
+    menu.textContent = '(' + installFileContextMenu.toString() + ')(' + JSON.stringify(activity).replaceAll('<', '\\u003c') + ');';
+    doc.head.prepend(menu);
   }
   doc.head.prepend(policy);
   return '<!doctype html>' + doc.documentElement.outerHTML;

@@ -2,6 +2,8 @@ import type { Json, ModelSelection, ResourceEnvelope, SandboxMode } from './inde
 
 /** Product version is independent of this additive plugin contract. */
 export const AGENT_PLUGIN_API_VERSION = '1.0' as const;
+/** Aggregate catalog budget shared by discovery and connection configuration. */
+export const AGENT_MODEL_CATALOG_LIMIT = 4096;
 export type AgentRunKind = 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation';
 export type AgentPlatform = 'darwin' | 'linux' | 'win32';
 export type AgentOptionValue = string | number | boolean;
@@ -21,9 +23,13 @@ export interface AgentCapabilities {
   approvals: boolean; userInput: boolean; historyTools: boolean; nativeSkills: boolean;
   configuredSkills: boolean; dynamicSkillCommands: boolean; visualize: boolean;
 }
-export interface AgentModelPolicy { type: 'dynamic' | 'suggested' | 'manual'; allowCustom: boolean; effort: boolean; /** Native variant fallback, frozen with options. When effort is supported, a non-null reasoningEffort takes precedence and the plugin translates it. */ variantOption?: string }
+export interface AgentModelPolicy { type: 'dynamic' | 'suggested' | 'manual'; allowCustom: boolean; effort: boolean; /** All current catalog models are visible without a separate user selection. */ automaticVisibility?: boolean; /** Native variant fallback, frozen with options. When effort is supported, a non-null reasoningEffort takes precedence and the plugin translates it. */ variantOption?: string }
 export interface AgentLogo { symbol: string; color: string }
 export interface AgentDescriptor {
+  /** New backends may require explicit opt-in; existing saved settings win. */
+  initiallyEnabled?: boolean;
+  /** Initial display priority (higher first); a saved user order takes precedence. */
+  defaultPriority?: number;
   /** Finite text mark; never a URL, SVG payload or filesystem path. */
   logo?: AgentLogo;
   /** Supported project modes for new configuration; discovery remains independent. */
@@ -31,13 +37,13 @@ export interface AgentDescriptor {
   id: string; name: string; description: string; implementationVersion: string; apiVersion: string;
   configuration: AgentConfigurationSchema; capabilities: AgentCapabilities; models: AgentModelPolicy;
 }
-export const AGENT_FAILURE_REASONS = ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown', 'authentication_required', 'quota_exceeded', 'permission_denied'] as const;
+export const AGENT_FAILURE_REASONS = ['capability_unsupported', 'invalid_configuration', 'model_unavailable', 'runtime_unavailable', 'protocol_error', 'timeout', 'outcome_unknown', 'authentication_required', 'quota_exceeded', 'permission_denied', 'execution_limit', 'context_limit', 'output_limit', 'input_size_limit'] as const;
 export type AgentFailureReason = typeof AGENT_FAILURE_REASONS[number];
 /** Presence on the Workspace device; separate from authentication and execution readiness. */
 export type AgentInstallationStatus = 'installed' | 'missing' | 'unknown';
 export interface AgentAvailability { status: 'available' | 'unavailable' | 'unknown'; reason: AgentFailureReason | null; message: string; runtimeVersion?: string; installation?: AgentInstallationStatus }
 /** reasoningEfforts use the plugin's display order: increasing strength when known, followed by other native variants. */
-export interface AgentModelOption { id: string; reasoningEfforts: string[]; defaultReasoningEffort?: string | null; /** Unordered names; never interpreted as reasoning strength. */ variants?: string[]; inputKinds?: ResourceEnvelope['kind'][]; tools?: boolean; /** Plugin-provided provider group; null/absent means native. Model IDs remain opaque. */ group?: string | null }
+export interface AgentModelOption { id: string; /** Human-readable catalog label; never used as model identity. */ label?: string; reasoningEfforts: string[]; defaultReasoningEffort?: string | null; /** Unordered names; never interpreted as reasoning strength. */ variants?: string[]; inputKinds?: ResourceEnvelope['kind'][]; tools?: boolean; /** Plugin-provided provider group; null/absent means native. Model IDs remain opaque. */ group?: string | null }
 export interface AgentNativeProfile { id: string; name: string; mode: 'primary' | 'subagent' | 'all'; hidden: boolean }
 export interface AgentNativeCommand { id: string; description: string | null }
 export interface AgentNativeCatalog { version: 1; revision: string; profiles: AgentNativeProfile[]; commands: AgentNativeCommand[]; /** Option in the finite configuration schema, if profiles are selectable. */ profileOption?: string }
@@ -58,7 +64,7 @@ export interface AgentNativeSkillIdentity { source: 'agent'; backendId: string; 
 /** Independent from legacy settings; absent on historical selections. */
 export type AgentSettingsGeneration = 'agent-configuration-v1';
 export interface AgentProjectPermissions { revision: number; project: SandboxMode; runs: 'read-write' }
-export interface AgentConfiguredModel { id: string; visible: boolean; /** Read-only settings catalog metadata; never persisted with visibility. */ group?: string | null }
+export interface AgentConfiguredModel { id: string; visible: boolean; /** Read-only catalog label; never persisted with visibility. */ label?: string; /** Read-only settings catalog metadata; never persisted with visibility. */ group?: string | null }
 export interface AgentBackendConfiguration {
   backendId: string; revision: number; enabled: boolean; schemaVersion: number;
   options: Record<string, AgentOptionValue>; models: AgentConfiguredModel[];

@@ -6,7 +6,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { inflateSync } from 'node:zlib';
 import type { GraphScope, Json, Run } from '@openworkgraph/protocol';
-import { hashBytes, mimeMatchesBytes, sniffMime, supportsText, validMime } from './blob-store.js';
+import { hashBytes, mimeMatchesBytes, sniffMime, supportsText, validMime, validateResourceBytes } from './blob-store.js';
 import type { PreparedBlob } from './blob-store.js';
 import { runDirectories, type DataDirectories } from './directories.js';
 import { ServiceError } from './errors.js';
@@ -22,6 +22,8 @@ import { VisualizePublication, type PreparedVisualizePublication } from './visua
 import { commitTransferResource } from './visualize-transfer.js';
 import { collectVisualizeAssetReferences } from '@openworkgraph/protocol';
 import { publicationFileChunks, preserveOversizedOutput } from './publication-files.js';
+import { validatePublicationWebP } from './publication-webp.js';
+import { outputSuccessorPositions } from './output-layout.js';
 
 type OutputRole = 'delivery-document' | 'project-file' | 'workgraph-node';
 type OutputNodeType = 'text' | 'document' | 'image' | 'file' | 'visualize';
@@ -36,6 +38,7 @@ const MAX_TEXT = 1024 * 1024;
 export const MAX_MANIFEST = 64 * 1024;
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const imageMime = (mime: string): boolean => IMAGE_MIMES.has(mime);
+const fileMime = (mime: string): boolean => !supportsText(mime) && !imageMime(mime) && mime !== 'image/svg+xml';
 // Binary project outputs remain live file references, not in-memory resources.
 const streamedProjectFile = (role: OutputRole | undefined, mime: string): boolean => role === 'project-file' && !supportsText(mime) && !imageMime(mime);
 const fileOutput = (role: OutputRole | undefined, nodeType: OutputNodeType | undefined, mime: string): boolean => role === 'project-file' || role === 'workgraph-node' && (nodeType === 'file' || nodeType === 'image') || role === undefined && mime !== 'text/markdown';
@@ -81,19 +84,25 @@ export function parsePublicationManifest(value: unknown, version: 1 | 2, visuali
     if (typeof item.path !== 'string' || !item.path || item.path.length > 512 || isAbsolute(item.path) || item.path.includes(String.fromCharCode(92)) || [...item.path].some(char => char.charCodeAt(0) < 32) || item.path.split('/').some(part => !part || part === '.' || part === '..') || paths.has((role ?? 'legacy') + ':' + item.path)) return invalid('Invalid or duplicate output path');
     if (typeof item.mime !== 'string' || !validMime(item.mime)) return invalid('Invalid output MIME');
     const mime = item.mime.toLowerCase();
-    if (!Number.isSafeInteger(item.bytes) || Number(item.bytes) < (role === 'project-file' ? 0 : 1)) return invalid('Invalid output byte count: ' + item.outputKey);
+    if (!Number.isSafeInteger(item.bytes) || Number(item.bytes) < 0) return invalid('Invalid output byte count: ' + item.outputKey);
     if (typeof item.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256)) return invalid('Invalid output SHA-256: ' + item.outputKey);
     if (role === 'delivery-document') { deliveries++; if (mime !== 'text/markdown') invalid('delivery-document must be Markdown'); }
     let nodeType: OutputNodeType | undefined, title: string | undefined;
     if (role === 'workgraph-node') {
       if (!['text','document','image','file','visualize'].includes(String(item.nodeType))) invalid('workgraph-node requires a supported nodeType');
       nodeType = item.nodeType as OutputNodeType;
+      // Formats without a compatible specialized node use the file renderer.
+      // Visualize remains an explicit JSON contract.
+      if (nodeType !== 'visualize' && (!item.bytes || fileMime(mime) ||
+          (nodeType === 'text' || nodeType === 'document') && (!supportsText(mime) || Number(item.bytes) > MAX_TEXT) ||
+          nodeType === 'image' && !imageMime(mime) && mime !== 'image/svg+xml')) nodeType = 'file';
       if (typeof item.title !== 'string' || !item.title.trim() || item.title.length > 1024) invalid('workgraph-node requires a title of 1..1024 characters');
       title = limitNodeTitle(item.title);
       if ((nodeType === 'text' || nodeType === 'document') && (!supportsText(mime) || Number(item.bytes) > MAX_TEXT)) invalid(nodeType + ' workgraph-node requires bounded text content');
       if (nodeType === 'image' && !imageMime(mime) && mime !== 'image/svg+xml') invalid('image workgraph-node requires an image MIME');
       if (nodeType === 'visualize' && (mime !== 'application/json' || Number(item.bytes) > 4_194_304)) invalid('visualize workgraph-node requires a bounded application/json page package');
     } else if (item.nodeType !== undefined || item.title !== undefined) invalid('Only workgraph-node accepts nodeType and title');
+    if (!item.bytes && !fileOutput(role, nodeType, mime)) invalid('Invalid output byte count: ' + item.outputKey);
     if (Number(item.bytes) > MAX_FILE && !fileOutput(role, nodeType, mime)) invalid('File output exceeds 300 MB: ' + item.outputKey);
     if (mime === 'text/markdown' && role !== 'project-file') {
       markdown++;
@@ -139,7 +148,7 @@ export function validatePublicationOutputBytes(output: Output, bytes: Buffer): v
   if (output.mime === 'text/markdown') {
     if (detected !== 'text/plain' || !bytes.toString('utf8').trim()) invalid('Invalid Markdown bytes');
   } else {
-    if (!mimeMatchesBytes(output.mime, detected)) invalid('Output MIME does not match bytes');
+    if (!mimeMatchesBytes(output.mime, detected, true)) invalid('Output MIME does not match bytes');
     // Structural truncation checks supplement BlobStore MIME verification. These
     // are validation fixtures, not evidence of real backend image generation.
     if (detected === 'image/png') {
@@ -209,25 +218,7 @@ export function validatePublicationOutputBytes(output: Output, bytes: Buffer): v
       }
       if (!frames || offset !== bytes.length - 1) invalid('GIF requires complete frame data');
     } else if (detected === 'image/webp') {
-      if (bytes.length < 30 || bytes.readUInt32LE(4) + 8 !== bytes.length) invalid('Incomplete WebP');
-      let offset = 12, image = false;
-      while (offset + 8 <= bytes.length) {
-        const kind = bytes.toString('ascii', offset, offset + 4), length = bytes.readUInt32LE(offset + 4), start = offset + 8;
-        if (start + length > bytes.length) invalid('Truncated WebP chunk');
-        let width = 0, height = 0;
-        if (kind === 'VP8 ' && length >= 10) {
-          if (!bytes.subarray(start + 3, start + 6).equals(Buffer.from([157, 1, 42]))) invalid('Invalid VP8 frame');
-          width = bytes.readUInt16LE(start + 6) & 0x3fff; height = bytes.readUInt16LE(start + 8) & 0x3fff; image = true;
-        } else if (kind === 'VP8L' && length >= 5) {
-          if (bytes[start] !== 47) invalid('Invalid VP8L frame');
-          const bits = bytes.readUInt32LE(start + 1); width = (bits & 0x3fff) + 1; height = ((bits >>> 14) & 0x3fff) + 1; image = true;
-        } else if (kind === 'VP8X' && length === 10) {
-          width = bytes.readUIntLE(start + 4, 3) + 1; height = bytes.readUIntLE(start + 7, 3) + 1;
-        } else if (['VP8 ', 'VP8L', 'VP8X', 'ANIM', 'ANMF'].includes(kind)) invalid('Unsupported WebP encoding');
-        if ((width || height) && (!width || !height || width * height > 40000000)) invalid('WebP dimension limit');
-        offset = start + length + (length & 1);
-      }
-      if (!image || offset !== bytes.length) invalid('WebP requires complete image data');
+      validatePublicationWebP(bytes);
     }
   }
 }
@@ -306,7 +297,7 @@ export class Publication {
       for (const output of selected.outputs) {
         if (output.bytes > MAX_FILE && fileOutput(output.role, output.nodeType, output.mime)) {
           if (runtime.details.kind !== 'execution') invalid('File output exceeds 300 MB: ' + output.outputKey);
-          const saved = await preserveOversizedOutput(projectFiles, run.projectId, run.id, root, output);
+          const saved = await preserveOversizedOutput(projectFiles, run.projectId, run.id, root, { ...output, mime:'application/octet-stream' });
           // Use an ordinary delivery document so the path remains visible even
           // when another explicit Work Graph output hides the audit document.
           const fence = '`'.repeat(Math.max(3, ...Array.from(saved.path.matchAll(/`+/g), match => match[0].length + 1)));
@@ -320,12 +311,22 @@ export class Publication {
         if (streamedProjectFile(output.role, output.mime)) {
           const verified = await projectFiles.fingerprint(run.projectId, output.path, output.bytes);
           if (verified.sha256 !== output.sha256) invalid('Project output SHA-256 mismatch: ' + output.outputKey);
-          if (output.bytes && !mimeMatchesBytes(output.mime, sniffMime(verified.prefix))) invalid('Output MIME does not match bytes');
+          if (output.bytes && !mimeMatchesBytes(output.mime, sniffMime(verified.prefix), true)) {
+            if (runtime.details.kind !== 'execution') invalid('Output MIME does not match bytes');
+            output.mime = 'application/octet-stream';
+          }
           prepared.push({ output, changeToken:verified.changeToken });
           continue;
         }
         if (output.role !== 'project-file' && !supportsText(output.mime) && !imageMime(output.mime)) {
-          const blob = await this.resources.prepareStream(publicationFileChunks(root, output.path, output.bytes), output.mime, output);
+          let blob: PreparedBlob;
+          try { blob = await this.resources.prepareStream(publicationFileChunks(root, output.path, output.bytes), output.mime, output); }
+          catch (error) {
+            if (runtime.details.kind !== 'execution' || !(error instanceof ServiceError) || error.code !== 'UNSUPPORTED_MEDIA_TYPE') throw error;
+            output.mime = 'application/octet-stream';
+            if (output.role === 'workgraph-node') output.nodeType = 'file';
+            blob = await this.resources.prepareStream(publicationFileChunks(root, output.path, output.bytes), output.mime, output);
+          }
           prepared.push({ output, blob });
           continue;
         }
@@ -343,7 +344,17 @@ export class Publication {
             bytes = Buffer.from(result.answer);
           }
         }
-        validatePublicationOutputBytes(output, bytes);
+        // Integrity failures are never a format fallback. Once the declared file
+        // is verified, execution outputs can always retain its original bytes.
+        if (bytes.length !== output.bytes || hashBytes(bytes) !== output.sha256) invalid('Output size/hash mismatch');
+        try {
+          validatePublicationOutputBytes(output, bytes);
+          if (bytes.length) validateResourceBytes(bytes, output.mime);
+        } catch (error) {
+          if (runtime.details.kind !== 'execution' || output.role === 'delivery-document' || output.nodeType === 'visualize' || output.mime === 'text/markdown' && output.role === undefined) throw error;
+          output.mime = 'application/octet-stream';
+          if (output.role === 'workgraph-node') output.nodeType = 'file';
+        }
         if (output.nodeType === 'visualize' || visualizeGeneration && output.mime === 'application/json') {
           let page: unknown;
           try { page = JSON.parse(bytes.toString('utf8')); } catch { invalid('Visualize output must be a valid JSON page package'); }
@@ -416,7 +427,8 @@ export class Publication {
         if (kind === 'execution') {
           const currentContent = JSON.parse(String(source.node_content)) as Json;
           const taskTitle = selected.executionTitle ?? promptRunTitle(this.runs.snapshot(run.id).prompt);
-          if (taskTitle && object(currentContent) && (currentContent.title === undefined || currentContent.title === '' || DEFAULT_EXECUTION_TITLES.has(String(currentContent.title)))) {
+          const promptTitle = runtime.details.generatedTitle === false && runtime.details.titleVersion === Number(source.current_version);
+          if (taskTitle && object(currentContent) && (promptTitle || currentContent.title === undefined || currentContent.title === '' || DEFAULT_EXECUTION_TITLES.has(String(currentContent.title)))) {
             this.append(run, Number(source.current_version), { ...currentContent, title:taskTitle });
           }
           const hideOutputs = !!this.db.prepare("SELECT 1 FROM edges WHERE graph_id=? AND source_id=? AND kind='execution' LIMIT 1").get(run.graphId, run.nodeId);
@@ -424,17 +436,20 @@ export class Publication {
           const layoutGroups = hideOutputs ? [] : this.db.prepare("SELECT n.id,n.x,n.y,n.width,n.height FROM graph_groups g JOIN nodes n ON n.id=g.id AND n.graph_id=g.graph_id JOIN group_members m ON m.group_id=g.id AND m.node_id=? WHERE g.graph_id=? AND g.run_id IS NULL AND n.type='group' AND n.schema_version=1 AND n.deleted=0 AND n.width IS NOT NULL AND n.height IS NOT NULL").all(run.nodeId, run.graphId)
             .sort((a, b) => Number(a['width']) * Number(a['height']) - Number(b['width']) * Number(b['height']) || String(a['id']).localeCompare(String(b['id'])));
           const documentId = randomUUID(); const nodeIds: string[] = [];
-          for (const [index, item] of visibleArtifacts.entries()) {
-            const id = item === document ? documentId : randomUUID(); nodeIds.push(id);
-            const projectType = item.output.role === 'project-file' ? classifyProjectFile(item.output.path).type : null;
+          const outputNodes = visibleArtifacts.map(item => {
+            const projectType = item.output.role === 'project-file' ? fileMime(item.output.mime) ? 'file' : classifyProjectFile(item.output.path).type : null;
             const nodeType = item.output.role === 'workgraph-node' ? item.output.nodeType! : projectType ?? (imageMime(item.output.mime) || item.output.mime === 'image/svg+xml' ? 'image' : supportsText(item.output.mime) ? 'document' : 'file');
-            const x = Math.min(1e9, Number(source.x) + Number(source.width ?? 300) + 100);
-            const y = Math.min(1e9, Number(source.y) + index * 280);
             const size = item.visualize?.page.layout ?? (item.visualize ? VISUALIZE_DEFAULT_SIZE : undefined);
+            return { item, nodeType, size };
+          });
+          const positions = outputSuccessorPositions(this.graphs.snapshot(run), run.nodeId, outputNodes.map(({ nodeType, size }) => ({ type: nodeType, ...size })));
+          for (const [index, { item, nodeType, size }] of outputNodes.entries()) {
+            const id = item === document ? documentId : randomUUID(); nodeIds.push(id);
+            const { x, y, width, height } = positions[index]!;
             this.graphs.insertNode(run, { id, type: nodeType, schemaVersion: 1, contentVersion: 1, content: item.content, x, y, ...(size ?? {}), readOnly: !item.visualize }, true);
-            // Match the Web's default 300x220 output bounds; partial overlap must not
+            // Match the output's actual bounds; partial overlap must not
             // make a node move with a group that does not actually contain it.
-            const group = layoutGroups.find(g => x >= Number(g['x']) && y >= Number(g['y']) && x + (size?.width ?? 300) <= Number(g['x']) + Number(g['width']) && y + (size?.height ?? 220) <= Number(g['y']) + Number(g['height']));
+            const group = layoutGroups.find(g => x >= Number(g['x']) && y >= Number(g['y']) && x + width <= Number(g['x']) + Number(g['width']) && y + height <= Number(g['y']) + Number(g['height']));
             if (group) this.db.prepare('INSERT INTO group_members(group_id,node_id) VALUES(?,?)').run(String(group['id']), id);
           }
           const edge = (sourceId: string, targetId: string, edgeKind: 'delivery' | 'reference'): void => {

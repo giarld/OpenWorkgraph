@@ -5,7 +5,7 @@ import { limitNodeTitleOperations } from '../../../packages/protocol/src/node-ti
 import { projectOperations } from './optimistic-operations';
 import { randomId } from "../adapter/random";
 import type { GraphSnapshot, GraphOperation, Json, Request, Run } from "./contracts";
-import type { ExecutionPlan, ImageRoute, ModelSelection } from '../../../packages/protocol/src/index';
+import type { ExecutionPlan, ModelSelection } from '../../../packages/protocol/src/index';
 import { graphPath, errorCode, messageOf } from "./contracts";
 import '../i18n/catalogs/real-core';
 import { translate } from '../i18n/translate';
@@ -44,7 +44,7 @@ function sameInputValue(a:Json|undefined,b:Json|undefined):boolean {
 }
 export const COMMAND_MAX_ATTEMPTS = 3;
 /** Service snapshots are authoritative. Drafts never become server state without CAS acknowledgement. */
-export interface RunSubmissionOptions { agent?: AgentSelection; modelOverride?: ModelSelection; imageRoute?: ImageRoute; preserveHistoricalOutputs?: boolean }
+export interface RunSubmissionOptions { agent?: AgentSelection; modelOverride?: ModelSelection; preserveHistoricalOutputs?: boolean }
 export class GraphEditor {
   private state: EditorState;
   private confirmed: GraphSnapshot;
@@ -659,15 +659,14 @@ export class GraphEditor {
     if(Object.keys(drafts).length)await this.acceptExecutionInputs(drafts);
     return result;
   }
-  async run(nodeId: string, kind: string, selectionOrOverride?: RunSubmissionOptions | ModelSelection, imageRoute?: ImageRoute, preserveHistoricalOutputs?: boolean) {
-    const options = selectionOrOverride && typeof selectionOrOverride === 'object' && ['agent', 'modelOverride', 'imageRoute', 'preserveHistoricalOutputs'].some(key => key in selectionOrOverride)
+  async run(nodeId: string, kind: string, selectionOrOverride?: RunSubmissionOptions | ModelSelection, preserveHistoricalOutputs?: boolean) {
+    const options = selectionOrOverride && typeof selectionOrOverride === 'object' && ['agent', 'modelOverride', 'preserveHistoricalOutputs'].some(key => key in selectionOrOverride)
       ? structuredClone(selectionOrOverride as RunSubmissionOptions)
-      : structuredClone({ modelOverride: selectionOrOverride, imageRoute, preserveHistoricalOutputs });
+      : structuredClone({ modelOverride: selectionOrOverride, preserveHistoricalOutputs });
     const captured = options as RunSubmissionOptions;
     if (captured.agent && captured.modelOverride) throw Error('Agent selection and legacy modelOverride cannot coexist.');
-    if (kind === 'image_generation' && captured.agent) throw Error('Image runs use their existing image route.');
+    if (kind === 'image_generation') throw Error('专用生图已移除，请使用执行节点和生图技能。');
     const { agent, modelOverride } = captured;
-    imageRoute = captured.imageRoute;
     preserveHistoricalOutputs = captured.preserveHistoricalOutputs;
     if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
     const epoch = this.connectionEpoch;
@@ -699,7 +698,7 @@ export class GraphEditor {
       const preview = await this.request<{
         canSubmit: boolean;
         issues: { reason: string }[];
-      }>(graphPath(current.projectId, current.graphId) + "/input-preview", { nodeId, ...(inputDraft?{inputDraft}:{}), ...(kind==='image_generation' && imageRoute?.type==='api'?{excludeFiles:true}:{}) });
+      }>(graphPath(current.projectId, current.graphId) + "/input-preview", { nodeId, ...(inputDraft?{inputDraft}:{}) });
       if (!preview.canSubmit) throw Error(preview.issues.map((i) => i.reason).join("；"));
       if (this.historyLocked || this.historyRequest) throw Error(translate('Retry the pending history operation first.'));
       // Local edits and changed generation inputs always abort this click.
@@ -715,7 +714,6 @@ export class GraphEditor {
           ...(inputDraft?{inputDraft}:{}),
           ...(Object.keys(memberInputs).length?{nodeInputDrafts}:{}),
           ...(agent ? { agent } : modelOverride ? { modelOverride } : {}),
-          ...(kind === 'image_generation' && imageRoute ? { imageRoute } : {}),
           ...(kind === 'execution' && preserveHistoricalOutputs !== undefined ? { preserveHistoricalOutputs } : {}),
         });
         if(localInput || Object.keys(memberInputs).length)await this.acceptExecutionInputs({...memberInputs,...(localInput?{[nodeId]:localInput}:{})});

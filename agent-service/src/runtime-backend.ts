@@ -69,10 +69,11 @@ export function backendReply(interaction: Interaction, answer: Json): BackendRep
 export class RuntimeBackend implements SchedulerBackend {
   private readonly contexts = new Map<string, BackendContext>();
   private readonly failedInteractionCallbacks = new Set<string>();
+  private readonly hostWork = new WeakMap<BackendContext, { cancelled: boolean; pending: Set<Promise<unknown>> }>();
   readonly runContexts: RunContexts;
   private readonly callbackTimeoutMs: number;
-  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number } = {}, readonly visualizePreviews?: VisualizePreviews) {
-    this.runContexts = new RunContexts(runs, dirs);
+  constructor(readonly runs: Runs, readonly dirs: DataDirectories, readonly adapter: BackendAdapter, readonly probe = new ProjectProbe(), readonly skillSessions?: SkillSessions, options: { callbackTimeoutMs?: number; readAgentHistory?: ConstructorParameters<typeof RunContexts>[2] } = {}, readonly visualizePreviews?: VisualizePreviews) {
+    this.runContexts = new RunContexts(runs, dirs, options.readAgentHistory);
     this.callbackTimeoutMs = options.callbackTimeoutMs ?? 30000;
     if (!Number.isSafeInteger(this.callbackTimeoutMs) || this.callbackTimeoutMs < 1 || this.callbackTimeoutMs > 60000) throw new ServiceError('INVALID_REQUEST', 'Invalid host callback timeout');
   }
@@ -160,18 +161,27 @@ export class RuntimeBackend implements SchedulerBackend {
     const token = this.runs.runtime(runId);
     if (token.epoch !== context.epoch || token.details.cancelRequested === true || !['preparing', 'running', 'waiting_answer', 'waiting_approval'].includes(this.runs.get(runId).status)) throw new ServiceError('CONFLICT', 'Run is no longer available for host callbacks');
   }
+  private hostWorkFor(context: BackendContext) {
+    let state = this.hostWork.get(context);
+    if (!state) { state = { cancelled: false, pending: new Set<Promise<unknown>>() }; this.hostWork.set(context, state); }
+    return state;
+  }
   /** Timeouts reject visibly; late skill resolution cannot dispatch a command. */
   private async asyncCallback<T>(runId: string, context: BackendContext, name: string, work: (check: () => void) => Promise<T> | T): Promise<T> {
     let expired = false;
+    const state = this.hostWorkFor(context);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const check = () => {
-      if (expired) throw new ServiceError('CONFLICT', 'Host callback expired');
+      if (expired || state.cancelled) throw new ServiceError('CONFLICT', 'Host callback expired');
       this.active(runId, context);
     };
     try {
       check();
       const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { expired = true; reject(new ServiceError('CONFLICT', 'Host callback timed out')); }, this.callbackTimeoutMs); });
-      const result = await Promise.race([Promise.resolve().then(() => work(check)), timeout]);
+      const operation = Promise.resolve().then(() => { check(); return work(check); });
+      state.pending.add(operation);
+      void operation.then(() => state.pending.delete(operation), () => state.pending.delete(operation));
+      const result = await Promise.race([operation, timeout]);
       check();
       return result;
     } catch (error) {
@@ -205,6 +215,7 @@ export class RuntimeBackend implements SchedulerBackend {
     context.emit({ type: value.kind, id: hostId, payload });
   }
   async start(run: Run, snapshot: InputSnapshot, context: BackendContext): Promise<void> {
+    if (this.runs.runtime(run.id).details.kind === 'image_generation') throw new ServiceError('NOT_IMPLEMENTED', 'Dedicated image generation has been removed');
     if (this.runs.db.isTransaction) throw new ServiceError('CONFLICT', 'Backend preparation must run outside transactions');
     if (snapshot.imageRoute?.type === 'api' || !snapshot.model) throw new ServiceError('INVALID_REQUEST', 'Agent backend cannot execute an API image snapshot');
     this.contexts.set(run.id, context);
@@ -261,8 +272,12 @@ export class RuntimeBackend implements SchedulerBackend {
     const cliEnvironment:Record<string,string>=nativeSession?{OPENWORKGRAPH_RUN_CREDENTIAL:JSON.stringify({...nativeSession,endpoint:listener!.localEndpoint}),OPENWORKGRAPH_CLI_HOME:join(directories.output,'.workgraph-cli')}:{};
     const cliSecrets=nativeSession?{...cliEnvironment,OPENWORKGRAPH_RUN_TOKEN:nativeSession.token}:{};
     if (this.runs.get(run.id).status === 'cancelling') { context.emit({ type: 'stopped' }); return; }
-    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: authoringGuidance ? authoringGuidance + String.fromCharCode(10, 10) + snapshot.prompt : snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.agent?.model ?? snapshot.model, attemptId: context.epoch, ...(snapshot.agent ? { agent: structuredClone(snapshot.agent) } : {}), skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(snapshot.imageRoute?.type==='codex'&&snapshot.imageRoute.options?{imageOptions:snapshot.imageRoute.options}:{}), ...(!snapshot.agent || snapshot.agent.backendId === 'codex' ? { sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') } : {}) }, {
+    const result = await this.adapter.start({ runId: run.id, kind: runtime.details.kind as 'execution' | 'text_generation' | 'image_generation' | 'visualize_generation', projectPath: path, inputPath: directories.input, outputPath: directories.output, serviceRoot: this.dirs.root, prompt: authoringGuidance ? authoringGuidance + String.fromCharCode(10, 10) + snapshot.prompt : snapshot.prompt, resources: snapshot.resources, projectFiles: snapshot.projectFiles ?? [], files: inputFiles!, model: snapshot.agent?.model ?? snapshot.model, attemptId: context.epoch, ...(snapshot.agent ? { agent: structuredClone(snapshot.agent) } : {}), skills: snapshot.skills ?? [], features: snapshot.features ?? [], ...(snapshot.visualizeGeneration ? { visualizeGeneration: snapshot.visualizeGeneration } : {}), ...(upstreamContext ? {upstreamContext} : {}), ...(!snapshot.agent || snapshot.agent.backendId === 'codex' ? { sandboxMode: sandboxMode(runtime.details.sandboxMode ?? 'read-only') } : {}) }, {
       onSnapshot: value => this.callback(run.id, context, 'onSnapshot', () => this.snapshot(value, context, run.id)),
+      hostWork: {
+        cancel: () => { this.hostWorkFor(context).cancelled = true; },
+        drain: async () => { await Promise.allSettled([...this.hostWorkFor(context).pending]); },
+      },
       ...(this.runs.shouldGenerateNodeTitle(run.id) ? { setNodeTitle: (title: string) => {
         const token = this.runs.runtime(run.id);
         if (token.epoch !== context.epoch) return false;

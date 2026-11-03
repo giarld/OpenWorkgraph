@@ -83,11 +83,11 @@ function validateContract(input: unknown): PluginContract {
   validateSchema(c.contentSchema);
   if (!Array.isArray(c.resources) || c.resources.length > 32) invalid('Invalid resource mappings');
   for (const m of c.resources) {
-    if (!object(m) || !['text','image','document','video','file'].includes(m.kind)) invalid('Invalid resource kind');
+    if (!object(m) || !['text','image','document','video','audio','file'].includes(m.kind)) invalid('Invalid resource kind');
     if (Object.keys(m).some(k => !['kind','textField','resourceIdField','resourceVersionField'].includes(k))) invalid('Unsupported resource mapping');
     for (const field of [m.textField,m.resourceIdField,m.resourceVersionField]) if (field !== undefined) path(field);
     if (!!m.resourceIdField !== !!m.resourceVersionField || (!m.textField && !m.resourceIdField)) invalid('Incomplete resource mapping');
-    if (['image','video','file'].includes(m.kind) && !m.resourceIdField) invalid('Media requires resource identity');
+    if (['image','video','audio','file'].includes(m.kind) && !m.resourceIdField) invalid('Media requires resource identity');
   }
   if (c.migrations !== undefined) {
     if (!Array.isArray(c.migrations) || c.migrations.length > 16) invalid('Invalid migrations');

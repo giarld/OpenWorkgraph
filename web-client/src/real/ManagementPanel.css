@@ -112,15 +112,6 @@
 .management-form-heading { margin: 24px 0 12px; padding-top: 20px; border-top: 1px solid var(--stroke); font-size: 13px; }
 .management-danger-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px dashed var(--stroke); }
 .management-panel .management-danger-actions button { margin: 0; }
-.image-model-catalog { display: grid; gap: 6px; max-height: 320px; margin: 12px 0; padding: 8px 12px; overflow: auto; border: 1px solid var(--stroke); border-radius: 10px; background: var(--canvas); }
-.management-panel .image-model-catalog .management-checkbox { align-items: flex-start; min-height: 48px; padding: 6px 0; border-bottom: 1px solid var(--stroke); }
-.management-panel .image-model-catalog .management-checkbox:last-of-type { border-bottom: 0; }
-.image-model-catalog .management-checkbox span { display: grid; min-width: 0; gap: 2px; }
-.image-model-catalog code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.image-model-catalog > button { justify-self: end; }
-.image-model-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--stroke); }
-.image-model-row span { min-width: 0; overflow-wrap: anywhere; font-size: 12px; color: var(--muted); }
-.management-panel .image-model-row button { flex-shrink: 0; margin: 0; }
 .management-setting-body pre { max-width: 100%; padding: 12px; background: var(--canvas); border-radius: 8px; font-size: 12px; }
 .management-storage-total { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 16px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--canvas); }
 .management-storage-total strong { font-size: 20px; font-variant-numeric: tabular-nums; }

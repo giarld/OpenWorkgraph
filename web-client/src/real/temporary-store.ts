@@ -187,7 +187,7 @@ const portableMime = (bytes: Uint8Array, declared: string) => {
   const detected = sniffResourceMime(bytes);
   const mime = declared.toLowerCase();
   if (detected === 'text/plain' && preservedTextMimes.has(mime) ||
-      ['text/plain', 'application/octet-stream'].includes(detected) && isOpaqueResourceMime(mime)) return mime;
+      isOpaqueResourceMime(mime)) return mime;
   return detected;
 };
 const base64 = (bytes: Uint8Array) => {

@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { subscribeDatabaseChanges } from './persistence/changes.js';
 import type { DatabaseSync } from 'node:sqlite';
 import { mergeRunInput, parseNodeInputDrafts, type RunInput, type NodeInputDrafts, PROTOCOL_VERSION, SERVICE_VERSION, isTerminalRunStatus, VISUALIZE_DEFAULT_SIZE, VISUALIZE_GENERATION_MAX_SIZE, VISUALIZE_FEATURE_ID } from '@openworkgraph/protocol';
-import type { AgentPlatform, AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, FrozenApiImageRoute, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
+import type { AgentPlatform, AgentSelection, FrozenAgentSelection, Capability, CanvasResourceVersion, Json, Run, ServiceInfo, SubmitRun } from '@openworkgraph/protocol';
 import { BlobStore } from './blob-store.js';
 import { Graphs } from './graphs.js';
 import { prepareOutputHistory } from './execution-output-history.js';
@@ -31,10 +31,10 @@ import { atomic } from './persistence/database.js';
 import { canonicalJson } from './persistence/repositories.js';
 import { ServiceError } from './errors.js';
 import { ExecutionSettingsStore } from './execution-settings.js';
-import { ImageProviders } from './image-providers.js';
-import { ImageCredentials } from './image-credentials.js';
-import { ApiImageAgent, RoutedImageBackend } from './api-image-agent.js';
-import { planOpenAiImage, discoverOpenAiModels } from './openai-image-driver.js';
+import { BuiltinAgentConnections } from './agents/builtin/connections.js';
+import { BuiltinAgentCredentials } from './agents/builtin/credentials.js';
+import { BuiltinLocalSkills } from './agents/builtin/local-skills.js';
+import { createBuiltinAgentPlugin } from './agents/builtin.js';
 import { BuiltinSkills, type BuiltinSkillsOptions } from './builtin-skills.js';
 import { SkillConfigs } from './skill-configs.js';
 import { SkillSessions } from './skill-sessions.js';
@@ -64,7 +64,7 @@ import { AgentWorkspaceConfigurationStore } from './agents/workspace-configurati
 import { sameProjectPermissions } from './agents/workspace-configuration-validation.js';
 import { resolveProductionSelection } from './agents/production-selection.js';
 import type { AgentExecutionSelection } from './agents/contracts.js';
-interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; image?: boolean; availabilityRevision?: number; modelPolicy?: import('@openworkgraph/protocol').AgentModelOption }
+interface AgentPlan { frozen: AgentExecutionSelection; independent: boolean; implicit?: boolean; availabilityRevision?: number; modelPolicy?: import('@openworkgraph/protocol').AgentModelOption }
 
 export interface WorkflowRuntimeOptions {
   logger?: import('./logger.js').Logger;
@@ -92,8 +92,8 @@ export class WorkflowRuntime {
   readonly executionChains: ExecutionChains;
   readonly graphFiles:GraphFiles;
   readonly executionSettings: ExecutionSettingsStore;
-  readonly imageProviders: ImageProviders;
-  readonly imageCredentials: ImageCredentials;
+  readonly builtinAgentConnections: BuiltinAgentConnections;
+  readonly builtinLocalSkills: BuiltinLocalSkills;
   readonly remoteAssets: RemoteAssets;
   readonly skills: BuiltinSkills;
   readonly skillConfigs: SkillConfigs;
@@ -121,11 +121,14 @@ export class WorkflowRuntime {
   private recovering = false;
   private closed = false; private closing = false; private stopping = false;
   constructor(readonly db: DatabaseSync, readonly serviceId: string, readonly directories: DataDirectories, readonly options: WorkflowRuntimeOptions = {}) {
+    this.builtinAgentConnections = new BuiltinAgentConnections(db, new BuiltinAgentCredentials(directories, serviceId));
+    this.builtinLocalSkills = new BuiltinLocalSkills(directories);
     if (!options.agentRegistry && !options.backend && options.enableBackend !== false) {
       const registry = new AgentRegistry();
       registry.register(createCodexPlugin({ ...options.backendOptions, cwd: directories.root }));
       registry.register(createClaudePlugin(options.claudeOptions));
       registry.register(createOpenCodePlugin(options.opencodeOptions));
+      registry.register(createBuiltinAgentPlugin({ connections: this.builtinAgentConnections, localSkills: this.builtinLocalSkills }));
       this.options = options = { ...options, agentRegistry: registry };
     }
     // A custom static composition must not secretly recover an unregistered
@@ -158,8 +161,6 @@ export class WorkflowRuntime {
     this.graphs.history.backfillActiveGates();
     this.graphFiles = new GraphFiles(db,directories.runs);
     this.executionSettings = new ExecutionSettingsStore(db);
-    this.imageCredentials = new ImageCredentials(directories,serviceId);
-    this.imageProviders = new ImageProviders(db,this.imageCredentials);
     this.skills = new BuiltinSkills(directories, serviceId, options.skillsOptions);
     this.skillConfigs = new SkillConfigs(directories, serviceId);
     this.skillSessions = new SkillSessions(this.skills, this.skillConfigs, options.backendOptions);
@@ -169,16 +170,14 @@ export class WorkflowRuntime {
     // Native catalog cold starts have their own startup/request deadlines. Allow
     // the complete production query to finish instead of aborting at ten seconds.
     this.agentDiscovery = options.agentRegistry ? new AgentDiscovery(options.agentRegistry, this.productionAgents ? { ttlMs: 0, timeoutMs: 60_000 } : {}) : undefined;
-    this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend || options.agentRegistry ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => snapshot.imageRoute?.type === 'api'
-      ? this.imageProviders.credentialAvailable(snapshot.imageRoute.providerId,snapshot.imageRoute.credentialRevision)
-      : snapshot.agent || this.productionAgents ? this.agentEligible(_run.id, snapshot, String(this.runs.runtime(_run.id).details.kind)) : this.executionCapability.status === 'available');
+    this.runs = new RuntimeRuns(db, serviceId, { freeze: () => { throw new ServiceError('INPUT_BLOCKED', 'Use prepareSubmission outside the auth transaction'); }, ...(!options.backend || options.agentRegistry ? { validateReply: (interaction, answer) => { backendReply(interaction, answer); } } : {}) }, (_run,snapshot) => this.runs.runtime(_run.id).details.kind !== 'image_generation' && (snapshot.agent || this.productionAgents ? this.agentEligible(_run.id, snapshot, String(this.runs.runtime(_run.id).details.kind)) : this.executionCapability.status === 'available'));
     this.history = new History(db); this.publication = new Publication(db, directories, this.resources, this.graphs, this.runs);
     this.executionChains = new ExecutionChains(this.runs,this.graphs,this.resources);
     this.adapter = options.backend || this.productionAgents ? undefined : new CodexBackendAdapter(options.backendOptions);
     this.visualizePreviews = new VisualizePreviews(this.runs, directories, this.resources);
     const codexBackend = options.backend ?? (this.adapter ? new RuntimeBackend(this.runs, directories, this.adapter, this.probe, this.skillSessions, {}, this.visualizePreviews) : { start: async () => { throw new AgentError('runtime_unavailable'); }, cancel: async () => 'unknown' as const });
     this.agentRouter = options.agentRegistry ? new AgentRouter(this.runs, directories, id => options.agentRegistry!.get(id), (snapshot, kind) => assertFrozenAgent(options.agentRegistry!, snapshot, String(kind)), codexBackend, this.probe, this.skillSessions, {}, this.productionAgents ? (run, snapshot) => resolveProductionSelection(options.agentRegistry!, snapshot, this.runs.runtime(run.id).details) : undefined, this.visualizePreviews) : undefined;
-    const backend = new RoutedImageBackend(this.agentRouter ?? codexBackend,new ApiImageAgent(this.runs,this.resources,this.imageProviders,this.imageCredentials,directories),this.runs);
+    const backend = this.agentRouter ?? codexBackend;
     this.scheduler = new Scheduler(this.runs, backend, { projectLockRetryMs: 1000, publish: (run, token) => this.publication.publish(run, token), acquireProjectLock: (_run, path) => acquireProjectLock(path) });
   }
   get catalog(): BackendModel[] { return structuredClone(this.availableModels); }
@@ -252,7 +251,7 @@ export class WorkflowRuntime {
     if (!settings.enabled || this.agentConfiguration && !this.agentConfiguration.getBackend('codex').enabled) throw new AgentError('runtime_unavailable');
     this.requireAvailable(input);
     const plan = await this.prepareAgent({ backendId: 'codex', configRevision: settings.revision, schemaVersion: settings.schemaVersion, ...(input.modelOverride ? { model: input.modelOverride } : {}) }, input.projectId);
-    return { ...plan, implicit: true, image: input.kind === 'image_generation' };
+    return { ...plan, implicit: true };
   }
   /** Catalog reads require only the wire handshake, never login or execution self-checks. */
   async refreshModels(): Promise<void> {
@@ -293,55 +292,17 @@ export class WorkflowRuntime {
     if (this.productionAgents && !this.options.agentRegistry!.list().some(plugin => plugin.id === 'codex')) return capability('unavailable', 'Codex is not registered in this Workspace; saved tasks retain their identity');
     return capability('available', '执行由 Codex app-server 提供，沙盒权限使用工作空间设置；提交时检查模型，认证由 Codex 自身处理');
   }
-  get codexImageCapability(): Capability {
-    const execution = this.executionCapability;
-    if (execution.status !== 'available') return execution;
-    if (this.options.agentRegistry?.list().some(plugin => plugin.id === 'codex') && (this.agentConfiguration && !this.agentConfiguration.getBackend('codex').enabled || this.agentSettings && !this.agentSettings.get('codex').enabled)) return capability('unavailable', 'Codex 已停用，请在 Agent 设置中启用。');
-    return execution;
-  }
-  get imageGenerationCapability(): Capability {
-    const execution = this.codexImageCapability;
-    if (this.options.backend || execution.status !== 'available') return this.imageProviders.list().some(item=>item.enabled&&item.credentialConfigured&&item.models.length) ? capability('available','已配置的 API 生图服务商可执行，Codex 图片路径不可用。') : execution;
-    return capability('available', '图片生成由 Codex 内置 imagegen 执行；成功后校验实际图片文件并发布到工作图。');
-  }
   get capabilities(): ServiceInfo['capabilities'] {
     const local = capability('available', 'Durable local business implementation; authenticated HTTP integration required');
-    return { pairing: local, projects: local, graphs: local, assets: local, execution: this.executionCapability, imageGeneration: this.imageGenerationCapability, events: local, backups: capability('unknown', 'Backup availability is supplied by host operations integration'), projectFiles:local, projectFileReferences:local };
+    return { pairing: local, projects: local, graphs: local, assets: local, execution: this.executionCapability, imageGeneration: capability('unavailable', '专用生图已移除，请使用执行节点和生图技能。'), events: local, backups: capability('unknown', 'Backup availability is supplied by host operations integration'), projectFiles:local, projectFileReferences:local };
   }
   get serviceInfo(): ServiceInfo {
-    const modes=['text','image','text_image'] as const;
-    const codex=this.codexImageCapability;
-    const imageRoutes:NonNullable<ServiceInfo['imageRoutes']>=[{route:{type:'codex'},modes:{text:codex,image:codex,text_image:codex}}];
-    for(const provider of this.imageProviders.list())for(const model of provider.models){
-      const state=Object.fromEntries(modes.map(mode=>[mode,!provider.enabled?capability('unavailable','服务商已停用。')
-        : !provider.credentialConfigured?capability('unavailable','本机凭据未配置或已撤销。')
-        : !model.modes.includes(mode)?capability('unavailable','模型未声明支持 '+mode+' 输入。')
-        : capability('available','此模型已从服务商目录启用；实际生成结果由服务商响应确认。')])) as Record<(typeof modes)[number],Capability>;
-      imageRoutes.push({route:{type:'api',providerId:provider.id,modelId:model.id},modes:state});
-    }
-    return { serviceId:this.serviceId,version:SERVICE_VERSION,protocolVersion:PROTOCOL_VERSION,capabilities:this.capabilities,imageRoutes };
-  }
-  /** An explicitly initiated, potentially billable request. No catalog probe or fixture marks availability. */
-  async discoverImageModels(providerId:string,expectedRevision:number):Promise<{models:{id:string;name:string;selected:boolean}[];revision:number}> {
-    await this.imageProviders.refreshCredentials();
-    const provider=this.imageProviders.list().find(item=>item.id===providerId);
-    if(!provider||provider.revision!==expectedRevision)throw new ServiceError('REVISION_CONFLICT','服务商配置已变化，请刷新后重试。');
-    if(!provider.enabled)throw new ServiceError('MODEL_UNAVAILABLE','服务商已停用。');
-    if(!provider.credentialConfigured||!provider.credentialRevision)throw new ServiceError('MODEL_UNAVAILABLE','请先保存服务商 API Key。');
-    const credentialRevision=provider.credentialRevision;
-    const secret=await this.imageCredentials.read(provider.id,credentialRevision);
-    if(!secret)throw new ServiceError('MODEL_UNAVAILABLE','服务商 API Key 在本机不可用。');
-    const discovered=await discoverOpenAiModels(provider.endpoint,secret,AbortSignal.timeout(30000));
-    await this.imageProviders.refreshCredentials();
-    const current=this.imageProviders.list().find(item=>item.id===provider.id);
-    if(!current||current.revision!==expectedRevision||current.credentialRevision!==credentialRevision||!current.credentialConfigured)throw new ServiceError('REVISION_CONFLICT','服务商或 API Key 在拉取模型期间发生变化。');
-    const selected=new Set(current.models.map(item=>item.id));
-    return {models:discovered.map(item=>({...item,selected:selected.has(item.id)})),revision:current.revision};
+    return { serviceId:this.serviceId,version:SERVICE_VERSION,protocolVersion:PROTOCOL_VERSION,capabilities:this.capabilities,imageRoutes:[] };
   }
   private requireAvailable(request: SubmitRun): void {
     if (request.agent) { if (!this.options.agentRegistry) throw new AgentError('runtime_unavailable'); this.options.agentRegistry.get(request.agent.backendId); return; }
-    if (this.productionAgents && request.imageRoute?.type !== 'api') this.options.agentRegistry!.get('codex');
-    const state = request.kind === 'image_generation' && request.imageRoute?.type==='api' ? this.imageGenerationCapability : this.executionCapability;
+    if (this.productionAgents) this.options.agentRegistry!.get('codex');
+    const state = this.executionCapability;
     if (state.status !== 'available') throw new ServiceError('NOT_IMPLEMENTED', state.reason);
   }
   previewRunInput(graphId:string,nodeId:string,fields:RunInput,excludeFiles=false) {
@@ -360,8 +321,9 @@ export class WorkflowRuntime {
       };
     }
     if(input.nodeInputDrafts!==undefined){try{input.nodeInputDrafts=parseNodeInputDrafts(input.nodeInputDrafts);}catch{throw new ServiceError('INVALID_REQUEST','无效串联输入草稿。');}}
-    if (input.agent && (String(input.kind) === 'image_generation' || input.modelOverride)) throw new AgentError('invalid_configuration');
-    const agentPlan = input.agent ? await this.prepareAgent(input.agent, input.projectId) : this.productionAgents && input.imageRoute?.type !== 'api' ? await this.prepareImplicitCodex(input) : undefined;
+    if (input.kind === 'image_generation') throw new ServiceError('NOT_IMPLEMENTED', '专用生图已移除，请使用执行节点和生图技能。');
+    if (input.agent && input.modelOverride) throw new AgentError('invalid_configuration');
+    const agentPlan = input.agent ? await this.prepareAgent(input.agent, input.projectId) : this.productionAgents ? await this.prepareImplicitCodex(input) : undefined;
     if(input.nodeInputDrafts && input.kind!=='execution')throw new ServiceError('INVALID_REQUEST','Only execution tasks accept member inputs');
     if(input.kind!=='execution')return this.prepareSingleSubmission(input, true, cleanups, agentPlan);
     const graph=this.graphs.snapshot(input);
@@ -433,28 +395,13 @@ export class WorkflowRuntime {
     if(request.inputDraft)this.graphs.runInputContent(request,request.nodeId,request.inputDraft);
     const targetInput=request.inputDraft?{nodeId:request.nodeId,fields:request.inputDraft}:undefined;
     if (agentPlan) {
-      if (!agentPlan.implicit && (request.kind === 'image_generation' || request.modelOverride)) throw new AgentError('invalid_configuration');
+      if (!agentPlan.implicit && request.modelOverride) throw new AgentError('invalid_configuration');
       if (!agentPlan.implicit && !request.agent && !('legacy' in agentPlan.frozen)) request.agent = { backendId: agentPlan.frozen.backendId, configRevision: agentPlan.frozen.configRevision, schemaVersion: agentPlan.frozen.schemaVersion, options: { ...agentPlan.frozen.options }, model: { ...agentPlan.frozen.model } };
     }
     if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
-    if(request.imageRoute && request.kind!=='image_generation')throw new ServiceError('INVALID_REQUEST','Only image tasks can select an image route');
-    let apiRoute: FrozenApiImageRoute | undefined;
-    if(request.kind==='image_generation'){
-      if(request.imageRoute?.type==='api'){
-        if(request.modelOverride)throw new ServiceError('INVALID_REQUEST','API image route cannot use a Codex model');
-        const selected=request.imageRoute;
-        await this.imageProviders.refreshCredentials();
-        const provider=this.imageProviders.list().find(item=>item.id===selected.providerId);
-        if(!provider || !provider.enabled)throw new ServiceError('MODEL_UNAVAILABLE','所选生图服务商不存在或已停用。');
-        const model=provider.models.find(item=>item.id===selected.modelId);
-        if(!model)throw new ServiceError('MODEL_UNAVAILABLE','所选生图模型不存在。');
-        if(!provider.credentialConfigured || !provider.credentialRevision)throw new ServiceError('MODEL_UNAVAILABLE','服务商凭据未配置或本机不可用。');
-        apiRoute={...selected,configRevision:provider.revision,credentialRevision:provider.credentialRevision};
-      }
-      else { if(request.imageRoute && request.imageRoute.type!=='codex')throw new ServiceError('INVALID_REQUEST','Invalid image route');request.imageRoute={type:'codex',...(request.imageRoute?.options?{options:request.imageRoute.options}:{})}; }
-    }
-    if(!apiRoute && !agentPlan){this.requireAvailable(request);await this.refreshModels();}
-    const executionSettings = apiRoute || agentPlan ? null : this.executionSettings.get();
+    if(request.imageRoute)throw new ServiceError('INVALID_REQUEST','Dedicated image routes have been removed');
+    if(!agentPlan){this.requireAvailable(request);await this.refreshModels();}
+    const executionSettings = agentPlan ? null : this.executionSettings.get();
     if (request.serviceId !== this.serviceId) throw new ServiceError('SERVICE_MISMATCH', 'Wrong service');
     const project = this.db.prepare('SELECT canonical_path,state FROM projects WHERE id=?').get(request.projectId);
     if (!project) throw new ServiceError('NOT_FOUND', 'Project not found');
@@ -464,7 +411,7 @@ export class WorkflowRuntime {
     const versions = new Map<string, CanvasResourceVersion>();
     // Discover only direct input resources using the same declarative mappings.
     const discovery = new InputPreparation(this.db, { plugins: this.plugins, ...(targetInput?{targetInput}:{}), readRepresentation: resource => { versions.set(resourceKey(resource), resource); return { state: 'ready', resourceSha256: resource.sha256, representationVersion: resource.representationVersion, text: null, contentHash: null }; } });
-    const preview = discovery.inputPreview(request.graphId, request.nodeId, !!apiRoute);
+    const preview = discovery.inputPreview(request.graphId, request.nodeId);
     if (preview.executionRevision !== request.expectedExecutionRevision) throw new ServiceError('REVISION_CONFLICT', 'Graph changed before preflight');
     const unsupportedProjectFile = preview.issues.find(item => item.reason.startsWith('API 生图不能读取项目文件引用'));
     if (unsupportedProjectFile) throw new ServiceError(unsupportedProjectFile.code, unsupportedProjectFile.reason);
@@ -472,14 +419,6 @@ export class WorkflowRuntime {
       const states = await new ProjectFiles(this.db).statReferences(request.projectId, preview.projectFiles);
       const unavailable = states.find(item => item.state !== 'available');
       if (unavailable) throw new ServiceError(unavailable.state === 'missing' ? 'INPUT_BLOCKED' : 'PROJECT_UNAVAILABLE', '项目文件引用当前不可读：' + unavailable.path);
-    }
-    if(apiRoute){
-      const hasImage=preview.resources.some(item=>item.kind==='image' && item.resource);
-      const mode=hasImage?(preview.prompt.trim()?'text_image':'image'):'text';
-      const frozen=this.imageProviders.frozen(apiRoute.providerId,apiRoute.configRevision,apiRoute.modelId);
-      if(!frozen.model.modes.includes(mode))throw new ServiceError('INPUT_BLOCKED','所选模型不支持 '+mode+' 输入。');
-      const options=apiRoute.options;
-      if((options?.size && options.size!=='auto' && !frozen.model.sizes.includes(options.size) && !frozen.model.sizes.includes('auto')) || (options?.quality && options.quality!=='auto' && !frozen.model.qualities.includes(options.quality) && !frozen.model.qualities.includes('auto')) || (options?.outputFormat && !frozen.model.formats.includes(options.outputFormat)))throw new ServiceError('INPUT_BLOCKED','所选模型不支持图片参数。');
     }
     const prepared = new Map<string, PreparedRepresentation>();
     const fileIds = new Set(preview.resources.filter(item => item.kind === 'file').map(item => item.resource?.resourceId));
@@ -494,7 +433,7 @@ export class WorkflowRuntime {
       prepared.set(key, Object.freeze({ state: 'ready', resourceSha256: resource.sha256, representationVersion: resource.representationVersion, text, contentHash: text === null ? null : createHash('sha256').update(text).digest('hex') }));
     }
     const scopedInputs = new InputPreparation(this.db, { plugins: this.plugins, ...(targetInput?{targetInput}:{}), readRepresentation: resource => prepared.get(resourceKey(resource)) ?? null });
-    const scopedPreview = scopedInputs.inputPreview(request.graphId,request.nodeId,!!apiRoute);
+    const scopedPreview = scopedInputs.inputPreview(request.graphId,request.nodeId);
     const targetContent = this.db.prepare('SELECT v.content FROM nodes n JOIN node_versions v ON v.node_id=n.id AND v.version=n.current_version WHERE n.id=? AND n.graph_id=?').get(request.nodeId, request.graphId);
     const nodeContent = mergeRunInput(targetContent ? JSON.parse(String(targetContent.content)) as Json : {},request.inputDraft);
     const skillReferences = nodeContent.skillReferences;
@@ -508,11 +447,10 @@ export class WorkflowRuntime {
       const current = { width: node.width ?? VISUALIZE_DEFAULT_SIZE.width, height: node.height ?? VISUALIZE_DEFAULT_SIZE.height };
       visualizeGeneration = { version: 1, feature: { kind: 'builtin-feature', featureId: VISUALIZE_FEATURE_ID, version: 1 }, inputs, layout: { default: { ...VISUALIZE_DEFAULT_SIZE }, current, maximum: { ...VISUALIZE_GENERATION_MAX_SIZE }, contentViewport: { width: current.width, height: Math.max(1, current.height - 48) } }, replacementPolicy: 'new-initial-form', ...(stored.page && stored.content.form ? { previous: { page: stored.page, formFormatReference: stored.content.form } } : {}) };
     }
-    if (apiRoute && Array.isArray(skillReferences) && skillReferences.length) throw new ServiceError('INPUT_BLOCKED', '独立图片 API 不支持技能引用，请切换到 Codex 或移除技能引用。');
-    const nativeSkills = agentPlan ? scopedPreview.prompt.includes('$') || Array.isArray(skillReferences) && skillReferences.some(ref => typeof ref === 'object' && ref !== null && (ref as { source?: string }).source !== 'openworkgraph')
+    const nativeSkills = agentPlan ? this.options.agentRegistry!.get(agentPlan.frozen.backendId).extensions?.nativeSkills?.automatic === true || scopedPreview.prompt.includes('$') || Array.isArray(skillReferences) && skillReferences.some(ref => typeof ref === 'object' && ref !== null && (ref as { source?: string }).source !== 'openworkgraph')
       ? await this.nativeSkillCatalog(agentPlan.frozen, path)
       : { backendId: agentPlan.frozen.backendId, configuredSkills: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.configuredSkills, dynamicSkillCommands: this.options.agentRegistry!.get(agentPlan.frozen.backendId).descriptor.capabilities.dynamicSkillCommands, skills: [] } : undefined;
-    const frozenSkills = apiRoute ? [] : await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path, nativeSkills);
+    const frozenSkills = await this.skillSessions.freeze(scopedPreview.prompt, skillReferences, path, nativeSkills);
     if (agentPlan?.modelPolicy) {
       const availability = this.options.agentRegistry!.evaluate(agentPlan.frozen.backendId, {
         kind: request.kind, platform: process.platform as AgentPlatform, options: agentPlan.frozen.options, model: agentPlan.frozen.model,
@@ -522,25 +460,11 @@ export class WorkflowRuntime {
       });
       if (availability.status !== 'available') throw new AgentError(availability.reason ?? 'capability_unsupported');
     }
-    if(apiRoute){
-      const references: {bytes:Buffer;mime:'image/png'|'image/jpeg'|'image/webp'}[]=[];
-      for(const envelope of scopedPreview.resources){
-        if(envelope.kind!=='image'||!envelope.resource)continue;
-        const content=await this.resources.readContent(request,'canvas',envelope.resource.resourceId,envelope.resource.version);
-        if(!['image/png','image/jpeg','image/webp'].includes(content.mime))throw new ServiceError('INPUT_BLOCKED','参考图格式不支持。');
-        references.push({bytes:content.bytes,mime:content.mime as 'image/png'|'image/jpeg'|'image/webp'});
-      }
-      const frozen=this.imageProviders.frozen(apiRoute.providerId,apiRoute.configRevision,apiRoute.modelId);
-      planOpenAiImage({route:apiRoute,model:frozen.model,prompt:scopedPreview.prompt,references:scopedPreview.resources,images:references});
-    }
     const preserveOutputs = request.preserveHistoricalOutputs && !holdExecution ? await prepareOutputHistory(this.graphs, this.resources, request, cleanups) : undefined;
     const scoped = new Runs(this.db, this.serviceId, {
       ...(preserveOutputs ? { preserveOutputs } : {}),
       validate: (_request, context) => {
-        if(apiRoute){
-          const current=this.imageProviders.list().find(item=>item.id===apiRoute.providerId);
-          if(!current?.enabled || current.revision!==apiRoute.configRevision || current.credentialRevision!==apiRoute.credentialRevision || !this.imageProviders.credentialAvailable(apiRoute.providerId,apiRoute.credentialRevision))throw new ServiceError('REVISION_CONFLICT','生图服务商或凭据配置已变化，请重新提交。');
-        } else if (agentPlan) {
+        if (agentPlan) {
           if (agentPlan.independent && !('legacy' in agentPlan.frozen)) {
             if (agentPlan.frozen.settingsGeneration) this.agentConfiguration!.assertCurrent(agentPlan.frozen);
             else this.agentSettings!.assertCurrent(agentPlan.frozen);
@@ -554,9 +478,7 @@ export class WorkflowRuntime {
         }
         if (context.canonicalPath !== path) throw new ServiceError('REVISION_CONFLICT', 'Project path changed while preparing inputs');
       },
-      freeze: () => { const snapshot = scopedInputs.build(request.graphId, request.nodeId, apiRoute
-        ? {expectedExecutionRevision:request.expectedExecutionRevision,imageRoute:apiRoute}
-        : {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !agentPlan.image && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(request.kind === 'execution' && ['create','convert'].includes(String(nodeContent.skillAuthoring)) ? {skillAuthoring:nodeContent.skillAuthoring as 'create' | 'convert'} : {}),...(visualizeGeneration ? { visualizeGeneration } : {}),...(request.kind==='image_generation'?{imageRoute:request.imageRoute?.type==='codex'?request.imageRoute:{type:'codex' as const}}:{})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
+      freeze: () => { const snapshot = scopedInputs.build(request.graphId, request.nodeId, {expectedExecutionRevision:request.expectedExecutionRevision,model:agentPlan?.frozen.model ?? this.models.freeze(request.modelOverride,this.availableModels),...(agentPlan && !('legacy' in agentPlan.frozen) ? {agent:agentPlan.frozen} : {}),skills:frozenSkills,features,...(request.kind === 'execution' && ['create','convert'].includes(String(nodeContent.skillAuthoring)) ? {skillAuthoring:nodeContent.skillAuthoring as 'create' | 'convert'} : {}),...(visualizeGeneration ? { visualizeGeneration } : {})}); if (snapshot.agent) assertFrozenAgent(this.options.agentRegistry!, snapshot, request.kind); return snapshot; },
     });
     return principal => { request.expectedExecutionRevision=input.expectedExecutionRevision+commitRevisionOffset; return agentPlan?.independent && !('legacy' in agentPlan.frozen) && agentPlan.frozen.settingsGeneration
       ? this.agentConfiguration!.withCurrent(agentPlan.frozen, () => scoped.submit(request, principal, request.kind==='execution' && holdExecution))
@@ -570,15 +492,20 @@ export class WorkflowRuntime {
     const replay = (work: () => Run) => (principal: string, key: string): Run => this.runs.repo.idempotent(principal + ':run.continue:' + id, key, { id }, () => work() as unknown as Json) as unknown as Run;
     if (run.status !== 'paused_restore') return replay(() => { throw new ServiceError('CONFLICT', 'Only explicitly paused restored Runs can continue'); });
     const snapshot = this.runs.snapshot(id); const snapshotJson = canonicalJson(snapshot as unknown as Json);
-    const api=snapshot.imageRoute?.type==='api'?snapshot.imageRoute:null;
-    if(api){await this.imageProviders.refreshCredentials();if(!this.imageProviders.credentialAvailable(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销或本机不可用。');}
-    else if (snapshot.agent) {
+    if (token.details.kind === 'image_generation' || snapshot.imageRoute?.type === 'api') throw new ServiceError('NOT_IMPLEMENTED', '专用生图已移除，历史任务不能重新执行。');
+    if (snapshot.agent) {
       if (!this.options.agentRegistry) throw new AgentError('runtime_unavailable');
       assertFrozenAgent(this.options.agentRegistry, snapshot, String(token.details.kind), true);
       await this.skillSessions.environment(snapshot.skills ?? [], true);
       const projectPath = this.db.prepare('SELECT canonical_path FROM projects WHERE id=?').get(run.projectId)?.canonical_path;
-      const catalog = await this.nativeSkillCatalog(snapshot.agent, typeof projectPath === 'string' ? projectPath : undefined);
-      if (snapshot.skills?.some(skill => skill.source === 'agent' && (skill.backendId !== snapshot.agent!.backendId || !catalog.skills.some(item => item.skillId === skill.skillId && item.name === skill.name)))) throw new AgentError('capability_unsupported');
+      const native = (snapshot.skills ?? []).filter(skill => skill.source === 'agent');
+      if (native.some(skill => skill.backendId !== snapshot.agent!.backendId)) throw new AgentError('capability_unsupported');
+      const extension = this.options.agentRegistry.get(snapshot.agent.backendId).extensions?.nativeSkills;
+      if (native.length && extension?.validateFrozen && typeof projectPath === 'string') await extension.validateFrozen(projectPath, native);
+      else if (native.length) {
+        const catalog = await this.nativeSkillCatalog(snapshot.agent, typeof projectPath === 'string' ? projectPath : undefined);
+        if (native.some(skill => !catalog.skills.some(item => item.skillId === skill.skillId && item.name === skill.name))) throw new AgentError('capability_unsupported');
+      }
     } else if (this.productionAgents) {
       const legacy = resolveProductionSelection(this.options.agentRegistry!, snapshot, token.details, true);
       const models = await this.agentDiscovery!.listModels(legacy.backendId, { options: { ...legacy.options }, schemaVersion: legacy.schemaVersion });
@@ -598,14 +525,7 @@ export class WorkflowRuntime {
       if (unavailable) throw new ServiceError(unavailable.state === 'missing' ? 'INPUT_BLOCKED' : 'PROJECT_UNAVAILABLE', '项目文件引用当前不可读：' + unavailable.path);
     }
     const validateFrozen = () => {
-      const hasImage = snapshot.resources.some(item=>item.kind==='image' && item.resource) || (snapshot.projectFiles ?? []).some(item=>item.kind==='image');
-      if (snapshot.inputDigest !== run.inputDigest || (!snapshot.prompt.trim() && !(token.details.kind==='image_generation' && hasImage))) throw new ServiceError('INPUT_BLOCKED', 'Invalid restored input snapshot');
-      if(api){
-        if(snapshot.model || snapshot.inputMode!==(snapshot.resources.some(item=>item.kind==='image'&&item.resource)?(snapshot.prompt.trim()?'text_image':'image'):'text'))throw new ServiceError('INPUT_BLOCKED','冻结 API 输入模式无效。');
-        this.imageProviders.frozen(api.providerId,api.configRevision,api.modelId);
-        if(this.db.prepare('SELECT 1 FROM image_provider_revoked_credentials WHERE provider_id=? AND revision=?').get(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据已撤销。');
-        return;
-      }
+      if (snapshot.inputDigest !== run.inputDigest || !snapshot.prompt.trim()) throw new ServiceError('INPUT_BLOCKED', 'Invalid restored input snapshot');
       if (snapshot.agent) { assertFrozenAgent(this.options.agentRegistry!, snapshot, String(token.details.kind), true); return; }
       if (this.productionAgents) { resolveProductionSelection(this.options.agentRegistry!, snapshot, token.details, true); return; }
       if (!snapshot.model) throw new ServiceError('INPUT_BLOCKED','Codex model is missing from restored snapshot');
@@ -623,8 +543,7 @@ export class WorkflowRuntime {
     }
     return replay(() => {
       if (this.runs.repo.setting('acceptingRuns') !== true) throw new ServiceError('MAINTENANCE', 'Service is not accepting continuations');
-      if(api){if(!this.imageProviders.credentialAvailable(api.providerId,api.credentialRevision))throw new ServiceError('MODEL_UNAVAILABLE','冻结凭据不可用。');}
-      else if (!snapshot.agent && !this.productionAgents) this.requireAvailable({ kind: token.details.kind } as SubmitRun); validateFrozen();
+      if (!snapshot.agent && !this.productionAgents) this.requireAvailable({ kind: token.details.kind } as SubmitRun); validateFrozen();
       const current = this.runs.runtime(id);
       const target = this.db.prepare('SELECT p.state,p.canonical_path,g.archived,g.trashed,n.deleted,n.read_only FROM projects p JOIN graphs g ON g.project_id=p.id JOIN nodes n ON n.graph_id=g.id WHERE p.id=? AND g.id=? AND n.id=?').get(run.projectId, run.graphId, run.nodeId);
       if (!target || target.state !== 'active' || target.canonical_path !== path || target.archived || target.trashed || target.deleted || target.read_only) throw new ServiceError('PROJECT_UNAVAILABLE', 'Restored target changed or is read-only');
@@ -673,8 +592,8 @@ export class WorkflowRuntime {
       if (this.options.enableBackend && !this.options.backend) {
         await this.refreshModels().catch(() => { /* Catalog reads expose retryable errors. */ });
       }
-      await this.imageProviders.refreshCredentials();
       if (this.closed || this.closing) return;
+      this.runs.retireImageRuns();
       await this.graphFiles.drain();
       if (!this.stopping) atomic(this.db, () => this.db.prepare("UPDATE settings SET value='true' WHERE key='acceptingRuns'").run());
       this.stopPumpSubscription = subscribeDatabaseChanges(this.db, () => this.wakePump());
@@ -691,6 +610,7 @@ export class WorkflowRuntime {
     this.remoteAssets.recover();
     await this.remoteAssets.cleanStartupCaches();
     atomic(this.db, () => {
+      this.runs.retireImageRuns();
       if (this.runs.repo.setting('backupRestorePending') === true) {
         this.db.prepare("DELETE FROM settings WHERE key='backupRestorePending'").run();
         this.runs.recover(this.scheduler.epoch);

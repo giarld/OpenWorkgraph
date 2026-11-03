@@ -157,7 +157,7 @@ export class Runs {
   }
   submit(request: SubmitRun, principal = 'local', holdExecution = false): Run {
     if (request.preserveHistoricalOutputs !== undefined && (typeof request.preserveHistoricalOutputs !== 'boolean' || request.kind !== 'execution')) throw new ServiceError('INVALID_REQUEST', 'Only execution tasks can preserve historical outputs');
-    if (request.agent && ['image_generation'].includes(request.kind)) throw new ServiceError('INVALID_REQUEST', 'Image routes cannot select a generic AgentPlugin');
+    if (request.kind === 'image_generation') throw new ServiceError('NOT_IMPLEMENTED', '专用生图已移除，请使用执行节点和生图技能。');
     return this.repo.idempotent(principal + ':run.submit', request.idempotencyKey, json(request), () => {
       if (request.serviceId !== this.serviceId) throw new ServiceError('SERVICE_MISMATCH', 'Wrong service');
       if (this.repo.setting('acceptingRuns') !== true) throw new ServiceError('MAINTENANCE', 'Service is not accepting runs');
@@ -165,7 +165,7 @@ export class Runs {
       if (!row) throw new ServiceError('NOT_FOUND', 'Run target not found');
       if (row.state !== 'active') throw new ServiceError('PROJECT_INACTIVE', 'Project is inactive');
       if (row.archived || row.trashed || row.deleted || row.read_only) throw new ServiceError('NODE_LOCKED', 'Run target is archived, deleted or read-only');
-      const expectedType = { execution: 'execution', text_generation: 'text', image_generation: 'image', visualize_generation: 'visualize' }[request.kind];
+      const expectedType = { execution: 'execution', text_generation: 'text', visualize_generation: 'visualize' }[request.kind];
       if (!expectedType || row.type !== expectedType) throw new ServiceError('INVALID_REQUEST', 'Run kind does not match node type');
       if (!Number.isSafeInteger(request.expectedExecutionRevision) || row.execution_revision !== request.expectedExecutionRevision) throw new ServiceError('REVISION_CONFLICT', 'Graph execution revision changed');
       if (this.db.prepare(`SELECT 1 FROM runs WHERE node_id=? AND status NOT IN (${terminalSql})`).get(request.nodeId)) throw new ServiceError('ACTIVE_RUN', 'Node already has an unfinished run');
@@ -173,15 +173,8 @@ export class Runs {
       if (this.dependencies.validate) sync(this.dependencies.validate(request, context));
       const snapshot = sync(this.dependencies.freeze(request, context));
       if (request.agent && (!snapshot.agent || snapshot.agent.backendId !== request.agent.backendId || snapshot.agent.configRevision !== request.agent.configRevision || snapshot.agent.schemaVersion !== request.agent.schemaVersion)) throw new ServiceError('INPUT_BLOCKED', 'Frozen AgentPlugin identity does not match submission');
-      const hasImage = Array.isArray(snapshot?.resources) && snapshot.resources.some(item=>item.kind==='image' && item.resource) || Array.isArray(snapshot?.projectFiles) && snapshot.projectFiles.some(item=>item.kind==='image');
-      if (!snapshot || (!snapshot.prompt?.trim() && !(request.kind==='image_generation' && hasImage)) || !snapshot.inputDigest || snapshot.executionRevision !== request.expectedExecutionRevision || !Array.isArray(snapshot.resources) || snapshot.projectFiles !== undefined && !Array.isArray(snapshot.projectFiles)) throw new ServiceError('INPUT_BLOCKED', 'Invalid frozen input snapshot');
-      const route = request.kind==='image_generation' ? request.imageRoute ?? {type:'codex' as const} : undefined;
-      if (route?.type==='api') {
-        if (request.modelOverride) throw new ServiceError('INVALID_REQUEST','API image runs cannot select a Codex model');
-        const frozen=snapshot.imageRoute;
-        const mode=hasImage ? (snapshot.prompt.trim()?'text_image':'image') : 'text';
-        if (!frozen || frozen.type!=='api' || snapshot.model !== undefined || snapshot.inputMode!==mode || frozen.providerId!==route.providerId || frozen.modelId!==route.modelId || canonicalJson((frozen.options??null) as Json)!==canonicalJson((route.options??null) as Json) || !Number.isSafeInteger(frozen.configRevision) || frozen.configRevision<1 || !Number.isSafeInteger(frozen.credentialRevision) || frozen.credentialRevision<1 || Object.keys(frozen).some(key=>!['type','providerId','modelId','options','configRevision','credentialRevision'].includes(key))) throw new ServiceError('INPUT_BLOCKED','Invalid frozen API image route');
-      } else if (!snapshot.model?.model || (request.kind==='image_generation' && canonicalJson(((snapshot.imageRoute?.type==='codex'?snapshot.imageRoute.options:undefined)??null) as Json)!==canonicalJson(((route?.type==='codex'?route.options:undefined)??null) as Json))) throw new ServiceError('INPUT_BLOCKED','Invalid frozen Codex model/route');
+      if (!snapshot || !snapshot.prompt?.trim() || !snapshot.inputDigest || snapshot.executionRevision !== request.expectedExecutionRevision || !Array.isArray(snapshot.resources) || snapshot.projectFiles !== undefined && !Array.isArray(snapshot.projectFiles)) throw new ServiceError('INPUT_BLOCKED', 'Invalid frozen input snapshot');
+      if (!snapshot.model?.model) throw new ServiceError('INPUT_BLOCKED', 'Invalid frozen Agent model');
       const graphHistory=new Graphs(this.db,this.serviceId);
       const historyBefore=graphHistory.history.capture(request);
       if (request.inputDraft) context.baseVersion=graphHistory.persistRunInput(request,request.nodeId,request.inputDraft);
@@ -473,6 +466,23 @@ export class Runs {
     });
   }
   /** Caller must first establish previous service ownership is stale (not just a PID check). */
+  /** Retain legacy snapshots and resources while releasing retired generator work. */
+  retireImageRuns(): void {
+    atomic(this.db, () => {
+      for (const run of this.unfinished()) {
+        const runtime = this.runtime(run.id);
+        if (runtime.details.kind !== 'image_generation') continue;
+        const status = ['accepted', 'queued', 'paused_restore'].includes(run.status) ? 'cancelled' : 'interrupted';
+        const details = { ...runtime.details, interruptionReason: 'Dedicated image generation has been removed', completedAt: new Date(this.now()).toISOString() };
+        this.db.prepare('UPDATE run_runtime SET revision=revision+1,details=? WHERE run_id=?').run(canonicalJson(details), run.id);
+        this.db.prepare('UPDATE runs SET status=? WHERE id=?').run(status, run.id);
+        this.db.prepare('DELETE FROM occupancy WHERE run_id=?').run(run.id);
+        this.expireInteractions(run.id);
+        this.event(this.get(run.id), runtime.revision + 1);
+        this.refreshNotification(this.get(run.id));
+      }
+    });
+  }
   recover(epoch: string): Run[] {
     if (!epoch) throw new ServiceError('INVALID_REQUEST', 'Recovery epoch required');
     return atomic(this.db, () => {

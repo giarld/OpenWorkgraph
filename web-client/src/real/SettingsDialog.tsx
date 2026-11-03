@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, ArrowLeft, ArrowLeftRight, Bot, Download, Folder, HardDrive, Image, Link, Palette, Pencil, Plus, RotateCcw, Unplug, X } from 'lucide-react';
+import { Archive, ArrowLeft, ArrowLeftRight, Bot, Download, Folder, HardDrive, Link, Palette, Pencil, Plus, RotateCcw, Unplug, X } from 'lucide-react';
 import { ConnectionRegistry, RUNTIME_NAME_MAX_LENGTH, type Connection } from '../adapter/connections';
 import { LifecycleCancelledError, Transport } from '../adapter/transport';
 import { useI18n } from '../i18n/I18nProvider';
@@ -32,7 +32,6 @@ interface SettingsDialogProps {
 const pages = [
   { id: 'projects', title: 'Projects', icon: Folder },
   { id: 'agents', title: 'Agent', icon: Bot },
-  { id: 'images', title: 'Image generation', icon: Image },
   { id: 'data-sources', title: 'Data sources', icon: Folder },
   { id: 'transfer', title: 'Import and export', icon: ArrowLeftRight },
   { id: 'storage', title: 'Storage', icon: HardDrive },

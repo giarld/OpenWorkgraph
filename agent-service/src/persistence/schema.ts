@@ -3,6 +3,7 @@ import { RESOURCE_SCHEMA, ASSET_PRESENTATION_SCHEMA } from './resource-schema.js
 import { WORKFLOW_SCHEMA } from './workflow-schema.js';
 import { ASSET_BUSINESS_SCHEMA } from './asset-business-schema.js';
 import { PLUGIN_SCHEMA } from './plugin-schema.js';
+import { BUILTIN_AGENT_SCHEMA } from '../agents/builtin/schema.js';
 export interface Migration { version: number; sql: string }
 export const MIGRATIONS: readonly Migration[] = [{ version: 1, sql: `
 CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), service_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL) STRICT;
@@ -262,5 +263,5 @@ CREATE TABLE cli_authorizations(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REF
 CREATE TABLE cli_auto_grants(run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,decided_by TEXT NOT NULL REFERENCES sessions(id),created_at INTEGER NOT NULL) STRICT;
 CREATE TABLE resource_upload_ids(id TEXT PRIMARY KEY) STRICT;
 INSERT INTO resource_upload_ids(id) SELECT id FROM resource_uploads;
-` }, { version: 31, sql: REMOTE_ASSETS_SCHEMA }];
-export const SCHEMA_VERSION = 31;
+` }, { version: 31, sql: REMOTE_ASSETS_SCHEMA }, { version: 32, sql: BUILTIN_AGENT_SCHEMA }];
+export const SCHEMA_VERSION = 32;

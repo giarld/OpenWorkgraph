@@ -1237,9 +1237,9 @@ export const Canvas = forwardRef<CanvasHandle, CanvasProps>(
           const nodeId = element(e.target)?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
           const node = props.graph.nodes.find(node => node.id === nodeId);
           // An unselected node always opens its menu, even over a preview or
-          // editor. Execution nodes always use the node menu; other selected
+          // editor. Execution and file nodes always use the node menu; other selected
           // content gets its own context-menu handler first.
-          if (!node || (node.type !== 'execution' && props.selectedIds.includes(node.id)) || !props.onNodeContextMenu) return;
+          if (!node || (!['execution', 'file'].includes(node.type) && props.selectedIds.includes(node.id)) || !props.onNodeContextMenu) return;
           e.preventDefault();
           e.stopPropagation();
           if (suppressContext.current) { suppressContext.current = false; return; }

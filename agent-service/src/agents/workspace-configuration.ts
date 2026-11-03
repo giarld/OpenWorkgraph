@@ -7,7 +7,7 @@ import { AgentError } from './errors.js';
 import { AgentRegistry } from './registry.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText } from './configuration.js';
 import { validateAgentModels, assertModelVariant } from './discovery.js';
-import { modelGroupMetadata } from './model-groups.js';
+import { modelDisplayMetadata } from './model-groups.js';
 import { SETTINGS_GENERATION, configurationRevision, validateProjectPermissions, sameProjectPermissions, validateSelectionGeneration, workspaceConfigurationSchema, isPermissionOption, validateConfigurationUpdate } from './workspace-configuration-validation.js';
 
 export interface WorkspaceFreezeContext {
@@ -31,6 +31,7 @@ function immutable<T>(value: T): T {
 /** Separate file, no legacy database/settings input. SQLite serializes writers across
  * processes. withCurrent holds this lock through the synchronous host acceptance. */
 export class AgentWorkspaceConfigurationStore {
+  connectionSettings(backendId: string) { return this.registry.get(backendId).extensions?.connectionSettings; }
   readonly path: string;
   private readonly db: DatabaseSync;
   constructor(directory: string, readonly workspaceId: string, private readonly registry: AgentRegistry) {
@@ -74,13 +75,16 @@ export class AgentWorkspaceConfigurationStore {
   }
   private emptyBackend(backendId: string, platform: AgentPlatform): AgentBackendConfiguration {
     const schema = workspaceConfigurationSchema(this.registry.get(backendId).descriptor.configuration);
-    return { backendId, revision: 0, enabled: true, schemaVersion: schema.version, models: [], options: normalizeConfiguration({ ...schema, fields: schema.fields.map(f => ({ ...f, required: false })) }, {}, schema.version, platform) };
+    return { backendId, revision: 0, enabled: this.registry.get(backendId).descriptor.initiallyEnabled ?? true, schemaVersion: schema.version, models: [], options: normalizeConfiguration({ ...schema, fields: schema.fields.map(f => ({ ...f, required: false })) }, {}, schema.version, platform) };
   }
   get(platform: AgentPlatform = process.platform as AgentPlatform): AgentWorkspaceConfiguration {
     const value = this.read();
     value.platform = platform;
     for (const descriptor of this.registry.list()) if (!value.backends.some(b => b.backendId === descriptor.id)) value.backends.push(this.emptyBackend(descriptor.id, platform));
-    const registered = this.registry.list().map(d => d.id);
+    // Plugin priority only supplies the initial order and newly discovered entries.
+    // A user-saved order always wins; priority never enables a plugin or selects a model.
+    const registered = this.registry.list().sort((a, b) => (b.defaultPriority ?? 0) - (a.defaultPriority ?? 0)
+      || Number(a.initiallyEnabled === false) - Number(b.initiallyEnabled === false)).map(d => d.id);
     value.order.backendIds = [...value.order.backendIds, ...registered.filter(id => !value.order.backendIds.includes(id))];
     return value;
   }
@@ -166,12 +170,13 @@ export class AgentWorkspaceConfigurationStore {
     const options = this.normalizeOptions(backendId, overrides ?? backend.options, backend.schemaVersion, platform, source);
     return { options: normalizeConfiguration(plugin.descriptor.configuration, options, backend.schemaVersion, platform), schemaVersion: backend.schemaVersion, configRevision: backend.revision, permissionsRevision: value.permissions.revision, permissions: structuredClone(value.permissions) };
   }
-  /** Refresh is a draft: new catalog entries start hidden; saved flags survive. */
+  /** Manual visibility preserves saved flags; automatic visibility follows the live catalog. */
   modelDraft(backendId: string, catalog: readonly AgentModelOption[]): AgentBackendConfiguration['models'] {
     const saved = this.getBackend(backendId).models;
     const policy = this.registry.get(backendId).descriptor.models;
     validateAgentModels(catalog, policy.effort, !!policy.variantOption);
-    return [...structuredClone(saved), ...catalog.filter(m => !saved.some(s => s.id === m.id)).map(m => ({ id: m.id, visible: false }))].map(model => ({ ...model, ...modelGroupMetadata(this.registry.get(backendId), model.id) }));
+    if (policy.automaticVisibility) return catalog.map(model => ({ id: model.id, visible: true, ...modelDisplayMetadata(this.registry.get(backendId), model.id, model) }));
+    return [...structuredClone(saved), ...catalog.filter(m => !saved.some(s => s.id === m.id)).map(m => ({ id: m.id, visible: false }))].map(model => ({ ...model, ...modelDisplayMetadata(this.registry.get(backendId), model.id, catalog.find(item => item.id === model.id)) }));
   }
   /** Select first backend even if unavailable; callers must not fall back. */
   defaultBackendId(): string {
@@ -197,8 +202,7 @@ export class AgentWorkspaceConfigurationStore {
     if (!selected) throw new AgentError('model_unavailable');
     if (!selection.model && !saved && this.defaultBackendId() !== selection.backendId) invalid();
     const frozen: FrozenAgentSelection = { settingsGeneration: SETTINGS_GENERATION, permissions: structuredClone(value.permissions), backendId: selection.backendId, configRevision: current.revision, schemaVersion: schema.version, apiVersion: plugin.descriptor.apiVersion, implementationVersion: plugin.descriptor.implementationVersion, runtimeVersion: context.runtimeVersion ?? null, options, model: this.selectedModel(selection.backendId, { model: selected.model, reasoningEffort: selected.reasoningEffort }, context.availableModels, !selection.model && !saved, options) };
-    this.registry.validateFrozen(frozen, platform);
-    return immutable(frozen);
+    return immutable(this.registry.freezeSelection(frozen, platform));
   }
   assertCurrent(frozen: FrozenAgentSelection, platform: AgentPlatform = process.platform as AgentPlatform): void {
     this.registry.validateFrozen(frozen, platform);
@@ -206,9 +210,10 @@ export class AgentWorkspaceConfigurationStore {
     const value = this.get(platform); const backend = this.getBackend(frozen.backendId, platform);
     if (!backend.enabled) throw new AgentError('runtime_unavailable');
     if (backend.revision !== frozen.configRevision || backend.schemaVersion !== frozen.schemaVersion || !sameProjectPermissions(frozen.permissions, value.permissions)) conflict();
+    this.registry.assertCurrentSelection(frozen);
   }
   withCurrent<T>(frozen: FrozenAgentSelection, accept: () => T, platform?: AgentPlatform): T {
-    return this.atomic(() => { this.assertCurrent(frozen, platform); const result = accept(); if (result && typeof (result as { then?: unknown }).then === 'function') invalid(); return result; });
+    return this.atomic(() => { this.assertCurrent(frozen, platform); const result = this.registry.withCurrentSelection(frozen, accept); if (result && typeof (result as { then?: unknown }).then === 'function') invalid(); return result; });
   }
   /** Legacy/image submissions retain their old frozen options, but enabling a
    * backend is shared with the new configuration and checked under its lock. */

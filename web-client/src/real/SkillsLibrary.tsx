@@ -203,7 +203,7 @@ export function SkillsLibrary({ transport, ready, workspaceName, visible = true,
         <div className="ow-skills-badges">
           <span key={item.installed ? 'installed' : 'not-installed'} className={item.installed ? 'ow-skills-status is-success' : 'ow-skills-status'}>{item.installed ? <CheckCircle2 size={13} aria-hidden="true"/> : <Circle size={13} aria-hidden="true"/>}<span>{item.installed ? copy('Installed', '已安装') : copy('Not installed', '未安装')}</span></span>
           {item.updateAvailable && <span key="update" className="ow-skills-status is-update"><ArrowUpCircle size={13} aria-hidden="true"/>{copy('Update available', '可更新')}</span>}
-          <span key="configuration" className={item.configuration === 'required' ? 'ow-skills-status is-warning' : 'ow-skills-status'}>{item.configuration === 'required' ? <TriangleAlert size={13} aria-hidden="true"/> : item.configuration === 'ready' ? <CheckCircle2 size={13} aria-hidden="true"/> : null}{item.configuration === 'required' ? copy('Configuration required', '待配置') : item.configuration === 'ready' ? copy('Configured', '已配置') : copy('No configuration', '无需配置')}</span>
+          <span key="configuration" className={item.configuration === 'required' ? 'ow-skills-status is-warning' : 'ow-skills-status'}>{item.configuration === 'required' ? <TriangleAlert size={13} aria-hidden="true"/> : item.configuration === 'ready' ? <CheckCircle2 size={13} aria-hidden="true"/> : null}{item.configuration === 'required' ? copy('Configuration required', '待配置') : item.configuration === 'unconfigured' ? copy('Not configured', '未配置') : item.configuration === 'ready' ? copy('Configured', '已配置') : copy('No configuration', '无需配置')}</span>
         </div>
         {item.error && <p role="alert">{item.error}</p>}
         {pending?.id === item.skillId && <p role="status">{pending.action === 'install' ? copy('Installing…', '正在安装…') : pending.action === 'update' ? copy('Updating…', '正在更新…') : copy('Uninstalling…', '正在卸载…')}</p>}
@@ -339,7 +339,7 @@ function SkillContents({ item, mode, client, locale, copy, workspaceName, onClos
       {!!missing.length && <p className="ow-skills-error" role="status">{copy('Required configuration missing', '缺少必填配置')}: {missing.join(', ')}</p>}
       {confirmClear && <div className="ow-skills-error"><p>{copy('Clear all saved configuration? Queued tasks that need it may be blocked.', '清除所有已保存配置？需要这些配置的排队任务可能会被阻塞。')}</p><button type="button" disabled={saving} onClick={() => { setConfirmClear(false); void save(true); }}>{copy('Confirm clear', '确认清除')}</button><button type="button" disabled={saving} onClick={() => setConfirmClear(false)}>{copy('Cancel', '取消')}</button></div>}
       <footer>{!!config.schema.environment.length && <button type="button" disabled={saving} onClick={() => setConfirmClear(true)}>{copy('Clear all configuration', '清除所有配置')}</button>}
-        <button type="button" onClick={onClose}>{copy('Cancel', '取消')}</button>{!!config.schema.environment.length && <button type="submit" disabled={saving || !config.packageVersion || !Object.keys(skillConfigPatch(edits)).length}>{saving ? copy('Saving…', '正在保存…') : copy('Save', '保存')}</button>}</footer>
+        <button type="button" onClick={onClose}>{copy('Cancel', '取消')}</button>{!!config.schema.environment.length && <button type="submit" disabled={saving || !config.packageVersion || !Object.keys(skillConfigPatch(edits)).length && item.configuration !== 'unconfigured'}>{saving ? copy('Saving…', '正在保存…') : copy('Save', '保存')}</button>}</footer>
     </form>}
   </SkillDialog>;
 }

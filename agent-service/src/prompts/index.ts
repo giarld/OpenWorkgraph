@@ -2,7 +2,6 @@ import type { BackendRunContext } from '../backend/types.js';
 import { commonGenerationGuidance } from './common.js';
 import { executionDeliveryGuidance, DEVELOPMENT_CHANGED_FILES_GUIDANCE } from './execution.js';
 import { textGenerationGuidance } from './text.js';
-import { imageGenerationGuidance } from './image.js';
 import { visualizeGenerationGuidance } from './visualize.js';
 import { referenceGuidance, upstreamGuidance } from './references.js';
 
@@ -24,7 +23,7 @@ export function nodeGenerationGuidance(context: BackendRunContext, options: Node
       ].join('\n');
       break;
     case 'text_generation': generation = textGenerationGuidance(); break;
-    case 'image_generation': generation = imageGenerationGuidance(context); break;
+    case 'image_generation': throw new Error('Dedicated image generation has been removed');
     case 'visualize_generation': generation = ''; break;
     default: { const exhaustive: never = context.kind; throw new Error('Unsupported node generation kind: ' + exhaustive); }
   }

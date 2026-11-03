@@ -5,13 +5,13 @@ import { open, rename, unlink, mkdir, rm, readdir, rmdir } from 'node:fs/promise
 import { join, dirname } from 'node:path';
 import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { SkillConfigSchema, SkillConfiguration, SkillConfigurationWrite, SkillEnvironmentField } from '@openworkgraph/protocol';
+import type { SkillCatalogItem, SkillConfigSchema, SkillConfiguration, SkillConfigurationWrite, SkillEnvironmentField } from '@openworkgraph/protocol';
 import type { DataDirectories } from './directories.js';
 import { ServiceError } from './errors.js';
 import { parseSkillConfig, SKILL_CONFIG_LIMITS, validateSkillValue } from './skill-schema.js';
 
 interface StoredValue { value: string; secret: boolean }
-interface Snapshot { revision: number; values: Record<string, StoredValue> }
+interface Snapshot { revision: number; values: Record<string, StoredValue>; confirmedSchema?: string }
 interface Manifest { version: 1; revision: number; minimumRevision: number }
 interface LockOwner { pid: number; started: string; hostname: string; token: string }
 /** Omit schema to validate an automatic skill without loading its env/defaults. */
@@ -274,7 +274,7 @@ export class SkillConfigs {
     if (revision === 0) return { revision: 0, values: {} };
     const value = await this.load(join(path, String(revision) + '.json')) as Snapshot | undefined;
     if (!value) return unavailable();
-    if (value.revision !== revision || !value.values || typeof value.values !== 'object' || Array.isArray(value.values)) throw Error('Invalid storage');
+    if (value.revision !== revision || !value.values || typeof value.values !== 'object' || Array.isArray(value.values) || value.confirmedSchema !== undefined && (typeof value.confirmedSchema !== 'string' || !/^[a-f0-9]{64}$/.test(value.confirmedSchema))) throw Error('Invalid storage');
     for (const stored of Object.values(value.values)) {
       if (!stored || typeof stored.value !== 'string' || typeof stored.secret !== 'boolean') throw Error('Invalid storage');
       validateSkillValue(stored.value);
@@ -323,6 +323,23 @@ export class SkillConfigs {
     });
   }
 
+  /** Defaults count as configured after an explicit save of this schema. */
+  async configurationStatus(skillId: string, schema: SkillConfigSchema): Promise<SkillCatalogItem['configuration']> {
+    const checked = schemaCopy(schema);
+    if (!checked.environment.length) return 'none';
+    return this.reading(skillId, async path => {
+      const manifest = await this.manifest(path, false);
+      const snapshot = await this.snapshot(path, manifest, manifest.revision);
+      const config = this.view(skillId, checked, manifest, snapshot);
+      if (checked.environment.some(field => field.required && !config.values.some(value => value.name === field.name && value.configured))) return 'required';
+      const saved = checked.environment.some(field => {
+        const value = Object.hasOwn(snapshot.values, field.name) ? snapshot.values[field.name] : undefined;
+        return value?.secret === field.secret && !!value.value.trim();
+      });
+      return saved || snapshot.confirmedSchema === hash(JSON.stringify(checked)) ? 'ready' : 'unconfigured';
+    });
+  }
+
   async write(skillId: string, schema: SkillConfigSchema, body: SkillConfigurationWrite): Promise<SkillConfiguration> {
     const checked = schemaCopy(schema);
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['expectedRevision', 'values'].includes(key)) || !body.values || typeof body.values !== 'object' || Array.isArray(body.values)) invalid();
@@ -349,7 +366,7 @@ export class SkillConfigs {
         else values[name] = { value, secret: fields.get(name)!.secret };
       }
       const nextRevision = manifest.revision + 1; revisionNumber(nextRevision);
-      const snapshot: Snapshot = { revision: nextRevision, values };
+      const snapshot: Snapshot = { revision: nextRevision, values, confirmedSchema: hash(JSON.stringify(checked)) };
       for (const field of checked.environment) {
         const value = this.effective(field, snapshot);
         if (field.required && (value === undefined || !value.trim())) throw new ServiceError('INVALID_REQUEST', '技能必填配置缺失：' + field.name);

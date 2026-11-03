@@ -3,6 +3,8 @@ import { Runs } from './runs.js';
 import { ServiceError } from './errors.js';
 import { materializeInputs, type MaterializedInputs } from './input-materialization.js';
 import { runDirectories, type DataDirectories } from './directories.js';
+import type { AgentHistoryContext } from './agents/contracts.js';
+import type { Json } from '@openworkgraph/protocol';
 
 export interface RunContextRequest {
   runId: string;
@@ -18,6 +20,9 @@ export interface RunLineage {
   edges: { sourceRunId: string; targetRunId: string }[];
 }
 interface RunDescription {
+  /** Retained answer is historical data, never a resumed tool or permission. */
+  answer: string | null;
+  answerTruncated: boolean;
   runId: string; nodeId: string; graphId: string; status: Run['status'];
   inputDigest: string; historyState: Run['historyState'];
   predecessorRunIds: string[]; lineageRecorded: boolean;
@@ -28,7 +33,7 @@ interface RunDescription {
 /** Run identities, not live graph edges, define historical ancestry. */
 export class RunContexts {
   private readonly copies = new Map<string, Promise<MaterializedInputs>>();
-  constructor(readonly runs: Runs, readonly dirs: DataDirectories) {}
+  constructor(readonly runs: Runs, readonly dirs: DataDirectories, private readonly readAgentHistory?: (backendId: string, context: AgentHistoryContext) => Promise<readonly Json[]>) {}
 
   private scoped(caller: Run, id: string): Run {
     if (typeof id !== 'string' || !id || id.length > 200) throw new ServiceError('INVALID_REQUEST', 'A valid Run ID is required');
@@ -37,7 +42,7 @@ export class RunContexts {
     return this.runs.get(id);
   }
 
-  describe(run: Run): RunDescription {
+  describe(run: Run, answerLimit = Number.MAX_SAFE_INTEGER): RunDescription {
     const details = this.runs.runtime(run.id).details;
     const dependencies = details.chainDependencies;
     if (dependencies !== undefined && (!Array.isArray(dependencies) || dependencies.some(id => typeof id !== 'string')))
@@ -47,7 +52,9 @@ export class RunContexts {
     const version = typeof details.baseVersion === 'number' ? details.baseVersion : null;
     const row = version === null ? undefined : this.runs.db.prepare('SELECT content FROM node_versions WHERE node_id=? AND version=?').get(run.nodeId, version);
     const content = row ? JSON.parse(String(row.content)) : null;
+    const answer = run.historyState === 'retained' && details.result && typeof details.result === 'object' && !Array.isArray(details.result) && typeof details.result.answer === 'string' ? details.result.answer : null;
     return {
+      answer: answer?.slice(0, answerLimit) ?? null, answerTruncated: answer !== null && answer.length > answerLimit,
       runId: run.id, nodeId: run.nodeId, graphId: run.graphId, status: run.status,
       inputDigest: snapshot.inputDigest, historyState: run.historyState, predecessorRunIds, lineageRecorded: dependencies !== undefined, outputs: this.outputs(run),
       nodeSnapshot: { contentVersion: version, title: typeof content?.title === 'string' ? content.title : null,
@@ -66,7 +73,7 @@ export class RunContexts {
       if (active.has(entry.id)) throw new ServiceError('INPUT_BLOCKED', 'Persisted Run lineage contains a cycle');
       if (visited.has(entry.id)) continue;
       if (nodes.length >= 10000) throw new ServiceError('INPUT_BUDGET_EXCEEDED', 'Run lineage exceeds 10000 runs');
-      const node = this.describe(this.scoped(root, entry.id));
+      const node = this.describe(this.scoped(root, entry.id), 2000);
       nodes.push(node); active.add(entry.id); stack.push({ id: entry.id, exit: true });
       for (const id of node.predecessorRunIds) {
         edges.push({ sourceRunId: id, targetRunId: entry.id });
@@ -99,11 +106,21 @@ export class RunContexts {
       case 'summary': value = this.describe(target); break;
       case 'snapshot': value = this.runs.snapshot(target.id); break;
       case 'outputs': value = this.outputs(target); break;
-      case 'history':
+      case 'history': {
         value = { historyState: target.historyState, records: target.historyState === 'cleared' ? [] :
           this.runs.db.prepare('SELECT id,occurred_at AS occurredAt,kind,payload FROM run_process_records WHERE run_id=? ORDER BY id').all(target.id)
             .map(row => ({ ...row, payload: JSON.parse(String(row.payload)) })) };
+        const backendId = this.runs.snapshot(target.id).agent?.backendId;
+        if (target.historyState !== 'cleared' && backendId && this.readAgentHistory) {
+          const runtime = this.runs.runtime(target.id);
+          const attemptId = runtime.details.recoveryAttemptId ?? runtime.details.previousEpoch ?? runtime.epoch;
+          if (typeof attemptId !== 'string') throw new ServiceError('INPUT_BLOCKED', 'Invalid original Run attempt');
+          const agentRecords = await this.readAgentHistory(backendId, { runId: target.id, attemptId, serviceRoot: this.dirs.root });
+          // History can be cleared concurrently while the private file is read.
+          value = this.runs.get(target.id).historyState === 'cleared' ? { historyState: 'cleared', records: [] } : { ...(value as object), agentRecords };
+        }
         break;
+      }
       case 'output': {
         const output = this.outputs(target).canvas.find(item => item.outputKey === request.outputKey);
         if (!output) throw new ServiceError('NOT_FOUND', 'Published canvas output unavailable; no newer Run or live project file is substituted');

@@ -27,6 +27,7 @@ export const managementZhCN: Record<string, string> = {
   "Add project": "添加项目",
   "More management": "更多管理",
   "Agent settings": "Agent 设置",
+  "Built-in Agent": "内置 Agent",
   "Permissions, Agent configuration, and default model": "公共权限、Agent 配置与默认模型",
   "Choose an existing project or add a directory manually.": "选择已有项目，或手动添加目录。",
   "Expand settings as needed to manage Workspace capabilities and data.": "按需展开设置，管理运行能力与数据。",

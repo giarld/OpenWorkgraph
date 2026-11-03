@@ -3,7 +3,6 @@ import { AgentHostTools } from '../agents/host-tools.js';
 import { APPROVAL_MAX_PATHS, normalizeApprovalPermissions, validApprovalPaths, type ApprovalPermissions } from '@openworkgraph/protocol';
 import { AgentOperations } from '../agents/operations.js';
 import { nodeGenerationGuidance, nodeTitleGuidance } from '../prompts/index.js';
-import { codexNativeGuidance } from './guidance.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { publicProgressText } from './progress.js';
 import { redactSkillValues } from './redaction.js';
@@ -99,7 +98,8 @@ export class CodexBackendAdapter implements BackendAdapter {
     native.signal?.throwIfAborted();
     if (this.sessions.has(context.runId)) throw new BackendError('CONFLICT', 'Run already attached; start never implicitly retries');
     if (this.sessions.size >= 1024) throw new BackendError('UNAVAILABLE', 'Runtime retention limit reached; forget reconciled terminal Runs');
-    if ((!context.prompt.trim() && !(context.kind==='image_generation' && context.resources?.some(item=>item.kind==='image' && item.resource))) || Buffer.byteLength(context.prompt) > 256 * 1024) throw new BackendError('INVALID_INPUT', 'Prompt is empty without a frozen image, or too large');
+    if (context.kind === 'image_generation') throw new BackendError('INVALID_INPUT', 'Dedicated image generation has been removed');
+    if (!context.prompt.trim() || Buffer.byteLength(context.prompt) > 256 * 1024) throw new BackendError('INVALID_INPUT', 'Prompt is empty without a frozen image, or too large');
     const mode = sandboxMode(context.sandboxMode ?? 'read-only');
     const selection = context.agent;
     const publicPermissions = Boolean(selection && (Object.hasOwn(selection, 'settingsGeneration') || Object.hasOwn(selection, 'permissions')));
@@ -181,7 +181,7 @@ export class CodexBackendAdapter implements BackendAdapter {
       s.commandCwd = started.cwd;
       if (s.cancelled) { s.snapshot.state = 'cancelled'; this.emit(s); rpc.close(); return this.snapshot(s); }
       for (const m of s.buffered.splice(0)) this.incoming(s, m.method, m.params, m.id);
-      const instructions = [nodeGenerationGuidance(s.context, { generateTitle: Boolean(s.callbacks.setNodeTitle) }), codexNativeGuidance(s.context), 'User request follows:', s.context.prompt].filter(Boolean).join('\n');
+      const instructions = [nodeGenerationGuidance(s.context, { generateTitle: Boolean(s.callbacks.setNodeTitle) }), 'User request follows:', s.context.prompt].filter(Boolean).join('\n');
       // Subsequent turns inherit the sandbox selected on this thread.
       this.track(s, this.generateTitle(s).catch(() => { s.titleRpc?.close(); }));
       stage = 'turn/start';

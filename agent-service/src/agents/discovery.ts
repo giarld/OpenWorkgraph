@@ -1,9 +1,10 @@
+import { AGENT_MODEL_CATALOG_LIMIT } from '@openworkgraph/protocol';
 import type { AgentAvailability, AgentModelOption, AgentOptionValue, AgentPlatform, AgentNativeCatalog, AgentDescriptor } from '@openworkgraph/protocol';
 import type { AgentQueryContext } from './contracts.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText } from './configuration.js';
 import { AgentError, agentError } from './errors.js';
 import { AgentRegistry, safeAvailability } from './registry.js';
-import { modelGroupMetadata } from './model-groups.js';
+import { modelDisplayMetadata } from './model-groups.js';
 import { validateProjectPermissions } from './workspace-configuration-validation.js';
 
 export interface AgentDiscoveryRequest {
@@ -16,20 +17,21 @@ export interface AgentDiscoveryRequest {
 export interface AgentDiscoveryLimits { maxEntries?: number; maxConcurrent?: number; ttlMs?: number; timeoutMs?: number; cleanupTimeoutMs?: number }
 type QueryValue = AgentModelOption[] | AgentAvailability | AgentNativeCatalog;
 interface Query {
-  controller: AbortController; waiters: number; settled: boolean;
+  backendId: string; controller: AbortController; waiters: number; settled: boolean;
   promise: Promise<QueryValue>;
 }
 /** The finite catalog is public data, not a raw CLI response. */
 export function validateAgentModels(value: unknown, effort: boolean, variants = false): AgentModelOption[] {
-  if (!Array.isArray(value) || value.length > 512) throw new AgentError('protocol_error');
+  if (!Array.isArray(value) || value.length > AGENT_MODEL_CATALOG_LIMIT) throw new AgentError('protocol_error');
   const ids = new Set<string>();
   return value.map(entry => {
-    if (!isPlainRecord(entry) || !exactKeys(entry, ['id', 'reasoningEfforts', 'defaultReasoningEffort', 'variants', 'inputKinds', 'tools', 'group']) || !publicText(entry.id, 256) || entry.id !== entry.id.trim() || ids.has(entry.id) || !Array.isArray(entry.reasoningEfforts) || entry.reasoningEfforts.length > (variants ? 64 : 32) || !entry.reasoningEfforts.every(v => publicText(v, 64)) || new Set(entry.reasoningEfforts).size !== entry.reasoningEfforts.length || (!effort && entry.reasoningEfforts.length !== 0) || (entry.defaultReasoningEffort !== undefined && entry.defaultReasoningEffort !== null && (typeof entry.defaultReasoningEffort !== 'string' || !entry.reasoningEfforts.includes(entry.defaultReasoningEffort)))) throw new AgentError('protocol_error');
-    if (entry.variants !== undefined && (!variants || !Array.isArray(entry.variants) || entry.variants.length > 64 || !entry.variants.every(v => publicText(v, 64) && v === v.trim()) || new Set(entry.variants).size !== entry.variants.length) || entry.inputKinds !== undefined && (!Array.isArray(entry.inputKinds) || entry.inputKinds.length > 5 || !entry.inputKinds.every(v => ['text', 'image', 'document', 'video', 'file'].includes(String(v))) || new Set(entry.inputKinds).size !== entry.inputKinds.length) || entry.tools !== undefined && typeof entry.tools !== 'boolean') throw new AgentError('protocol_error');
+    if (!isPlainRecord(entry) || !exactKeys(entry, ['id', 'reasoningEfforts', 'defaultReasoningEffort', 'variants', 'inputKinds', 'tools', 'group', 'label']) || !publicText(entry.id, 256) || entry.id !== entry.id.trim() || ids.has(entry.id) || !Array.isArray(entry.reasoningEfforts) || entry.reasoningEfforts.length > (variants ? 64 : 32) || !entry.reasoningEfforts.every(v => publicText(v, 64)) || new Set(entry.reasoningEfforts).size !== entry.reasoningEfforts.length || (!effort && entry.reasoningEfforts.length !== 0) || (entry.defaultReasoningEffort !== undefined && entry.defaultReasoningEffort !== null && (typeof entry.defaultReasoningEffort !== 'string' || !entry.reasoningEfforts.includes(entry.defaultReasoningEffort)))) throw new AgentError('protocol_error');
+    if (entry.variants !== undefined && (!variants || !Array.isArray(entry.variants) || entry.variants.length > 64 || !entry.variants.every(v => publicText(v, 64) && v === v.trim()) || new Set(entry.variants).size !== entry.variants.length) || entry.inputKinds !== undefined && (!Array.isArray(entry.inputKinds) || entry.inputKinds.length > 6 || !entry.inputKinds.every(v => ['text', 'image', 'document', 'video', 'audio', 'file'].includes(String(v))) || new Set(entry.inputKinds).size !== entry.inputKinds.length) || entry.tools !== undefined && typeof entry.tools !== 'boolean') throw new AgentError('protocol_error');
+    if (entry.label !== undefined && (!publicText(entry.label, 512) || entry.label !== entry.label.trim())) throw new AgentError('protocol_error');
     ids.add(entry.id);
     if (entry.group !== undefined && entry.group !== null && (!publicText(entry.group, 256) || entry.group !== entry.group.trim())) throw new AgentError('protocol_error');
     return { id: entry.id, reasoningEfforts: [...entry.reasoningEfforts] as string[], defaultReasoningEffort: (entry.defaultReasoningEffort ?? null) as string | null,
-      ...(entry.variants === undefined ? {} : { variants: [...entry.variants as string[]] }), ...(entry.inputKinds === undefined ? {} : { inputKinds: [...entry.inputKinds as NonNullable<AgentModelOption['inputKinds']>] }), ...(entry.tools === undefined ? {} : { tools: entry.tools as boolean }), ...(entry.group === undefined ? {} : { group: entry.group as string | null }) };
+      ...(entry.variants === undefined ? {} : { variants: [...entry.variants as string[]] }), ...(entry.inputKinds === undefined ? {} : { inputKinds: [...entry.inputKinds as NonNullable<AgentModelOption['inputKinds']>] }), ...(entry.tools === undefined ? {} : { tools: entry.tools as boolean }), ...(entry.label === undefined ? {} : { label: entry.label as string }), ...(entry.group === undefined ? {} : { group: entry.group as string | null }) };
   });
 }
 /** Plugins supporting effort use the per-task selection before the legacy
@@ -61,7 +63,7 @@ function limit(value: number | undefined, fallback: number, maximum: number, zer
 }
 /** Catalog and diagnosis use independent keys and NEVER call one another. */
 export class AgentDiscovery {
-  private readonly cache = new Map<string, { expires: number; value: QueryValue }>();
+  private readonly cache = new Map<string, { backendId: string; expires: number; value: QueryValue }>();
   private readonly queries = new Map<string, Query>();
   private readonly maxEntries: number; private readonly maxConcurrent: number;
   private readonly ttlMs: number; private readonly timeoutMs: number; private readonly cleanupTimeoutMs: number;
@@ -80,6 +82,11 @@ export class AgentDiscovery {
   }
   nativeCatalog(backendId: string, request: AgentDiscoveryRequest = {}): Promise<AgentNativeCatalog> {
     return this.query(backendId, 'nativeCatalog', request) as Promise<AgentNativeCatalog>;
+  }
+  /** Committed plugin settings supersede both cached and in-flight metadata. */
+  invalidate(backendId: string): void {
+    for (const [key, entry] of this.cache) if (entry.backendId === backendId) this.cache.delete(key);
+    for (const query of this.queries.values()) if (query.backendId === backendId) query.controller.abort(new AgentError('invalid_configuration', 'Agent 配置已变化，请刷新后重试。'));
   }
   private async query(backendId: string, operation: 'models' | 'diagnose' | 'nativeCatalog', request: AgentDiscoveryRequest): Promise<QueryValue> {
     if (request.signal?.aborted) throw request.signal.reason ?? new DOMException('Aborted', 'AbortError');
@@ -100,11 +107,11 @@ export class AgentDiscovery {
     if (!job) {
       if (this.queries.size >= this.maxConcurrent) throw new AgentError('runtime_unavailable');
       const controller = new AbortController();
-      job = { controller, waiters: 0, settled: false, promise: Promise.resolve([]) };
+      job = { backendId, controller, waiters: 0, settled: false, promise: Promise.resolve([]) };
       const active = job;
       this.queries.set(key, active);
       active.promise = this.runQuery(controller, async context => {
-        if (operation === 'models') return validateAgentModels(plugin.listModels ? await plugin.listModels(context) : [], plugin.descriptor.models.effort, !!plugin.descriptor.models.variantOption).map(model => ({ ...model, ...modelGroupMetadata(plugin, model.id) }));
+        if (operation === 'models') return validateAgentModels(plugin.listModels ? await plugin.listModels(context) : [], plugin.descriptor.models.effort, !!plugin.descriptor.models.variantOption).map(model => ({ ...model, ...modelDisplayMetadata(plugin, model.id, model) }));
         if (operation === 'nativeCatalog') {
           if (!plugin.extensions?.nativeCatalog) throw new AgentError('capability_unsupported');
           return validateNativeCatalog(await plugin.extensions.nativeCatalog.list(context), plugin.descriptor);
@@ -114,7 +121,7 @@ export class AgentDiscovery {
         // A user may install the CLI then immediately retry onboarding.
         const retryInstallation = !Array.isArray(value) && 'installation' in value && value.installation !== undefined && value.installation !== 'installed';
         if (this.ttlMs > 0 && !retryInstallation && !controller.signal.aborted && !this.closed) {
-          this.cache.set(key, { expires: Date.now() + this.ttlMs, value: structuredClone(value) });
+          this.cache.set(key, { backendId, expires: Date.now() + this.ttlMs, value: structuredClone(value) });
           while (this.cache.size > this.maxEntries) this.cache.delete(this.cache.keys().next().value!);
         }
         return value;

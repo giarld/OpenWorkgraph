@@ -1,4 +1,4 @@
-import { useNodeViewport } from '../canvas/NodeViewport';
+import { useNodeSelected, useNodeViewport } from '../canvas/NodeViewport';
 import { VisualizeAssetLogo } from './VisualizeAssetLogo';
 import { VisualizeAssetPreview } from './VisualizeAssetPreview';
 import { isVisualizeAssetFilename, visualizeAssetFilename, VISUALIZE_ASSET_MIME } from '../../../packages/protocol/src/visualize-library';
@@ -18,6 +18,7 @@ import { isLifecycleCancellation } from '../adapter/transport';
 import { FILE_NODE_MAX_BYTES, fileMime, formatFileSize, PROJECT_FILE_PREVIEW_MAX_BYTES } from '../domain/file-types';
 import { translate } from '../i18n/translate';
 import { cachedImageBlob } from './image-preview-cache';
+import { imageMayAnimate, staticImagePreview } from './image-node-animation';
 import { useI18n } from '../i18n/I18nProvider';
 import type { Request } from './contracts';
 import { VersionedFilePreview } from './PreviewNode';
@@ -216,8 +217,10 @@ export function CanvasProjectFilePreview({ request, projectId, relativePath, mim
 const THUMBNAIL_LEVELS = [320, 640, 1280, 2560, 4096] as const;
 function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = true, thumbnailSize: suppliedThumbnailSize, onThumbnailSize, onError }: { request: ResourceRequest; path: string; mime?: string; name: string; imageNode?: boolean; cacheImages?: boolean; thumbnailSize?: number; onThumbnailSize?: (size: number) => void; onError: (e: unknown) => void }) {
   const visible = useNodeViewport();
+  const selected = useNodeSelected();
   const { t } = useI18n();
-  const [state, setState] = useState<{ path: string; mime?: string; url?: string; text?: string; error?: string }>();
+  const [state, setState] = useState<{ path: string; mime?: string; sourceMime?: string; url?: string; text?: string; error?: string }>();
+  const [animation, setAnimation] = useState<{ path: string; request: ResourceRequest; url: string }>();
   const [retry, setRetry] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -232,6 +235,22 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
   const titleId = useId();
   const errors = useRef(onError); errors.current = onError;
   const current = state?.path === path ? state : undefined;
+  const animationMime = imageNode && current?.url ? current.sourceMime : undefined;
+  const playing = selected && visible && !!animationMime;
+  useEffect(() => {
+    if (!playing || !['image/gif', 'image/webp', 'image/png'].includes(animationMime!)) return;
+    let active = true;
+    let url: string | undefined;
+    const contentPath = path + '/content';
+    const load = cacheImages ? cachedImageBlob(request, contentPath) : request<Blob>(contentPath, undefined, 'BLOB');
+    void load.then(async blob => {
+      if (!active || !await imageMayAnimate(blob) || !active) return;
+      url = URL.createObjectURL(blob);
+      setAnimation({ path, request, url });
+    }).catch(error => { if (active) errors.current(error); });
+    return () => { active = false; if (url) URL.revokeObjectURL(url); setAnimation(undefined); };
+  }, [playing, animationMime, request, path, cacheImages, retry]);
+  const imageUrl = playing && animation?.path === path && animation.request === request ? animation.url : current?.url;
   const setSelectedThumbnailSize = useCallback((size: number) => {
     setThumbnailSize(size);
     onThumbnailSize?.(size);
@@ -324,10 +343,11 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
         const previewPath = path + '/preview';
         const mediaPath = imageNode ? thumbnailPath : previewPath;
         const blob = imageNode && cacheImages ? await cachedImageBlob(request, mediaPath) : await request<Blob>(mediaPath, undefined, 'BLOB');
-        const url = URL.createObjectURL(blob);
+        const preview = imageNode ? await staticImagePreview(blob) : blob;
+        if (!active) return;
+        const url = URL.createObjectURL(preview);
         transientUrl = url;
-        if (!active) { URL.revokeObjectURL(url); transientUrl = undefined; return; }
-        setState({ path, mime: imageNode ? 'image/webp' : resolvedMime, url });
+        setState({ path, mime: imageNode ? preview.type || 'image/webp' : resolvedMime, sourceMime: resolvedMime, url });
       } else {
         const representation = await request<{ state: string; text: string | null; reason: string | null }>(path + '/representation');
         if (active) setState({ path, text: representation.state === 'ready' ? representation.text ?? '' : representation.reason ?? translate('Preview is not supported for this format yet.') });
@@ -339,7 +359,7 @@ function ResourcePreview({ request, path, mime, name, imageNode, cacheImages = t
   return <div className={'ow-resource-preview' + (imageNode ? ' ow-image-node-preview' : '')} aria-label={t('{name} preview', { name })}>
     {!current && <p role="status">{t('Loading preview…')}</p>}
     {current?.error && <div role="status">{t('Could not load preview: {error}', { error: current.error })}<button onClick={() => setRetry(v => v + 1)}>{t('Retry preview')}</button></div>}
-    {current?.url && (current.mime?.startsWith('video/') ? <video src={current.url} controls preload="metadata" aria-label={name} /> : expandable ? <button ref={imageButton} className="ow-image-expand" data-canvas-interactive data-canvas-draggable type="button" aria-label={t('Enlarge {name}', { name })} title={t('Double-click to enlarge image')} onContextMenu={e => e.stopPropagation()} onClick={e => { if (e.detail === 0) setExpanded(true); }} onDoubleClick={() => setExpanded(true)}><img src={current.url} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /></button> : <img src={current.url} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} />)}
+    {current?.url && (current.mime?.startsWith('video/') ? <video src={current.url} controls preload="metadata" aria-label={name} /> : expandable ? <button ref={imageButton} className="ow-image-expand" data-canvas-interactive data-canvas-draggable type="button" aria-label={t('Enlarge {name}', { name })} title={t('Double-click to enlarge image')} onContextMenu={e => e.stopPropagation()} onClick={e => { if (e.detail === 0) setExpanded(true); }} onDoubleClick={() => setExpanded(true)}><img src={imageUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} /></button> : <img src={imageUrl} alt={name} draggable={false} onContextMenu={e => e.stopPropagation()} />)}
     {current?.text !== undefined && <pre>{current.text}</pre>}
     {!imageNode && <footer className="ow-preview-download"><PreviewActionButton action="download" busy={downloading} onClick={() => void download()}/></footer>}
     {expanded && current?.url && createPortal(<div className="modal-backdrop ow-image-backdrop" onPointerDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); setExpanded(false); }}><section className="ow-image-dialog panel" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={dialog} onClick={e => e.stopPropagation()} onKeyDown={e => {
@@ -391,9 +411,11 @@ function AssetThumbnail({ request, path, name, video = false, thumbnailRevision 
     let active = true;
     setFailed(false);
     const thumbnailPath = path + '/thumbnail?size=' + size + (video ? '&video=1' : '');
-    void (video ? request<Blob>(thumbnailPath, undefined, 'BLOB') : cachedImageBlob(request, thumbnailPath)).then(blob => {
-      const next = URL.createObjectURL(blob);
-      if (!active) { URL.revokeObjectURL(next); return; }
+    void (video ? request<Blob>(thumbnailPath, undefined, 'BLOB') : cachedImageBlob(request, thumbnailPath)).then(async blob => {
+      if (!active) return;
+      const preview = video ? blob : await staticImagePreview(blob);
+      if (!active) return;
+      const next = URL.createObjectURL(preview);
       const previous = objectUrl.current;
       objectUrl.current = next;
       setUrl(next);

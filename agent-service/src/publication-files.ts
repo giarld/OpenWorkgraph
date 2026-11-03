@@ -47,7 +47,7 @@ async function verify(chunks: AsyncIterable<Buffer>, output: FileOutput, write?:
     await write?.(chunk);
   }
   if (bytes !== output.bytes || hash.digest('hex') !== output.sha256) invalid('Output size/hash mismatch');
-  if (bytes && !mimeMatchesBytes(output.mime, sniffMime(prefix))) invalid('Output MIME does not match bytes');
+  if (bytes && !mimeMatchesBytes(output.mime, sniffMime(prefix), true)) invalid('Output MIME does not match bytes');
 }
 
 /** Keep oversized deliverables in the project, using a deterministic, exclusive
@@ -58,7 +58,7 @@ export async function preserveOversizedOutput(files: ProjectFiles, projectId: st
     const file = await files.resolve(projectId, output.path, 'file');
     const fingerprint = await files.fingerprint(projectId, output.path, output.bytes);
     if (fingerprint.sha256 !== output.sha256) invalid('Project output SHA-256 mismatch: ' + output.outputKey);
-    if (!mimeMatchesBytes(output.mime, sniffMime(fingerprint.prefix))) invalid('Output MIME does not match bytes');
+    if (!mimeMatchesBytes(output.mime, sniffMime(fingerprint.prefix), true)) invalid('Output MIME does not match bytes');
     return { relativePath: output.path, path: file.path };
   }
   // These names are host-controlled or validated manifest identifiers.

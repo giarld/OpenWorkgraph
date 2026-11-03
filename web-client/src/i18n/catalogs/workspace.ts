@@ -1,4 +1,5 @@
 export const workspaceZhCN: Record<string, string> = {
+  'Upload an image': '上传图片',
   'Node actions': '节点操作',
   'Close node menu': '关闭节点菜单',
   'View node information': '查看节点信息',

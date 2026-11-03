@@ -16,7 +16,7 @@ export function readRecentGraphs(storage: Pick<Storage, 'getItem'>): RecentGraph
     const value: unknown = JSON.parse(storage.getItem(key) ?? '[]');
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is Omit<RecentGraph, 'projectName'> & { projectName?: string } =>
-      item && typeof item === 'object' && typeof item.temporary === 'boolean' &&
+      item && typeof item === 'object' && item.temporary === false &&
       ['serviceId', 'projectId', 'graphId', 'title', 'runtimeName'].every(field =>
         typeof item[field] === 'string' && item[field].length > 0),
     ).map(item => ({ ...item, projectName: typeof item.projectName === 'string' && item.projectName.length > 0 ? item.projectName : item.projectId })).slice(0, limit);

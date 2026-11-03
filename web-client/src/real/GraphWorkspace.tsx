@@ -1,5 +1,5 @@
 import { mergeRunInput } from '../../../packages/protocol/src/run-input';
-import { agentModelKey, agentModelChoices, captureAgentSelection, initialEffort, nativeSkillConflict, nodeAgentModelPreference, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
+import { agentSelectionLabel, agentModelKey, agentModelChoices, captureAgentSelection, initialEffort, nativeSkillConflict, nodeAgentModelPreference, orderedAgents, useWorkspaceAgents, workspaceAgentDefault, type WorkspaceAgentStore } from './agent-state';
 import type { AgentSelection } from '../../../packages/protocol/src/agents';
 import type { ModelSelection } from '../../../packages/protocol/src/index';
 import { VisualizeNode, VisualizeSessions } from "./VisualizeNode";
@@ -45,7 +45,7 @@ import { isBoundProjectFileReference, isEmptyProjectFileReference, isProjectFile
 import { ProjectDirectoryReference } from './ProjectDirectoryReference';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Pencil, Info, Eye, PanelsTopLeft, Hand, MousePointer2, Maximize, Undo2, Redo2, Type, Settings2, Play, Image, Upload, Replace, FolderPlus, Group, Ungroup, Grid2X2, Search, X, Plus, Trash2, Copy, FileText, File as FileIcon, Menu, Home, Download, Clock3, ChevronRight, Link2, Square, LoaderCircle, CircleAlert, Lock } from "lucide-react";
-import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileMime, importedNodeType } from '../domain/file-types';
+import { FILE_NODE_MAX_BYTES, PROJECT_FILE_PREVIEW_MAX_BYTES, fileDownloadName, fileMime, importedNodeType } from '../domain/file-types';
 import { TextContent, RunSummary, DocumentCard, ContentPlaceholder } from "../components/NodeContent";
 import { Canvas, type CanvasHandle } from "../canvas/Canvas";
 import { readViewport, saveViewport, viewportStorageKey } from "./viewport-storage";
@@ -63,7 +63,6 @@ import type {
   Run,
   ModelDefaults,
 } from "./contracts";
-import type { ImageGenerationOptions, ImageProvider, ImageRoute } from '../../../packages/protocol/src/index';
 import { errorCode, graphPath, messageOf } from "./contracts";
 import { GraphEditor, type Draft } from "./editor";
 import {
@@ -93,21 +92,6 @@ import {
 import { GraphHistory } from "./graph-history";
 import { outputPlacement } from "./output-placement";
 import { PasteQueue } from "./paste-queue";
-import {
-  IMAGE_RATIOS,
-  IMAGE_SCALES,
-  chooseDeclaredImageSize,
-  declaredImageSizes,
-  imageRatiosForModel,
-  imageScalesForModel,
-  inferImageScale,
-  modelAllowsCustomImageSize,
-  nearestImageRatio,
-  normalizeImageOptionsForModel,
-  parseImageDimensions,
-  presetImageSize,
-  validateCustomImageSize,
-} from './image-generation-options';
 import {
   assertResourcePasteTarget,
   encodeNodeClipboard,
@@ -222,7 +206,6 @@ export interface GraphWorkspaceProps {
   modelRefreshToken?: number;
   assetsAvailable?: boolean;
   executionReason?: string;
-  imageReason?: string;
   onOpenRun?: (run?: Run, visible?: boolean) => void;
   onRunSubmitted?: (run: Run) => void;
   theme?: "light" | "dark";
@@ -248,7 +231,6 @@ export interface GraphWorkspaceProps {
   onError: (e: unknown) => void;
   onEditor?: (editor: GraphEditor | undefined) => void;
   executionAvailable: boolean;
-  imageAvailable: boolean;
   locateNodeId?: string;
   editExecutionNode?: {nodeId:string;graphId:string;projectId:string;nonce:number};
 }
@@ -313,11 +295,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const agents = useWorkspaceAgents(props.agentStore);
   const [skillConflictState, setSkillConflictState] = useState<{ key: string; owner?: WorkspaceAgentStore; reasons: string[] }>();
   const [models, setModels] = useState<ModelDefaults>();
-  const [imageProviders,setImageProviders] = useState<ImageProvider[]>([]);
   const showModelControls = !props.temporary;
-  const [imageSettingsOpen,setImageSettingsOpen] = useState(false);
-  const [snapImageDimensions,setSnapImageDimensions] = useState(true);
-  const [imagePreview,setImagePreview] = useState<{nodeId:string;hasImage:boolean;issues:string[]} | null>(null);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [referenceId, setReferenceId] = useState<string>();
@@ -370,6 +348,8 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     setNodeEditorStates(previous => previous.get(key) === open ? previous : new Map(previous).set(key, open));
   };
   const [nodeContextMenu, setNodeContextMenu] = useState<{ nodeId: string; screen: { x: number; y: number } }>();
+  const downloadingFiles = useRef(new Set<string>());
+  const [downloadingFileIds, setDownloadingFileIds] = useState(new Set<string>());
   const [createMenu, setCreateMenu] = useState<{ world: { x: number; y: number }; screen: { x: number; y: number }; connection?: { nodeId: string; port: "input" | "output" }; preferAbove?: boolean }>();
   const createMenuElement = useRef<HTMLDivElement>(null);
   const [createMenuPosition, setCreateMenuPosition] = useState<{ left: number; top: number }>();
@@ -588,19 +568,12 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       try { editor.acceptCommitted(props.graph); } catch (error) { props.onError(error); }
     }
   }, [editor, props.graph, props.refreshToken, props.online]);
-  const imageModelControls = props.graph.nodes.some(item => selected.includes(item.id) && item.type === 'image');
   useEffect(() => {
     let live = true; setModels(undefined);
-    if (!showModelControls || props.modelsAvailable === false || agents.mode !== 'legacy' && !imageModelControls) return;
+    if (!showModelControls || props.modelsAvailable === false || agents.mode !== 'legacy') return;
     void (props.serviceRequest ?? props.request)<ModelDefaults>("/v1/models").then(value => { if (live) setModels(value); }).catch(error => { if (live) props.onError(error); });
     return () => { live = false; };
-  }, [props.serviceRequest, props.request, props.modelsAvailable, props.modelRefreshToken, showModelControls, agents.mode, imageModelControls]);
-  useEffect(() => {
-    let live=true;
-    if (!showModelControls) { setImageProviders([]); return; }
-    void (props.serviceRequest ?? props.request)<ImageProvider[]>('/v1/image-providers').then(value=>{if(live)setImageProviders(value);}).catch(()=>{if(live)setImageProviders([]);});
-    return ()=>{live=false;};
-  },[props.serviceRequest,props.request,props.refreshToken,showModelControls]);
+  }, [props.serviceRequest, props.request, props.modelsAvailable, props.modelRefreshToken, showModelControls, agents.mode]);
   const g = state.graph;
   const [projectFilesRevision, setProjectFilesRevision] = useState(0);
   const wasOnline = useRef(props.online);
@@ -761,16 +734,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   useEffect(() => {
     if (nodeContextMenu && (nodeContextMenu.nodeId !== node?.id || selected.length !== 1)) setNodeContextMenu(undefined);
   }, [nodeContextMenu, node?.id, selected.length]);
-  useEffect(() => {
-    if(node?.type!=='image'||isProjectFileReference(node.content)||!props.online){setImagePreview(null);return;}
-    let live=true;
-    setImagePreview(null);
-    const inputDraft = state.runInputs[node.id]?.fields;
-    void props.request<{resources:{kind:string;resource?:unknown}[];issues:{reason:string}[]}>(graphPath(g.projectId,g.graphId)+'/input-preview',{nodeId:node.id,...(inputDraft ? {inputDraft} : {}),excludeFiles:object(editor.nodeContent(node.id).imageRoute).type==='api'},'POST').then(value=>{
-      if(live)setImagePreview({nodeId:node.id,hasImage:value.resources.some(item=>item.kind==='image'&&!!item.resource),issues:value.issues.map(item=>item.reason)});
-    }).catch(()=>{if(live)setImagePreview({nodeId:node.id,hasImage:false,issues:[t('Failed to read frozen reference images. Refresh the Work Graph.')]});});
-    return ()=>{live=false;};
-  },[node?.id,node?.type,node?.contentVersion,node ? state.runInputs[node.id]?.id : undefined,node ? object(editor.nodeContent(node.id).imageRoute).type : undefined,g.executionRevision,g.projectId,g.graphId,props.online,props.request]);
   const graphRuns = useMemo(
     () => props.runs.filter(r => r.serviceId === g.serviceId && r.projectId === g.projectId && r.graphId === g.graphId),
     [props.runs, g.serviceId, g.projectId, g.graphId],
@@ -813,7 +776,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const target = ids.length === 1 ? snapshot.graph.nodes.find(item => item.id === ids[0]) : undefined;
       const targetContent = object(snapshot.drafts.find(item => item.nodeId === target?.id)?.content ?? target?.content ?? {});
       const editable = target?.schemaVersion === 1 && !isProjectFileReference(targetContent)
-        && ['text', 'image', 'execution', 'visualize', 'document'].includes(target.type);
+        && ['text', 'execution', 'visualize', 'document'].includes(target.type);
       const hasContent = typeof targetContent.resourceId === 'string' || (target?.type === 'visualize'
         ? typeof object(targetContent.page).revision === 'number'
         : String(targetContent[target?.type === 'execution' ? 'prompt' : 'text'] ?? '').trim().length > 0);
@@ -870,7 +833,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     || BigInt(submittedRun.submissionSequence ?? '0') > BigInt(snapshotRun.submissionSequence ?? '0'))
     ? submittedRun : snapshotRun;
   const runnableNodeSelected = Boolean(node && selected.length === 1 && node.schemaVersion === 1
-    && !isProjectFileReference(node.content) && ["text", "image", "execution", "visualize"].includes(node.type));
+    && !isProjectFileReference(node.content) && ["text", "execution", "visualize"].includes(node.type));
   const editorVisible = runnableNodeSelected && !!nodeEditorOpen(node!.id);
   const runNeedsAttention = Boolean(selectedRun && (!["succeeded", "cancelled", "interrupted"].includes(selectedRun.status)
     || selectedRun.hasPendingGenerationCandidate));
@@ -887,15 +850,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   const localPrompt = node ? state.runInputs[node.id]?.fields.prompt : undefined;
   const submittedInput = selectedRun ? submittedInputs[selectedRun.id] : undefined;
   const inputChanged = serviceInputChanged || typeof localPrompt === 'string' && !!submittedInput && localPrompt !== submittedInput.prompt;
-  const savedRoute=object(content.imageRoute ?? null);
-  const savedImageOptions=object(savedRoute.options ?? null);
-  const imageOptions:ImageGenerationOptions={
-    quality:['auto','high','medium','low'].includes(String(savedImageOptions.quality))?savedImageOptions.quality as ImageGenerationOptions['quality']:'auto',
-    size:typeof savedImageOptions.size==='string'?savedImageOptions.size:'auto',
-    aspectRatio:typeof savedImageOptions.aspectRatio==='string'?savedImageOptions.aspectRatio:'auto',
-  };
-  const selectedRoute:ImageRoute=savedRoute.type==='api' && typeof savedRoute.providerId==='string' && typeof savedRoute.modelId==='string'
-    ? {type:'api',providerId:savedRoute.providerId,modelId:savedRoute.modelId,options:imageOptions}:{type:'codex',options:imageOptions};
   useEffect(() => {
     setGroupTitle(String(content.title ?? ''));
   }, [node?.id, node?.content]);
@@ -917,7 +871,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       props.onError(e);
     }
   };
-  const saveImageRoute=(route:ImageRoute)=>node&&act(()=>editor.editRunInput(node.id,{...content,imageRoute:route as unknown as Json}));
   const previewModeProps = (wire: GraphSnapshot['nodes'][number]) => {
     const effective = object(state.drafts.find(draft => draft.nodeId === wire.id)?.content ?? wire.content);
     return {
@@ -1107,7 +1060,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     projectFileDetachKeys.current.delete(key);
     editor.acceptCommitted(committed); props.onChanged();
   };
-  const saveImageOptions=(patch:Partial<ImageGenerationOptions>)=>saveImageRoute({...selectedRoute,options:{...imageOptions,...patch}});
   const command = async (ops: Parameters<GraphEditor["command"]>[0]) => {
     if (!latest.current.online || !latest.current.projectActive)
       throw Error(t('The current Work Graph is read-only.'));
@@ -1558,48 +1510,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
     });
   };
   const promptDisabled = !!(readOnly || node?.readOnly || (node && locked(node.id)) || (draft && ["conflict", "recovery"].includes(draft.state)));
-  const imageMode = imagePreview?.nodeId===node?.id && imagePreview?.hasImage ? (String(content.prompt??'').trim()?'text_image':'image') : 'text';
-  const selectedProvider = selectedRoute.type==='api' ? imageProviders.find(provider=>provider.id===selectedRoute.providerId) : undefined;
-  const selectedImageModel = selectedRoute.type==='api' ? selectedProvider?.models.find(item=>item.id===selectedRoute.modelId) : undefined;
-  const customImageSizeAllowed = selectedRoute.type==='codex' || modelAllowsCustomImageSize(selectedImageModel);
-  const availableImageSizes = declaredImageSizes(selectedImageModel);
-  const availableImageRatios = selectedRoute.type==='api' ? imageRatiosForModel(selectedImageModel) : [...IMAGE_RATIOS];
-  const availableImageScales = selectedRoute.type==='api' ? imageScalesForModel(selectedImageModel) : [...IMAGE_SCALES];
-  const selectedImageScale = inferImageScale(imageOptions.size);
-  const selectedImageDimensions = parseImageDimensions(imageOptions.size) ?? {width:1024,height:1024};
-  const customSizeIssue = customImageSizeAllowed && imageOptions.size && imageOptions.size !== 'auto' ? validateCustomImageSize(imageOptions.size) : undefined;
-  const reportedCustomSizeIssue = useRef('');
-  useEffect(() => {
-    if (!customSizeIssue) { reportedCustomSizeIssue.current = ''; return; }
-    if (reportedCustomSizeIssue.current !== customSizeIssue) {
-      reportedCustomSizeIssue.current = customSizeIssue;
-      props.onError(new Error(customSizeIssue));
-    }
-  }, [customSizeIssue, props.onError]);
-  const apiBlock = selectedRoute.type==='api' ? !selectedProvider ? t('The selected image generation provider does not exist. Select it again in Workspace management.')
-    : !selectedProvider.enabled ? t('The selected image generation provider is disabled.')
-    : !selectedProvider.credentialConfigured ? t('The selected provider credentials are not configured or have been revoked.')
-    : !selectedImageModel ? t('The selected image model does not exist.')
-    : !selectedImageModel.modes.includes(imageMode) ? t('The selected model does not support {mode}.', {mode:{text:t('text-to-image'),image:t('promptless image-to-image'),text_image:t('text-and-image generation')}[imageMode]})
-    : imageOptions.size && imageOptions.size!=='auto' && !selectedImageModel.sizes.includes('auto') && !selectedImageModel.sizes.includes(imageOptions.size) ? t('The selected model does not support the current image size.')
-    : imageOptions.quality && imageOptions.quality!=='auto' && !selectedImageModel.qualities.includes('auto') && !selectedImageModel.qualities.includes(imageOptions.quality) ? t('The selected model does not support the current image quality.')
-    : undefined : undefined;
-  const missingInput = node?.type==='image' && !String(content.prompt??'').trim() && !(imagePreview?.nodeId===node.id && imagePreview.hasImage);
-  const missingImageInputHint = t('Enter a prompt or connect an existing image resource.');
-  const codexImageBlock = agents.mode === 'legacy' ? undefined
-    : agents.mode !== 'agents' || !agents.resources.codex?.settings ? agentText('Codex 设置尚未加载，暂不能生图。', 'Codex settings have not loaded. Image generation is unavailable.')
-    : !agents.resources.codex.settings.enabled ? agentText('Codex 已停用，请在 Agent 设置中启用。', 'Codex is disabled. Enable it in Agent settings.') : undefined;
-  const imageIssue = imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a reference image'
-    || imagePreview?.issues[0] === 'Own prompt must be nonempty unless an image node has a frozen reference image'
-    ? missingImageInputHint : imagePreview?.issues[0];
-  const imageBlock = node?.type==='image' ? (imagePreview?.nodeId!==node.id ? t('Checking frozen image inputs…') : imageIssue ?? (missingInput?missingImageInputHint:selectedRoute.type==='api'?apiBlock??customSizeIssue:codexImageBlock??customSizeIssue??(!props.imageAvailable?props.imageReason??t('Codex image generation is unavailable.'):undefined))) : undefined;
   const agentDraftKey = JSON.stringify([g.serviceId, g.projectId, g.graphId, node?.id]);
   const historicalInput = typeof object(content.modelOverride ?? null).model === 'string' ? undefined : submittedInputs[snapshotRun?.id ?? ''];
   const agentDraft = nodeAgentModelPreference(content.agentModelOverride, historicalInput);
   const inheritedAgent = workspaceAgentDefault(agents);
   const pendingAgent = agentDraft ?? inheritedAgent;
   const agentDescriptor = agents.descriptors.find(item => item.id === pendingAgent?.backendId);
-  const runKind = node?.type === 'execution' ? 'execution' : node?.type === 'image' ? 'image_generation' : node?.type === 'visualize' ? 'visualize_generation' : 'text_generation';
+  const runKind = node?.type === 'execution' ? 'execution' : node?.type === 'visualize' ? 'visualize_generation' : 'text_generation';
   const oldModel = object(content.modelOverride ?? null);
   const legacyModel = typeof oldModel.model === 'string' ? { model: oldModel.model, reasoningEffort: typeof oldModel.reasoningEffort === 'string' ? oldModel.reasoningEffort : null } : undefined;
   let explicitAgent: AgentSelection | undefined, agentBlock: string | undefined;
@@ -1615,7 +1532,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
   }
   if (!agentBlock && skillConflictState?.key === agentDraftKey + ':' + pendingAgent?.backendId && skillConflictState.owner === props.agentStore) agentBlock = skillConflictState.reasons[0];
   const agentExecutionAvailable = agents.mode === 'agents' ? !agentBlock && !!explicitAgent : props.executionAvailable;
-  const runDisabled = promptDisabled || running || (node?.type==='image' ? Boolean(imageBlock) || (selectedRoute.type==='codex' && !props.executionAvailable) : !String(content.prompt ?? "").trim() || !agentExecutionAvailable);
+  const runDisabled = promptDisabled || running || (node?.type === 'image' || !String(content.prompt ?? "").trim() || !agentExecutionAvailable);
   const setAgentDraft = (backendId: string, selectedModel: ModelSelection) => {
     if (!props.agentStore || !node) return;
     act(() => editor.editRunInput(node.id, { ...content, agentModelOverride: { backendId, model: { ...selectedModel } } }));
@@ -1629,14 +1546,13 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const selected = agents.resources[backendId]?.models?.find(item => item.id === modelId);
       if (selected || agents.descriptors.find(item => item.id === backendId)?.models.allowCustom) setAgentDraft(backendId, { model: modelId, reasoningEffort: selected ? initialEffort(selected) : null });
     }}>
-      <option value="">{t('Workspace default')} · {inheritedAgent ? inheritedAgent.backendId + ' · ' + inheritedAgent.model.model : t('Loading…')}</option>
-      {orderedAgents(agents).map(backend => <optgroup key={backend.id} label={backend.name}>{agentModelChoices(agents, backend.id, agentDraft?.backendId === backend.id ? agentDraft.model.model : undefined).map(item => <option key={item.id} value={agentModelKey(backend.id, item.id)} disabled={agents.resources[backend.id]?.settings?.enabled === false || item.unavailable}>{backend.name} · {item.id}{item.manual ? agentText('（手动 ID）', ' (custom ID)') : item.unavailable ? agentText('（不可用）', ' (unavailable)') : item.hidden ? agentText('（隐藏）', ' (hidden)') : ''}</option>)}</optgroup>)}
-      {agentDraft && !agentModelChoices(agents, agentDraft.backendId, agentDraft.model.model).some(item => item.id === agentDraft.model.model) && <option value={agentModelKey(agentDraft.backendId, agentDraft.model.model)}>{agentDraft.backendId} · {agentDraft.model.model} ({t('Unavailable')})</option>}
+      <option value="">{t('Workspace default')} · {inheritedAgent ? agentSelectionLabel(agents, inheritedAgent.backendId, inheritedAgent.model.model) : t('Loading…')}</option>
+      {orderedAgents(agents).map(backend => <optgroup key={backend.id} label={backend.name}>{agentModelChoices(agents, backend.id, agentDraft?.backendId === backend.id ? agentDraft.model.model : undefined).map(item => <option key={item.id} value={agentModelKey(backend.id, item.id)} disabled={agents.resources[backend.id]?.settings?.enabled === false || item.unavailable}>{agentSelectionLabel(agents, backend.id, item.id)}{item.manual ? agentText('（手动 ID）', ' (custom ID)') : item.unavailable ? agentText('（不可用）', ' (unavailable)') : item.hidden ? agentText('（隐藏）', ' (hidden)') : ''}</option>)}</optgroup>)}
+      {agentDraft && !agentModelChoices(agents, agentDraft.backendId, agentDraft.model.model).some(item => item.id === agentDraft.model.model) && <option value={agentModelKey(agentDraft.backendId, agentDraft.model.model)}>{agentSelectionLabel(agents, agentDraft.backendId, agentDraft.model.model)} ({t('Unavailable')})</option>}
     </select>
     {legacyModel && pendingAgent?.backendId !== 'codex' && <button type="button" disabled={promptDisabled} onClick={() => act(() => editor.editRunInput(node!.id, { ...content, modelOverride: null }))}>{agentText('清除旧 Codex 模型覆盖', 'Clear legacy Codex model override')}</button>}
   </>;
   const unavailableReason = !props.online ? t('The Workspace is disconnected or synchronizing. Connect and try again.')
-    : node?.type==='image' ? imageBlock ?? (selectedRoute.type==='codex' && !props.executionAvailable ? props.executionReason ?? t('Codex execution is unavailable.') : undefined)
     : agentBlock ?? (!agentExecutionAvailable ? props.executionReason ?? t('Workspace execution is unavailable.') : undefined);
   const submitNodeRun = async (preserveHistoricalOutputs?: boolean) => {
     if (!node || runDisabled) return;
@@ -1645,8 +1561,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       // Capture before flush/preview. The editor copies again at its public boundary.
       const capturedAgent = explicitAgent ? structuredClone(explicitAgent) : undefined;
       const submitted = await editor.run(node.id, runKind, {
-        ...(capturedAgent ? { agent: capturedAgent } : node.type === 'image' && selectedRoute.type === 'api' ? {} : model ? { modelOverride: { model, reasoningEffort: effort || null } } : {}),
-        ...(node.type === 'image' ? { imageRoute: selectedRoute } : {}), preserveHistoricalOutputs,
+        ...(capturedAgent ? { agent: capturedAgent } : model ? { modelOverride: { model, reasoningEffort: effort || null } } : {}), preserveHistoricalOutputs,
       });
       submittedNodeKeys.current.add(JSON.stringify([g.serviceId, g.projectId, g.graphId, node.id]));
       setSubmittedRunDetails(previous => [...previous.filter(run => run.nodeId !== submitted.nodeId), submitted]);
@@ -1678,30 +1593,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
                   if (!chosenModel) return;
                   setModel(chosenModel); setEffort(e.target.value); act(() => editor.editRunInput(node.id, { ...content, modelOverride: { model: chosenModel, reasoningEffort: e.target.value || null } }));
                 }}><option value="">{inheritedReasoningLabel}</option>{reasoningModel?.reasoningEfforts.map(e => <option key={e}>{e}</option>)}{effort && !reasoningModel?.reasoningEfforts.includes(effort) && <option value={effort}>{t('{effort} (currently unavailable)', {effort})}</option>}</select>);
-  const chooseImageScale = (scale:(typeof IMAGE_SCALES)[number]) => {
-    if(selectedRoute.type==='api' && selectedImageModel && !customImageSizeAllowed){
-      const size=chooseDeclaredImageSize(selectedImageModel,scale,imageOptions.aspectRatio??'auto');
-      if(size)saveImageOptions({size,aspectRatio:nearestImageRatio(size)});
-      return;
-    }
-    const ratio=scale!=='auto' && (imageOptions.aspectRatio??'auto')==='auto'?'1:1':imageOptions.aspectRatio??'auto';
-    saveImageOptions({size:presetImageSize(scale,ratio),aspectRatio:ratio});
-  };
-  const chooseImageRatio = (ratio:string) => {
-    if(selectedRoute.type==='api' && selectedImageModel && !customImageSizeAllowed){
-      const size=chooseDeclaredImageSize(selectedImageModel,selectedImageScale,ratio);
-      if(size)saveImageOptions({size,aspectRatio:ratio});
-      return;
-    }
-    saveImageOptions({aspectRatio:ratio,size:presetImageSize(selectedImageScale,ratio)});
-  };
-  const commitImageDimension = (axis:'width'|'height',raw:string) => {
-    const numeric=Math.max(1,Math.min(3840,Math.floor(Number(raw)||selectedImageDimensions[axis])));
-    const value=snapImageDimensions?Math.ceil(numeric/16)*16:numeric;
-    const dimensions={...selectedImageDimensions,[axis]:value};
-    const size=`${dimensions.width}x${dimensions.height}`;
-    saveImageOptions({size,aspectRatio:nearestImageRatio(size)});
-  };
   const reference = work.nodes.find(n => n.id === referenceId);
   const referenceWire = g.nodes.find(n => n.id === referenceId);
   const referenceContent = object(referenceWire?.content ?? {});
@@ -1827,7 +1718,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         ) : (
           <p>
             {n.type === "image"
-              ? t('Upload an image or enter a prompt to generate one')
+              ? t('Upload an image')
               : t('The node view is missing. Original data was preserved and was not migrated automatically.')}
           </p>
         )}
@@ -1866,9 +1757,60 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       </div>,
     })),
   ];
+  const downloadNodeFile = async (id: string) => {
+    if (downloadingFiles.current.has(id)) return;
+    const wire = g.nodes.find(item => item.id === id);
+    if (!wire || wire.type !== 'file') return;
+    const value = object(wire.content);
+    const source = projectFileSource(value);
+    const projectFile = hasProjectFileSource(value);
+    const request = projectFile ? props.serviceRequest ?? props.request : props.request;
+    const mime = String(value.mime ?? '');
+    const name = String(value.title ?? '');
+    downloadingFiles.current.add(id);
+    setDownloadingFileIds(new Set(downloadingFiles.current));
+    try {
+      let blob: Blob;
+      if (projectFile) {
+        const base = '/v1/projects/' + encodeURIComponent(g.projectId) + '/files';
+        const relativePath = String(source.relativePath);
+        const [observation] = await request<Array<{ state: string; bytes: number; changeToken?: string }>>(base + '/stat', { paths: [relativePath] }, 'POST');
+        if (!observation || observation.state !== 'available') throw Error(t('The project file is currently unavailable.'));
+        const query = new URLSearchParams({ path: relativePath });
+        if (observation.changeToken) query.set('changeToken', observation.changeToken);
+        const path = base + '/content?' + query;
+        const type = fileMime({ name: relativePath, type: mime });
+        if (observation.bytes > PROJECT_FILE_PREVIEW_MAX_BYTES) {
+          const chunks: Blob[] = [];
+          for (let start = 0; start < observation.bytes; start += 1024 * 1024) {
+            const end = Math.min(start + 1024 * 1024 - 1, observation.bytes - 1);
+            const result = await request<{ blob: Blob; start: number; end: number; total: number }>(path, undefined, 'RANGE', { range: { start, end } });
+            if (result.start !== start || result.end !== end || result.total !== observation.bytes || result.blob.size !== end - start + 1) throw Error(t('Unable to view this file.'));
+            chunks.push(result.blob);
+          }
+          blob = new Blob(chunks, { type });
+        } else {
+          const result = await request<{ base64: string }>(path);
+          blob = new Blob([Uint8Array.from(atob(result.base64), character => character.charCodeAt(0))], { type });
+        }
+      } else {
+        const path = graphPath(g.projectId, g.graphId) + '/resources/' + encodeURIComponent(String(value.resourceId)) + '/versions/' + Number(value.resourceVersion) + '/content';
+        blob = await request<Blob>(path, undefined, 'BLOB');
+      }
+      const url = URL.createObjectURL(new Blob([blob], { type: 'application/octet-stream' }));
+      try {
+        const anchor = document.createElement('a');
+        anchor.href = url; anchor.download = fileDownloadName(name, mime, blob.type);
+        document.body.append(anchor); anchor.click(); anchor.remove();
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    } finally {
+      downloadingFiles.current.delete(id);
+      setDownloadingFileIds(new Set(downloadingFiles.current));
+    }
+  };
   const renderNodeTools = (n: WorkNode, menu = false) => <>
     <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} type="button" aria-label={t('View node information')} title={t('View node information')} onClick={() => setNodeInfoId(n.id)}><Info size={16} aria-hidden="true"/></NodeToolButton>
-    {!['group', 'file', 'preview'].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16} aria-hidden="true"/></NodeToolButton>}
+    {!['group', 'file', 'preview', 'image'].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Edit node")} title={t("Edit node")} onClick={() => n.type === "document" ? openDocument(n.id) : setNodeEditorOpen(n.id, true)}><Settings2 size={16} aria-hidden="true"/></NodeToolButton>}
     {!['group', 'execution'].includes(n.type) && !isEmptyProjectFileReference(content) && !isProjectDirectoryReference(content) && (n.type !== 'file' || typeof content.resourceId === 'string' || hasProjectFileSource(content)) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View node content")} title={t("View node content")} onClick={() => { if (n.type === 'preview' && openImageNodePreview(n.id)) return; if (n.type === 'image') { openImageNodePreview(n.id); return; } if (hasProjectFileSource(content)) setReferenceId(n.id); else if (["text", "document"].includes(n.type)) openDocument(n.id); else setReferenceId(n.id); }}><Maximize size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === "text" && typeof object(content.generatedOutput).resourceId === "string" && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("View generated file")} title={t("View generated file")} onClick={() => setGeneratedOutputNodeId(n.id)}><FileText size={16} aria-hidden="true"/></NodeToolButton>}
     {["image", "video"].includes(n.type) && !isProjectFileReference(content) && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Replace media")} title={t("Replace media")} disabled={readOnly || n.readonly || !!draft} onClick={() => { replacement.current = { nodeId: n.id, type: n.type, version: node!.contentVersion, content: node!.content }; file.current?.click(); }}><Replace size={16} aria-hidden="true"/></NodeToolButton>}
@@ -1884,6 +1826,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
       const key = JSON.stringify([g.graphId, content.resourceId, content.resourceVersion, content.title]); const idempotencyKey = resourceSaveKeys.current.get(key) ?? randomId(); resourceSaveKeys.current.set(key, idempotencyKey); await (props.serviceRequest ?? props.request)(graphPath(g.projectId, g.graphId) + "/resources/save-to-library", { resourceId: content.resourceId, expectedVersion: content.resourceVersion, name: String(content.title ?? "Work Graph resource"), idempotencyKey }); resourceSaveKeys.current.delete(key); props.onAssetsChanged?.(); props.onChanged();
     })}><FolderPlus size={16} aria-hidden="true"/></NodeToolButton>}
     {n.type === 'group' && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Ungroup")} title={t("Ungroup")} disabled={!canUngroup} onClick={() => act(ungroupSelection)}><Ungroup size={16} aria-hidden="true"/></NodeToolButton>}
+    {n.type === 'file' && !isProjectDirectoryReference(content) && (hasProjectFileSource(content) || typeof content.resourceId === 'string') && <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t('Download original file')} title={t('Download original file')} disabled={downloadingFileIds.has(n.id)} aria-busy={downloadingFileIds.has(n.id)} onClick={() => act(() => downloadNodeFile(n.id))}><Download size={16} aria-hidden="true"/></NodeToolButton>}
     <NodeToolButton menu={menu} onDismiss={() => setNodeContextMenu(undefined)} aria-label={t("Delete selected node")} title={t("Delete selected node")} disabled={!canDelete([n.id])} onClick={() => act(() => { guardDelete([n.id]); return command([{ type: "node.delete", nodeId: n.id }]); })}><Trash2 size={16} aria-hidden="true"/></NodeToolButton>
   </>;
   return (
@@ -2005,19 +1948,6 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
         <div className="panel-heading"><strong>{t('Undo running task')}</strong></div>
         <p>{stoppingUndoRuns?t('Waiting for the Workspace to stop the task…'):t('Undo has reached a running task. Stop it and continue undoing the Work Graph?')}</p>
         <div className="button-row"><button type="button" disabled={stoppingUndoRuns} onClick={()=>setConfirmUndoRunIds(undefined)}>{t('Keep task')}</button><button type="button" className="primary-button" disabled={stoppingUndoRuns} onClick={()=>act(confirmUndoRunGate)}>{t('Stop task and undo')}</button></div>
-      </section></div>}
-      {imageSettingsOpen && node?.type==='image' && <div className="modal-backdrop" onClick={()=>setImageSettingsOpen(false)}><section className="image-settings-dialog panel" role="dialog" aria-modal="true" aria-label={t('Image settings')} onClick={event=>event.stopPropagation()}>
-        <div className="panel-heading"><strong>{t('Image settings')}</strong><button className="icon-button" aria-label={t('Close image settings')} onClick={()=>setImageSettingsOpen(false)}><X size={16}/></button></div>
-
-        {selectedRoute.type === 'codex' && <label>{t('Reasoning effort')}{reasoningControl}</label>}
-        <fieldset><legend>{t('Quality')}</legend><div className="image-setting-options">{([['auto',t('Auto')],['high',t('High')],['medium',t('Medium')],['low',t('Low')]] as const).map(([value,label])=>{const supported=selectedRoute.type==='codex'||value==='auto'||Boolean(selectedImageModel?.qualities.includes('auto')||selectedImageModel?.qualities.includes(value));return <button type="button" disabled={!supported} aria-pressed={imageOptions.quality===value} className={imageOptions.quality===value?'active':''} onClick={()=>saveImageOptions({quality:value})} key={value}>{label}</button>;})}</div></fieldset>
-        {customImageSizeAllowed ? <div className="image-dimension-section">
-          <div className="image-setting-heading"><span>{t('Size')}</span><label className="image-alignment-toggle"><span>{t('Align to multiples of 16')}</span><input type="checkbox" checked={snapImageDimensions} onChange={event=>setSnapImageDimensions(event.target.checked)}/></label></div>
-          <div className="image-dimension-inputs"><label><span>W</span><input aria-label={t('Image width')} type="number" min="1" max="3840" key={`width-${selectedImageDimensions.width}`} defaultValue={selectedImageDimensions.width} onBlur={event=>commitImageDimension('width',event.currentTarget.value)} onKeyDown={event=>{if(event.key==='Enter')event.currentTarget.blur();}}/></label><span>×</span><label><span>H</span><input aria-label={t('Image height')} type="number" min="1" max="3840" key={`height-${selectedImageDimensions.height}`} defaultValue={selectedImageDimensions.height} onBlur={event=>commitImageDimension('height',event.currentTarget.value)} onKeyDown={event=>{if(event.key==='Enter')event.currentTarget.blur();}}/></label></div>
-          {customSizeIssue && <p className="image-setting-error" role="status">{t('The size was not saved. Check the notification.')}</p>}
-        </div> : <label>{t('Model size')}<select aria-label={t('Image size')} value={imageOptions.size} onChange={event=>saveImageOptions({size:event.target.value,aspectRatio:nearestImageRatio(event.target.value)})}>{availableImageSizes.map(size=><option value={size} key={size}>{size.replace('x',' × ')}</option>)}</select></label>}
-        <fieldset><legend>{t('Resolution')}</legend><div className="image-setting-options">{IMAGE_SCALES.map(scale=>{const supported=availableImageScales.includes(scale);return <button type="button" disabled={!supported} aria-pressed={selectedImageScale===scale} className={selectedImageScale===scale?'active':''} onClick={()=>chooseImageScale(scale)} key={scale}>{scale==='auto'?t('Auto'):scale.toUpperCase()}</button>;})}</div></fieldset>
-        <fieldset><legend>{t('Aspect ratio')}</legend><div className="image-aspect-options">{availableImageRatios.map(value=><button type="button" aria-pressed={imageOptions.aspectRatio===value} className={imageOptions.aspectRatio===value?'active':''} onClick={()=>chooseImageRatio(value)} key={value}>{value==='auto'?t('Auto'):value}</button>)}</div></fieldset>
       </section></div>}
       {props.sidebarTarget && createPortal(<>
         <div className="node-outline-controls">
@@ -2188,7 +2118,7 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
           onError={props.onError}
           shouldOpenNodeOnDoubleClick={n => hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null)}
           canEditTextOnSpace={n => !hasProjectFileSource(g.nodes.find(item => item.id === n.id)?.content ?? null) && !locked(n.id) && !state.drafts.some(d => d.nodeId === n.id && ['conflict', 'recovery'].includes(d.state))}
-          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (isProjectDirectoryReference(openedContent)) props.onOpenProjectDirectory?.(String(projectFileSource(openedContent).relativePath)); else if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setNodeEditorOpen(n.id, true); }}
+          onOpenNode={(n) => { selectNodes([n.id]); const openedContent = g.nodes.find(item => item.id === n.id)?.content ?? {}; if (isProjectDirectoryReference(openedContent)) props.onOpenProjectDirectory?.(String(projectFileSource(openedContent).relativePath)); else if (hasProjectFileSource(openedContent)) setReferenceId(n.id); else if (n.type === "image") { openImageNodePreview(n.id); } else if (n.type === "document") openDocument(n.id); else if (n.type === 'file') { if (typeof object(openedContent).resourceId === 'string') setReferenceId(n.id); } else setNodeEditorOpen(n.id, true); }}
           onActivateNode={n => {
             const sourceContent = g.nodes.find(node => node.id === n.id)?.content ?? null;
             if (isProjectDirectoryReference(sourceContent)) { props.onOpenProjectDirectory?.(String(projectFileSource(sourceContent).relativePath)); return; }
@@ -2345,36 +2275,26 @@ export function GraphWorkspace(props: GraphWorkspaceProps) {
               skillBackendName={node.type !== "image" ? agentDescriptor?.name : undefined}
               nativeSkillsSupported={node.type === "image" || agents.mode === "legacy" ? true : !!pendingAgent && agentDescriptor?.capabilities.nativeSkills === true}
               configuredSkillsSupported={node.type === "image" || agents.mode === "legacy" ? true : !!pendingAgent && agentDescriptor?.capabilities.configuredSkills === true}
-              skillEnabled={node.type !== "image" || selectedRoute.type === "codex"}
+              skillEnabled={node.type !== "image"}
               skillReferences={(Array.isArray(content.skillReferences) ? content.skillReferences : []) as unknown as SkillReference[]}
               features={((Array.isArray(content.features) ? content.features : []) as unknown[]).filter(isVisualizeFeatureSelection)}
               onFeaturesChange={node.type === 'execution' ? features => act(() => { guardLayout([node.id]); const current = editor.nodeContent(node.id); editor.editRunInput(node.id, { ...current, features: features as unknown as Json }); }) : undefined}
               mentionRequest={props.serviceRequest ?? props.request}
               mentionProjectId={g.projectId}
               onOpenProjectFile={item => item.kind === 'directory' ? props.onOpenProjectDirectory?.(item.relativePath) : setPromptProjectFile({ path:item.relativePath, name:item.name })}
-              placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : node.type === "image" ? t("Describe the image you want to generate…") : node.type === "visualize" ? t("Describe the interactive page you want to create or revise…") : t("Describe how you want to revise this text")}
+              placeholder={node.type === "execution" ? t("Describe the work you want to complete…") : node.type === "visualize" ? t("Describe the interactive page you want to create or revise…") : t("Describe how you want to revise this text")}
               status={running ? t("Saving and submitting…") : node.type === 'visualize' && selectedRun ? runStatusLabels[selectedRun.status] : locked(node.id) ? t("Locked while running") : unavailableReason}
               submitting={running}
               runHint={unavailableReason}
               additionalWarnings={draft && ["conflict", "failed", "recovery"].includes(draft.state) ? draftNotices(draft, locked(node.id)).map(notice => t(notice)) : []}
               runLabel={node.type === "execution" ? t("Run") : t("Generate")}
-              controls={<div className={node.type === 'image' ? 'image-prompt-settings' : 'prompt-model-settings'}>
-                {node.type==='image' && showModelControls && <>
-                <label className="image-toolbar-route" title={t('Generation method')}><select aria-label={t('Image generation method')} value={selectedRoute.type==='api'?selectedRoute.providerId:'codex'} disabled={promptDisabled} onChange={e => {
-                  const provider=imageProviders.find(item=>item.id===e.target.value);
-                  const providerModel=provider?(provider.models.find(item=>item.isDefault)??provider.models[0]):undefined;
-                  saveImageRoute(provider?{type:'api',providerId:provider.id,modelId:providerModel?.id??'',options:providerModel?normalizeImageOptionsForModel(imageOptions,providerModel):imageOptions}:{type:'codex',options:imageOptions});
-                }}><option value="codex">{t('Codex image generation')}</option>{imageProviders.map(provider=><option key={provider.id} value={provider.id}>{provider.models.length ? provider.name : t('{name} (no model selected)', {name:provider.name})}</option>)}</select></label>
-                {selectedRoute.type==='api' && <label className="image-toolbar-model" title={t('Image model')}><select aria-label={t('Image model')} value={selectedRoute.modelId} disabled={promptDisabled||!selectedProvider?.models.length} onChange={event=>{const nextModel=selectedProvider?.models.find(item=>item.id===event.target.value);saveImageRoute({...selectedRoute,modelId:event.target.value,options:nextModel?normalizeImageOptionsForModel(imageOptions,nextModel):imageOptions});}}>{selectedProvider?.models.length?<>{selectedProvider.models.map(item=><option key={item.id} value={item.id}>{item.name || item.id}</option>)}</>:<option value="">{t('No image model has been added. Configure one in Workspace management first.')}</option>}</select></label>}
-
-                </>}
+              controls={<div className="prompt-model-settings">
                 {showModelControls && node.type !== 'image' && agentModelControl}
-                {showModelControls && (node.type==='image' ? selectedRoute.type==='codex' : agents.mode==='legacy') && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
+                {showModelControls && node.type !== 'image' && agents.mode==='legacy' && <><select aria-label={t('Run model')} title={t('Run model')} value={model} disabled={promptDisabled} onChange={e => {
                   setModel(e.target.value); setEffort(""); act(() => editor.editRunInput(node.id, { ...content, modelOverride: e.target.value ? { model: e.target.value, reasoningEffort: null } : null }));
                 }}><option value="">{models?.selection?.model ?? t('Workspace default')}</option>{models?.available.map(m => <option key={m.id}>{m.id}</option>)}{model && !models?.available.some(m => m.id === model) && <option value={model}>{t('{model} (currently unavailable)', {model})}</option>}</select>
                 {node.type !== 'image' && reasoningControl}</>}
                 {node.type !== 'image' && agents.mode !== 'legacy' && reasoningControl}
-                {node.type === 'image' && <button type="button" className="image-settings-trigger" aria-label={t('Image settings')} aria-haspopup="dialog" aria-expanded={imageSettingsOpen} title={t('Image settings: quality, size, aspect ratio, and reasoning effort')} disabled={promptDisabled} onClick={()=>setImageSettingsOpen(true)}><Settings2 size={14}/><span>{imageOptions.quality==='auto'?t('Auto'):t({high:'High',medium:'Medium',low:'Low'}[imageOptions.quality!])} · {imageOptions.aspectRatio === 'auto' ? t('Auto ratio') : imageOptions.aspectRatio}</span></button>}
               </div>}
             >
             {node.type === 'visualize' && selectedRun && progress[selectedRun.id]?.error && <p role="status">{progress[selectedRun.id]?.error}</p>}

@@ -13,8 +13,8 @@ export const opaqueFileMime = isOpaqueResourceMime;
 export const mimeMatchesBytes = (declared: string, sniffed: string, allowGenericOctet = false): boolean =>
  declared === sniffed ||
  (allowGenericOctet && declared === 'application/octet-stream') ||
- (sniffed === 'text/plain' && (supportsText(declared) || declared === 'application/octet-stream' || opaqueFileMime(declared))) ||
- (sniffed === 'application/octet-stream' && opaqueFileMime(declared));
+ opaqueFileMime(declared) ||
+ (sniffed === 'text/plain' && (supportsText(declared) || declared === 'application/octet-stream'));
 export const hashBytes = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 function blobRoot(input: string): string {
  const root = resolve(input);
@@ -87,7 +87,7 @@ export class BlobStore {
  /** Binary publication avoids retaining entire files in memory. Text still uses
   * prepare() so UTF-8 and structured JSON validation remain complete. */
  async prepareStream(chunks: AsyncIterable<Uint8Array>, declaredMime: string, expected: {bytes: number; sha256: string}): Promise<PreparedBlob> {
-  if (supportsText(declaredMime) || !validMime(declaredMime) || !Number.isSafeInteger(expected.bytes) || expected.bytes < 1 || expected.bytes > this.maxBytes || !/^[a-f0-9]{64}$/.test(expected.sha256)) throw new ServiceError('INVALID_REQUEST','Invalid streamed resource');
+  if (supportsText(declaredMime) || !validMime(declaredMime) || !Number.isSafeInteger(expected.bytes) || expected.bytes < 0 || expected.bytes > this.maxBytes || !/^[a-f0-9]{64}$/.test(expected.sha256)) throw new ServiceError('INVALID_REQUEST','Invalid streamed resource');
   const directory=await this.directory('objects'), path=join(directory,randomUUID());
   const file=await open(path,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
   let completed=false;
@@ -99,7 +99,7 @@ export class BlobStore {
     bytes+=chunk.byteLength;hash.update(chunk);await file.writeFile(chunk);
    }
    if (bytes!==expected.bytes || hash.digest('hex')!==expected.sha256) throw new ServiceError('INVALID_REQUEST','Output size/hash mismatch');
-   if (!mimeMatchesBytes(declaredMime,sniffMime(prefix))) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Output MIME does not match bytes');
+   if (!mimeMatchesBytes(declaredMime,sniffMime(prefix),true)) throw new ServiceError('UNSUPPORTED_MEDIA_TYPE','Output MIME does not match bytes');
    const {mime}=validateResourceBytes(prefix,declaredMime);
    await file.sync();await file.chmod(0o400);await file.close();await syncDirectory(directory);
    const result=Object.freeze({sha256:expected.sha256,bytes,mime,path,text:null});

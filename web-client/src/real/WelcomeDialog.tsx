@@ -5,7 +5,6 @@ import './WelcomeDialog.css';
 import webClientPackage from '../../package.json';
 import { WelcomeRuntimePairing } from './WelcomeRuntimePairing';
 import { WelcomeAgentSetup } from './WelcomeAgentSetup';
-import { WelcomeImageSetup } from './WelcomeImageSetup';
 import { WelcomeSkillsSetup } from './WelcomeSkillsSetup';
 import { WelcomeWorkspaceSetup } from './WelcomeWorkspaceSetup';
 import { WelcomeGraphSetup } from './WelcomeGraphSetup';
@@ -22,9 +21,9 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(true);
-  const [page, setPage] = useState<0 | 1 | 2 | 3 | 4 | 5 | 6>(0);
-  const steps = ['Welcome to Workgraph', 'Connect Workspace', 'Set up Agent', 'Set up project workspace', 'Set up image models', 'Install skills', 'Create your first Work Graph'] as const;
-  const stepLabels = [t('Welcome'), t('Workspace'), t('Agent'), t('Project workspace'), t('Image models'), t('Skills'), t('Work Graph')];
+  const [page, setPage] = useState<0 | 1 | 2 | 3 | 4 | 5>(0);
+  const steps = ['Welcome to Workgraph', 'Connect Workspace', 'Set up Agent', 'Set up project workspace', 'Install skills', 'Create your first Work Graph'] as const;
+  const stepLabels = [t('Welcome'), t('Workspace'), t('Agent'), t('Project workspace'), t('Skills'), t('Work Graph')];
   const [setupProjectId, setSetupProjectId] = useState('');
   const [setupServiceId, setSetupServiceId] = useState('');
   const [busy, setBusy] = useState(false);
@@ -127,14 +126,14 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
             <li>
               <h3>{t('Start Workspace')}</h3>
               <p>{t('Run this command in a terminal on the device that will run your Workspace:')}</p>
-              <WelcomeCommand command="npx openworkgraph@latest start" copyLabel={t('Copy start command')} />
-              <p className="welcome-start-note">{t('Requires Node.js 24+. No global installation needed; the first run downloads the required package.')}</p>
+              <WelcomeCommand command="npm install -g openworkgraph" copyLabel={t('Copy installation command')} />
+              <WelcomeCommand command="openworkgraph start" copyLabel={t('Copy start command')} />
+              <p className="welcome-start-note">{t('Requires Node.js 24+.')}</p>
               <details className="welcome-start-options">
                 <summary>{t('Other startup options')}</summary>
                 <div className="welcome-start-options-content">
-                  <p>{t('For frequent use, install the CLI globally, then start your Workspace:')}</p>
-                  <WelcomeCommand command="npm install -g openworkgraph" copyLabel={t('Copy installation command')} />
-                  <WelcomeCommand command="openworkgraph start" copyLabel={t('Copy global start command')} />
+                  <p>{t('Start without a global installation:')}</p>
+                  <WelcomeCommand command="npx openworkgraph@latest start" copyLabel={t('Copy npx start command')} />
                 </div>
               </details>
             </li>
@@ -150,14 +149,11 @@ export function WelcomeDialog({ registry, theme, onPairingStart, onModelsChanged
         <section className="welcome-page welcome-agent-page welcome-workspace-page" aria-label={t('Set up project workspace')} inert={page !== 3}>
           {page === 3 && <WelcomeWorkspaceSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={id => { setSetupProjectId(id); setPage(4); }} onSkip={() => { setSetupProjectId(''); setPage(4); }} />}
         </section>
-        <section className="welcome-page welcome-agent-page welcome-image-page" aria-label={t('Set up image models')} inert={page !== 4}>
-          {page === 4 && <WelcomeImageSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={() => setPage(5)} />}
+        <section className="welcome-page welcome-agent-page welcome-skills-page" aria-label={t('Install skills')} inert={page !== 4}>
+          {page === 4 && <WelcomeSkillsSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={() => setPage(5)} />}
         </section>
-        <section className="welcome-page welcome-agent-page welcome-skills-page" aria-label={t('Install skills')} inert={page !== 5}>
-          {page === 5 && <WelcomeSkillsSetup registry={registry} serviceId={setupServiceId} onBusy={setBusy} onComplete={() => setPage(6)} />}
-        </section>
-        <section className="welcome-page welcome-agent-page welcome-graph-page" aria-label={t('Create your first Work Graph')} inert={page !== 6}>
-          {page === 6 && <WelcomeGraphSetup registry={registry} serviceId={setupServiceId} projectId={setupProjectId} onBusy={setBusy} onSetupWorkspace={() => setPage(3)} onComplete={(projectId, graphId) => { setOpen(false); onComplete(setupServiceId, projectId, graphId); }} />}
+        <section className="welcome-page welcome-agent-page welcome-graph-page" aria-label={t('Create your first Work Graph')} inert={page !== 5}>
+          {page === 5 && <WelcomeGraphSetup registry={registry} serviceId={setupServiceId} projectId={setupProjectId} onBusy={setBusy} onSetupWorkspace={() => setPage(3)} onComplete={(projectId, graphId) => { setOpen(false); onComplete(setupServiceId, projectId, graphId); }} />}
         </section>
       </div>
     </dialog>

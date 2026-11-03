@@ -46,6 +46,8 @@ node agent-service/dist/cli.js stop
 
 前台日志输出到终端；后台日志追加到数据目录下的 `logs/service-YYYY-MM-DD.log`（默认 `~/.openworkgraph/logs/`），按 UTC 日期保留当天及前 6 天。后台默认只记录关键事件、警告和错误；`NODE_ENV=production` 对前后台均启用精简日志，`NODE_ENV=development` 启用详细日志，未设置环境的前台保留详细日志。
 
+图片节点仅保留内容、预览和历史。专用 Codex/API 生图及生图设置已移除；需要生成图片时，可通过执行节点和生图技能完成。
+
 ### OpenCode 执行器
 
 OpenCode 集成依赖由万象画布安装流程自动配置，无须单独安装 SDK。最低支持 OpenCode 2.0.0（稳定版 >= 2.0.0），由工作空间为每次执行启动独立原生实例，不接管用户已有会话。在工作空间设备使用 OpenCode 原生方式配置提供商、模型及认证，再到 Agent 设置页启用并选择模型；Web 使用固定的 build 角色，提交前可通过与 Codex 相同的思考强度选择框调节原生模型变体，由插件转换参数。目录查询不触发模型推理。若提示集成依赖未安装完整，在工作空间设备执行 `npm install -g openworkgraph --include=optional`，然后重启工作空间并刷新 Agent 目录；显式省略可选依赖会跳过 OpenCode 集成。

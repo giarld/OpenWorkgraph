@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 // Development-only prepack. Installed tarballs need no source workspace or
-// build tools; the packaged postinstall only repairs optional SDK dependencies.
+// build tools. Postinstall only repairs optional SDK dependencies.
 for (const cwd of [join(root, '..', 'packages', 'protocol'), root]) {
   const packageRoot = resolve(cwd);
   const output = resolve(packageRoot, 'dist');

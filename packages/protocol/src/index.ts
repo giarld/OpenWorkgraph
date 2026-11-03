@@ -8,11 +8,12 @@ export * from './graph-title.js';
 export * from './node-title.js';
 export * from './graph-binary.js';
 export * from './agents.js';
+export * from './builtin-agent.js';
 export * from './agent-forms.js';
 export * from './approval-permissions.js';
 export * from './workgraph-cli.js';
 export const PROTOCOL_VERSION = '1.0' as const;
-export const SERVICE_VERSION = '0.6.0' as const;
+export const SERVICE_VERSION = '0.7.2' as const;
 /** Work Graph uploads use the UI's binary MB convention. */
 export const WORKGRAPH_UPLOAD_MAX_BYTES = 300 * 1024 * 1024;
 export const WORKGRAPH_TRANSFER_TOTAL_BYTES = 1024 * 1024 * 1024;
@@ -89,7 +90,7 @@ export interface CanvasResourceVersion { resourceId: string; version: number; mi
 export interface CanvasResource extends GraphScope { id: string; name: string; current: CanvasResourceVersion }
 export interface LibraryAsset extends Scope { id: string; name: string; shared: boolean; deleted: boolean; current: AssetVersion }
 export interface CanvasResourceCreated { resource: CanvasResource; referenceId: string }
-export interface ResourceEnvelope { kind: 'text' | 'image' | 'document' | 'video' | 'file'; sourceNodeIds: string[]; text: string | null; resource: CanvasResourceVersion | null }
+export interface ResourceEnvelope { kind: 'text' | 'image' | 'document' | 'video' | 'audio' | 'file'; sourceNodeIds: string[]; text: string | null; resource: CanvasResourceVersion | null }
 export interface ProjectFileInput { kind: ResourceEnvelope['kind']; relativePath: string; entryKind?: 'directory'; sourceNodeIds: string[]; edgeIds: string[] }
 /** Resource copies have no source asset binding. Upload IDs come from a future validated upload pipeline. */
 export interface CanvasUploadRequest extends GraphScope { uploadId: string; name: string; idempotencyKey: string }
@@ -102,6 +103,7 @@ export interface ResourceControl {
   listSameNameAssets(scope: Scope, name: string): Promise<LibraryAsset[]>;
   readCanvasVersion(scope: GraphScope, resourceId: string, version: number): Promise<CanvasResourceVersion>;
 }
+/** Legacy image-run data retained for historical snapshots; new dedicated image runs are rejected. */
 export interface ImageGenerationOptions { quality?: 'auto' | 'high' | 'medium' | 'low'; size?: string; aspectRatio?: string; outputFormat?: 'png' | 'jpeg' | 'webp' }
 export type ImageRoute = { type: 'codex'; options?: ImageGenerationOptions } | { type: 'api'; providerId: string; modelId: string; options?: ImageGenerationOptions };
 export type ImageInputMode = 'text' | 'image' | 'text_image';

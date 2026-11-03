@@ -226,7 +226,7 @@ export class InputPreparation {
           const row = this.db.prepare('SELECT v.*,b.bytes FROM canvas_resources r JOIN canvas_resource_versions v ON v.resource_id=r.id JOIN blobs b ON b.sha256=v.sha256 WHERE r.id=? AND r.graph_id=? AND v.version=?').get(resourceId,graphId,version);
           if (!row || !/^[a-f0-9]{64}$/.test(String(row['sha256']))) { issue(id,'Canvas resource/version is missing or belongs to another graph'); continue; }
           resource = {resourceId,version,mime:String(row['mime']),bytes:Number(row['bytes']),sha256:String(row['sha256']),representationVersion:row['representation_version'] === null ? null : Number(row['representation_version'])};
-          if ((mapping.kind === 'image' && !resource.mime.startsWith('image/')) || (mapping.kind === 'video' && !resource.mime.startsWith('video/'))) { issue(id,'Resource MIME does not match declared kind'); continue; }
+          if ((mapping.kind === 'image' && !resource.mime.startsWith('image/')) || (mapping.kind === 'video' && !resource.mime.startsWith('video/')) || (mapping.kind === 'audio' && !resource.mime.startsWith('audio/'))) { issue(id,'Resource MIME does not match declared kind'); continue; }
           let prepared: PreparedRepresentation | null | undefined;
           try { prepared = this.options.readRepresentation?.(resource); }
           catch { issue(id,'Prepared representation is unavailable'); continue; }
@@ -237,9 +237,11 @@ export class InputPreparation {
             if (typeof prepared.text !== 'string' || createHash('sha256').update(prepared.text).digest('hex') !== prepared.contentHash) { issue(id,'Prepared text hash mismatch'); continue; }
             if (text === null) text = prepared.text;
           }
-          if ((mapping.kind === 'video' || mapping.kind === 'document') && (!text?.trim() || resource.representationVersion === null || !prepared.text?.trim())) { issue(id,'Document/video requires a versioned text representation'); continue; }
+          // Video stays an authenticated original file. Its selected Agent owns
+          // native-media support or file-tool inspection; extraction is optional.
+          if (mapping.kind === 'document' && (!text?.trim() || resource.representationVersion === null || !prepared.text?.trim())) { issue(id,'Document requires a versioned text representation'); continue; }
         }
-        if (['image','video','file'].includes(mapping.kind) && !resource) { issue(id,'File/media requires an independent canvas resource'); continue; }
+        if (['image','video','audio','file'].includes(mapping.kind) && !resource) { issue(id,'File/media requires an independent canvas resource'); continue; }
         if (!resource && !text?.trim()) { issue(id,'Resource has no readable content'); continue; }
         const textBytes=Buffer.byteLength(text ?? ''),resourceBytes=resource?.bytes ?? 0,itemBytes=textBytes+resourceBytes;
         if (!Number.isSafeInteger(itemBytes) || itemBytes < 0) issue(id,'Resource size is invalid','INPUT_BUDGET_EXCEEDED');

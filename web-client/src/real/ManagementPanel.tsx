@@ -5,18 +5,18 @@ import { useWorkspaceAgents, type WorkspaceAgentStore } from './agent-state';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
 import { randomId } from "../adapter/random";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, Image, ArrowLeftRight, ChevronDown, Settings2, Pencil, HardDrive } from 'lucide-react';
-import type { Backup, BackupRestoreChallenge, WorkspaceMaintenance, GraphBundle, ModelDefaults, Project, ProjectCandidates, Session, ExecutionSettings, SandboxMode, ImageProvider } from '../../../packages/protocol/src/index';
+import { Check, Folder, FolderPlus, Plus, RefreshCw, CircleAlert, ArrowLeft, Monitor, Archive, ShieldCheck, SlidersHorizontal, ArrowLeftRight, ChevronDown, Settings2, Pencil, HardDrive } from 'lucide-react';
+import type { Backup, BackupRestoreChallenge, WorkspaceMaintenance, GraphBundle, ModelDefaults, Project, ProjectCandidates, Session, ExecutionSettings, SandboxMode } from '../../../packages/protocol/src/index';
 import { createWorkGraphArchive, readWorkGraphFile } from './workgraph-archive';
 import { useI18n } from '../i18n/I18nProvider';
 import { errorCode } from './contracts';
 import './ManagementPanel.css';
 
-export type ManagementPage = 'projects' | 'add' | 'settings' | 'agents' | 'images' | 'storage' | 'backups' | 'sessions' | 'transfer' | 'data-sources';
+export type ManagementPage = 'projects' | 'add' | 'settings' | 'agents' | 'storage' | 'backups' | 'sessions' | 'transfer' | 'data-sources';
 type SettingsPage = Exclude<ManagementPage, 'projects' | 'add' | 'settings'>;
 const pageTitles: Record<ManagementPage, string> = {
   projects: 'Project management', add: 'Add project', settings: 'More management',
-  agents: 'Agent settings', images: 'Image generation agent · API providers',
+  agents: 'Agent settings',
   storage: 'Storage data management', backups: 'Workspace backups and restore',
   'data-sources': 'Data sources', sessions: 'Browser sessions', transfer: 'Work Graph import and export',
 };
@@ -62,8 +62,6 @@ const formatSize = (bytes: number) => {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(bytes / 1024 ** unit) + ' ' + ['B', 'KB', 'MB', 'GB', 'TB'][unit];
 };
 type Resource<T> = { data?: T; loading: boolean; error?: string };
-type DiscoveredImageModel = { id: string; name: string; selected: boolean };
-const providerSnapshot = (id: string, name: string, endpoint: string, enabled: boolean) => JSON.stringify([id, name, endpoint, enabled]);
 const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'string' ? error : 'Request failed. Check the Workspace connection and try again.';
 const encode = encodeURIComponent;
 const localTime = (value: string) => {
@@ -132,15 +130,6 @@ export function ManagementPanel(props: ManagementPanelProps) {
   const legacyAgents = agents.mode === 'legacy';
   const models = useResource<ModelDefaults>('/v1/models', props, showAgents && legacyAgents);
   const execution = useResource<ExecutionSettings>('/v1/execution-settings', props, showAgents && legacyAgents);
-  const imageProviders = useResource<ImageProvider[]>('/v1/image-providers', props, page === 'settings' || page === 'images');
-  const [providerId, setProviderId] = useState('');
-  const [providerName, setProviderName] = useState('');
-  const [providerEndpoint, setProviderEndpoint] = useState('https://api.openai.com');
-  const [providerEnabled, setProviderEnabled] = useState(true);
-  const [savedProvider, setSavedProvider] = useState(() => providerSnapshot('', '', 'https://api.openai.com', true));
-  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredImageModel[]>([]);
-  const [savedDiscoveredModels, setSavedDiscoveredModels] = useState('[]');
-  const [imageSecret, setImageSecret] = useState('');
   const [sandbox, setSandbox] = useState<SandboxMode>('workspace-write');
   const [savedSandbox, setSavedSandbox] = useState<SandboxMode>('workspace-write');
   useEffect(() => { if (execution.data) { setSandbox(execution.data.sandboxMode); setSavedSandbox(execution.data.sandboxMode); } }, [execution.data]);
@@ -159,9 +148,7 @@ export function ManagementPanel(props: ManagementPanelProps) {
   useEffect(() => { props.onBusyChange?.(pending); }, [pending, props.onBusyChange]);
   useEffect(() => () => props.onBusyChange?.(false), [props.onBusyChange]);
   const dirty = agentDirty || Boolean(
-    (manualOpen && path.trim()) || (repair && repair.path !== repair.originalPath) || file || imageSecret
-    || providerSnapshot(providerId, providerName, providerEndpoint, providerEnabled) !== savedProvider
-    || JSON.stringify(discoveredModels) !== savedDiscoveredModels
+    (manualOpen && path.trim()) || (repair && repair.path !== repair.originalPath) || file
     || sandbox !== savedSandbox || model !== savedModel.model || effort !== savedModel.effort
   );
   useEffect(() => { props.onDirtyChange?.(dirty); }, [dirty, props.onDirtyChange]);
@@ -203,21 +190,6 @@ export function ManagementPanel(props: ManagementPanelProps) {
   }, [models.data]);
   const selectedProject = projects.data?.find(p => p.projectId === projectId);
   const selectedModel = models.data?.available.find(m => m.id === model);
-  const selectedProvider = imageProviders.data?.find(p => p.id === providerId);
-  function resetProviderForm(provider?: ImageProvider) {
-    const id = provider?.id ?? '', name = provider?.name ?? '', endpoint = provider?.endpoint ?? 'https://api.openai.com', enabled = provider?.enabled ?? true;
-    setProviderId(id); setProviderName(name); setProviderEndpoint(endpoint); setProviderEnabled(enabled);
-    setSavedProvider(providerSnapshot(id, name, endpoint, enabled));
-  }
-  useEffect(() => {
-    if(!selectedProvider)return;
-    resetProviderForm(selectedProvider);
-  },[selectedProvider?.id,selectedProvider?.revision]);
-  useEffect(() => {
-    setDiscoveredModels([]);
-    setSavedDiscoveredModels('[]');
-  },[selectedProvider?.id]);
-
   async function act(label: string, work: (valid: () => boolean) => Promise<void>, scoped = false, writing = true) {
     if (lock.current || revoked || (writing && latest.current.readOnly)) return;
     lock.current = true; setBusy(label); setNotice(''); setFailure('');
@@ -257,7 +229,6 @@ export function ManagementPanel(props: ManagementPanelProps) {
     'Agent settings': { page: 'agents', icon: SlidersHorizontal, group: t('Agents and models'), summary: agents.mode === 'loading' ? t('Loading…') : agents.error ? t('Loading failed · Expand to retry') : t('Permissions, Agent configuration, and default model') },
     'Agent permissions': { page: 'agents', icon: ShieldCheck, group: t('Agents and models'), summary: resourceSummary(execution, t('{mode} · Applies to new tasks', { mode: { 'read-only': t('Read-only'), 'workspace-write': t('Workspace write'), 'danger-full-access': t('Full access') }[execution.data?.sandboxMode ?? 'workspace-write'] })) },
     'Workspace default model': { page: 'agents', icon: SlidersHorizontal, summary: resourceSummary(models, models.data?.selection?.model ?? t('No default model set')) },
-    'Image generation agent · API providers': { page: 'images', icon: Image, summary: resourceSummary(imageProviders, imageProviders.data?.length ? t('{count} providers · Independent image generation settings', { count: imageProviders.data.length }) : t('Add providers, credentials, and image models')) },
     'Work Graph import and export': { page: 'transfer', icon: ArrowLeftRight, group: t('Data and backups'), summary: t('Import or export ZIP Work Graph packages') },
     'Storage data management': { page: 'storage', icon: HardDrive, summary: resourceSummary(storage, storage.data ? t('Workspace data: {size}', { size: formatSize(storage.data.totalBytes) }) : t('View Workspace storage and clean unused resource copies')) },
     'Workspace backups and restore': { page: 'backups', icon: Archive, summary: resourceSummary(backups, backups.data?.length ? t('{count} backups · Restore Workspace', { count: backups.data.length }) : t('Back up and restore the entire Workspace')) },
@@ -386,58 +357,6 @@ export function ManagementPanel(props: ManagementPanelProps) {
         <label>{t('Reasoning effort')}<select aria-label={t('Reasoning effort')} value={effort} onChange={event => setEffort(event.target.value)} disabled={writeDisabled || !selectedModel}><option value="">{t('Use Workspace default effort')}</option>{selectedModel?.reasoningEfforts.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
         <button type="submit" disabled={writeDisabled || !selectedModel || Boolean(effort && !selectedModel.reasoningEfforts.includes(effort))}>{t('Save default model')}</button>
       </form></>}
-    </>)}
-    {section('Image generation agent · API providers', <>
-      <Status value={imageProviders} retry={imageProviders.reload} />
-      <button type="button" onClick={imageProviders.reload}>{t('Refresh image generation catalog')}</button>
-      <p>{t('The image generation API is independent of Codex image generation. After saving a provider and API key, choose which provider models image nodes may use.')}</p>
-      <label>{t('Provider instance')}<select aria-label={t('Image generation provider')} value={providerId} onChange={event => { resetProviderForm(imageProviders.data?.find(provider => provider.id === event.target.value));setDiscoveredModels([]);setSavedDiscoveredModels('[]');setImageSecret(''); }}>
-        <option value="">{t('Add new provider')}</option>{providerId && !selectedProvider && <option value={providerId}>{t('New provider')} · {providerId}</option>}{imageProviders.data?.map(item => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}
-      </select></label>
-      {!selectedProvider && <label>{t('New provider ID')}<input value={providerId} onChange={event => setProviderId(event.target.value)} disabled={writeDisabled} placeholder={t('For example, openai-main')} /></label>}
-      <form autoComplete="off" onSubmit={event => { event.preventDefault(); const secret=imageSecret; void act(t('Save image generation provider'),async valid => {
-        const saved=await props.request<ImageProvider>('/v1/image-providers',{id:providerId,name:providerName,driver:'openai',endpoint:providerEndpoint,enabled:providerEnabled,expectedRevision:selectedProvider?.revision??0},'POST');
-        if(!valid())return;
-        resetProviderForm(saved);
-        if(secret){
-          try { await props.request('/v1/image-providers/'+encode(saved.id)+'/credential',{secret,expectedRevision:saved.revision},'POST'); }
-          catch(error){ await imageProviders.reload(); throw new Error(t('Provider settings were saved, but the API key could not be saved: {error}', { error: message(error) })); }
-          if(!valid())return;
-          setImageSecret('');
-        }
-        setNotice(secret ? t('Provider settings and API key were confirmed by the Workspace.') : t('Provider settings were confirmed by the Workspace.'));latest.current.onChanged();await imageProviders.reload();
-      }); }}>
-        <label>{t('Display name')}<input value={providerName} onChange={event => setProviderName(event.target.value)} disabled={writeDisabled} required /></label>
-        <label>{t('Registered API base URL')}<input type="url" value={providerEndpoint} onChange={event => setProviderEndpoint(event.target.value)} disabled={writeDisabled} required /></label>
-        <label>API Key<input type="password" autoComplete="new-password" value={imageSecret} onChange={event => setImageSecret(event.target.value)} disabled={writeDisabled} placeholder={selectedProvider?.credentialConfigured ? t('Leave blank to keep the current API key') : t('Enter provider API key')} /></label>
-        <p>{selectedProvider ? t('Current credential: {state}. Leaving this blank keeps the credential unchanged.', { state: selectedProvider.credentialConfigured ? t('configured (cannot be read back)') : t('not configured or must be re-entered after restore') }) : t('Save it while creating the provider, or leave it blank and add it later.')} {t('The API key is stored only on the Workspace computer and is not included in Work Graphs or backups.')}</p>
-        <label className="management-checkbox"><input type="checkbox" checked={providerEnabled} onChange={event => setProviderEnabled(event.target.checked)} disabled={writeDisabled} />{t('Enable new task submissions')}</label>
-        <button type="submit" disabled={writeDisabled || !providerId.trim() || !providerName.trim()}>{t('Save provider settings')}</button>
-      </form>
-      {selectedProvider && <>
-        <p>{t('Revision')} {selectedProvider.revision} · {selectedProvider.enabled ? t('Enabled') : t('Disabled')}</p>
-        <div className="management-danger-actions"><button type="button" disabled={writeDisabled || !selectedProvider.credentialRevision} onClick={() => confirm(t('Revoke all previous credential versions for this provider? Accepted but unsent requests will no longer continue.'),()=>{void mutate(t('Revoke image generation credentials'),'/v1/image-providers/'+encode(selectedProvider.id)+'/credential-revoke',{expectedRevision:selectedProvider.revision},imageProviders.reload);})}>{t('Revoke credentials')}</button>
-        <button type="button" disabled={writeDisabled} onClick={() => confirm(t('Delete provider “{name}”? New tasks can no longer use it; accepted tasks retain frozen settings.', { name: selectedProvider.name }),()=>{void mutate(t('Delete image generation provider'),'/v1/image-providers/'+encode(selectedProvider.id)+'/delete',{expectedRevision:selectedProvider.revision},async () => { resetProviderForm(); setImageSecret(''); await imageProviders.reload(); });})}>{t('Delete provider')}</button></div>
-        <h4 className="management-form-heading">{t('Image generation models')}</h4>
-        <p>{t('Fetch the provider model catalog, then select the models image nodes may use. Quality, size, and aspect ratio are set on image nodes.')}</p>
-        <button type="button" disabled={writeDisabled || !selectedProvider.enabled || !selectedProvider.credentialConfigured} onClick={() => { void act(t('Fetch image generation models'),async valid => {
-          const result=await props.request<{models:DiscoveredImageModel[];revision:number}>('/v1/image-providers/'+encode(selectedProvider.id)+'/models/discover',{expectedRevision:selectedProvider.revision},'POST');
-          if(valid()){setDiscoveredModels(result.models);setSavedDiscoveredModels(JSON.stringify(result.models));setNotice(t('Fetched {count} models from the provider. Select models and save.', { count: result.models.length }));}
-        }); }}>{t('Fetch image generation models')}</button>
-        {!selectedProvider.enabled && <p>{t('This provider is disabled. Enable new task submissions and save provider settings before fetching models.')}</p>}
-        {!selectedProvider.credentialConfigured && <p>{selectedProvider.credentialRevision === null
-          ? t('This provider has no API key configured. Enter the API key again above and save provider settings before fetching models.')
-          : t('This provider had an API key, but the Workspace cannot read it from local credential storage. Enter the API key again above and save provider settings before fetching models.')}</p>}
-        {discoveredModels.length>0 && <div className="image-model-catalog" role="group" aria-label={t('Provider model catalog')}>
-          {discoveredModels.map(item => <label className="management-checkbox" key={item.id}><input type="checkbox" checked={item.selected} disabled={writeDisabled} onChange={event => setDiscoveredModels(current=>current.map(model=>model.id===item.id?{...model,selected:event.target.checked}:model))} /><span>{item.name}<code>{item.id}</code></span></label>)}
-          <button type="button" disabled={writeDisabled} onClick={() => { void act(t('Save image generation model selection'),async valid => {
-            await props.request('/v1/image-providers/'+encode(selectedProvider.id)+'/models/select',{models:discoveredModels.filter(item=>item.selected).map(({id,name})=>({id,name})),expectedRevision:selectedProvider.revision},'POST');
-            if(valid()){setSavedDiscoveredModels(JSON.stringify(discoveredModels));setNotice(t('Image generation model selection saved.'));await imageProviders.reload();}
-          }); }}>{t('Save model selection')}</button>
-        </div>}
-        {selectedProvider.models.length===0 && <p>{t('No image generation models selected.')}</p>}
-        {selectedProvider.models.map(item => <div className="image-model-row" key={item.id}><span>{item.name} · {item.id}</span></div>)}
-      </>}
     </>)}
     {section('Work Graph import and export', <>
       {props.onProjectChange && <label>{t('Project workspace')}<select value={projectId ?? ''} disabled={disabled} onChange={event => props.onProjectChange?.(event.target.value)}>

@@ -1,8 +1,5 @@
 import { AssetLibraryPanel } from './AssetLibraryPanel';
 import { WorkspaceTransferNotifications } from './RemoteTransferNotifications';
-import { useRemoteDeliveries } from './use-remote-deliveries';
-import { remoteAssetsCache } from './remote-assets-cache';
-import { withRemoteTemporaryTargets } from './remote-temporary-targets';
 import { workspaceAgentStore } from './agent-state';
 import { useWorkspaceMaintenance, WorkspaceMaintenanceDialog } from './WorkspaceMaintenance';
 import { ConfirmationDialog } from '../components/ConfirmationDialog';
@@ -33,7 +30,6 @@ import type {
   RunNotification,
 } from "./contracts";
 import { graphPath, messageOf } from "./contracts";
-import { useTemporaryCanvases } from "./use-temporary-canvases";
 import type { GraphBundle } from '../../../packages/protocol/src/index';
 import { GraphWorkspace } from "./GraphWorkspace";
 import { appendNotification, NotificationCenter, NotificationProvider, NotificationQueue, type NotificationItem } from './NotificationCenter';
@@ -117,12 +113,13 @@ export function RealApp() {
   const [savedSelection] = useState(() => {
     try {
       const value = JSON.parse(localStorage.getItem('openworkgraph:selection:v1') ?? 'null');
-      if (value && typeof value.temporary === 'boolean' &&
+      if (value &&
           ['activeService', 'projectId', 'graphId'].every(key => typeof value[key] === 'string') &&
           ['active', 'archived', 'trashed'].includes(value.filter))
-        return value as { temporary: boolean; activeService: string; projectId: string; graphId: string; filter: 'active' | 'archived' | 'trashed' };
+        // Retired browser selections must not select a graph on a Workspace.
+        return { activeService: value.activeService, projectId: value.temporary ? '' : value.projectId, graphId: value.temporary ? '' : value.graphId, filter: value.temporary ? 'active' : value.filter } as { activeService: string; projectId: string; graphId: string; filter: 'active' | 'archived' | 'trashed' };
     } catch { /* Unavailable or invalid preferences must not prevent startup. */ }
-    return { temporary: false, activeService: '', projectId: '', graphId: '', filter: 'active' as const };
+    return { activeService: '', projectId: '', graphId: '', filter: 'active' as const };
   });
   const [page, setPage] = useState<'editor' | 'library'>(() => location.hash === '#workgraphs' ? 'library' : 'editor');
   const importInput = useRef<HTMLInputElement>(null);
@@ -203,7 +200,6 @@ export function RealApp() {
   }, [leftOpen, page]);
   const [theme, setTheme] = useState<"dark" | "light">(() => localStorage.getItem("openworkgraph:theme") === "light" ? "light" : "dark");
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("openworkgraph:theme", theme); }, [theme]);
-  const [temporary, setTemporary] = useState(savedSelection.temporary);
   const [registry] = useState(() => new ConnectionRegistry());
   const disposeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -212,6 +208,7 @@ export function RealApp() {
   const [updatingRuntime, setUpdatingRuntime] = useState<{ serviceId: string; version: string }>();
   const [connectionsRestored, setConnectionsRestored] = useState(false);
   const [welcomePairing, setWelcomePairing] = useState(false);
+  const [welcomeOpen, setWelcomeOpen] = useState(true);
   const [data, setData] = useState<Record<string, ServiceData>>({});
   const dataRef = useRef(data);
   dataRef.current = data;
@@ -233,9 +230,9 @@ export function RealApp() {
   useEffect(() => {
     try {
       // Persist navigation intent, never a fallback shown while snapshots load.
-      localStorage.setItem('openworkgraph:selection:v1', JSON.stringify({ temporary, activeService, projectId, graphId, filter }));
+      localStorage.setItem('openworkgraph:selection:v1', JSON.stringify({ activeService, projectId, graphId, filter }));
     } catch { /* Navigation remains available when browser storage is disabled. */ }
-  }, [temporary, activeService, projectId, graphId, filter]);
+  }, [activeService, projectId, graphId, filter]);
   const [actionNotices, setActionNotices] = useState<NotificationItem[]>([]);
   const noticeSequence = useRef(0);
   const [refresh, setRefresh] = useState(0);
@@ -247,7 +244,7 @@ export function RealApp() {
   const [pendingDelete, setPendingDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmTrashGraphs, setConfirmTrashGraphs] = useState<GraphSnapshot[]>();
-  useEffect(() => setConfirmTrashGraphs(undefined), [temporary, activeService, projectId, libraryProjectId, page]);
+  useEffect(() => setConfirmTrashGraphs(undefined), [activeService, projectId, libraryProjectId, page]);
   const [actionDialog, setActionDialog] = useState<'copy' | 'archive' | 'trash'>();
   const [copyServiceId, setCopyServiceId] = useState('');
   const [copyProjectId, setCopyProjectId] = useState('');
@@ -280,7 +277,6 @@ export function RealApp() {
       enqueueNotice(message === 'The visualization file version is unsupported by this Workspace.' ? t('The visualization file version is unsupported by this Workspace.') : message);
     }
   }, [enqueueNotice, t]);
-  const local = useTemporaryCanvases(onError);
   const changed = useCallback(() => setRefresh((n) => n + 1), []);
   const serviceRefreshers = useRef(new Map<string, (created?: GraphSnapshot) => void>());
   const registerServiceRefresh = useCallback((id: string, refresh: (created?: GraphSnapshot) => void) => {
@@ -306,7 +302,6 @@ export function RealApp() {
         await new Transport(registry, serviceId).request('/v1/notifications/read-all', {});
       },
       onOpen: async (todo) => {
-        if (editor.current?.getSnapshot().graph.serviceId === 'browser-local' && editor.current.getSnapshot().drafts.length) await editor.current.flush();
         const current = captureSelection(registry, todo.serviceId, navigation);
         const target = new Transport(registry, todo.serviceId);
         const run = await target.request<Run>("/v1/runs/" + todo.runId);
@@ -316,7 +311,6 @@ export function RealApp() {
         );
         current();
         navigation.current++;
-        setTemporary(false);
         setActiveService(todo.serviceId);
         setProjectId(run.projectId);
         setGraphId(run.graphId);
@@ -413,10 +407,9 @@ export function RealApp() {
   const project =
     current?.projects.find((p) => p.projectId === projectId) ??
     current?.projects[0];
-  const localMode = temporary || !connection;
   const libraryTargetProject = libraryProjectId ? project :
     current?.projects.find(p => p.projectId === projectId && p.state === 'active') ?? current?.projects.find(p => p.state === 'active');
-  const graphs = localMode ? local.graphs :
+  const graphs =
     current?.graphs.filter((g) => page === 'library' ? !libraryProjectId || g.projectId === libraryProjectId : g.projectId === project?.projectId) ?? [];
   const visibleGraphs = graphs.filter((g) =>
     filter === "trashed"
@@ -427,10 +420,10 @@ export function RealApp() {
         : !g.archived &&
           !Boolean((g as GraphSnapshot & { trashed?: boolean }).trashed),
   );
-  const selectedGraphId = localMode ? local.selected : graphId;
+  const selectedGraphId = graphId;
   const graph = visibleGraphs.find((g) => g.graphId === selectedGraphId) ?? visibleGraphs[0];
   const libraryGroups = groupLibraryGraphs(visibleGraphs, current?.projects ?? []);
-  const cardProjectActive = (target: GraphSnapshot) => localMode || current?.projects.some(p => p.projectId === target.projectId && p.state === 'active');
+  const cardProjectActive = (target: GraphSnapshot) => current?.projects.some(p => p.projectId === target.projectId && p.state === 'active');
   const deletableGraphs = visibleGraphs.filter(cardProjectActive);
   const selectedLibraryGraphs = deletableGraphs.filter(g => selectedCards.includes(g.graphId));
   const allLibraryGraphsSelected = deletableGraphs.length > 0 && selectedLibraryGraphs.length === deletableGraphs.length;
@@ -438,65 +431,57 @@ export function RealApp() {
     if (page !== 'editor') return;
     const source = editor.current?.getSnapshot().graph ?? graph;
     if (source) {
-      setTemporary(source.serviceId === 'browser-local');
-      if (source.serviceId !== 'browser-local') { setActiveService(source.serviceId); setProjectId(source.projectId); }
+      setActiveService(source.serviceId); setProjectId(source.projectId);
     }
     setLibraryProjectId('');
   };
   useEffect(() => {
     if (page !== 'editor' || !graph || graph.trashed) return;
     // A loading snapshot can display the first graph before the saved selection resolves.
-    if (localMode ? ((!temporary && !!activeService) ||
-      (local.selected ? local.selected !== graph.graphId : local.graphs.length !== 1))
-      : (activeService !== serviceId || projectId !== graph.projectId || graphId !== graph.graphId)) return;
+    if (activeService !== serviceId || projectId !== graph.projectId || graphId !== graph.graphId) return;
     const entry: RecentGraph = {
-      temporary: localMode,
-      serviceId: localMode ? 'browser' : serviceId,
+      temporary: false,
+      serviceId,
       projectId: graph.projectId,
       graphId: graph.graphId,
       title: graph.title,
-      runtimeName: localMode ? t('Temporary browser storage') : connection?.runtimeName || connection?.address || serviceId,
-      projectName: localMode ? t('Temporary Work Graph') : project?.name ?? graph.projectId,
+      runtimeName: connection?.runtimeName || connection?.address || serviceId,
+      projectName: project?.name ?? graph.projectId,
     };
     setRecentGraphs(rememberGraph(localStorage, entry));
-  }, [page, graph?.graphId, graph?.title, graph?.trashed, localMode, temporary, local.selected, local.graphs.length, activeService, serviceId, projectId, project?.name, graphId, connection?.runtimeName, connection?.address, t]);
+  }, [page, graph?.graphId, graph?.title, graph?.trashed, activeService, serviceId, projectId, project?.name, graphId, connection?.runtimeName, connection?.address, t]);
   const availableRecentGraphs = recentGraphs.flatMap(item => {
-    const source = item.temporary ? local.graphs : data[item.serviceId]?.graphs;
+    const source = data[item.serviceId]?.graphs;
     const found = source?.find(candidate => candidate.projectId === item.projectId && candidate.graphId === item.graphId && !candidate.trashed);
-    if (!found || (!item.temporary && !services.some(connection => connection.serviceId === item.serviceId))) return [];
+    if (!found || !services.some(connection => connection.serviceId === item.serviceId)) return [];
     return [{
       ...item,
       title: found.title,
-      runtimeName: item.temporary ? t('Temporary browser storage') : (() => {
+      runtimeName: (() => {
         const connection = services.find(connection => connection.serviceId === item.serviceId);
         return connection?.runtimeName || connection?.address || item.runtimeName;
       })(),
-      projectName: item.temporary ? t('Temporary Work Graph') : data[item.serviceId]?.projects.find(project => project.projectId === item.projectId)?.name ?? item.projectName,
+      projectName: data[item.serviceId]?.projects.find(project => project.projectId === item.projectId)?.name ?? item.projectName,
     }];
   });
   const libraryRecentGraphs = availableRecentGraphs.filter(item =>
-    item.temporary === localMode && (localMode || item.serviceId === serviceId) &&
+    item.serviceId === serviceId &&
     visibleGraphs.some(graph => graph.projectId === item.projectId && graph.graphId === item.graphId),
   ).slice(0, 3);
   const openRecentGraph = (item: RecentGraph) => {
-    const found = (item.temporary ? local.graphs : data[item.serviceId]?.graphs)?.find(candidate => candidate.projectId === item.projectId && candidate.graphId === item.graphId && !candidate.trashed);
+    const found = (data[item.serviceId]?.graphs)?.find(candidate => candidate.projectId === item.projectId && candidate.graphId === item.graphId && !candidate.trashed);
     if (!found) { onError(Error(t('This recently opened Work Graph is no longer available. Select it again in My Work Graphs.'))); return; }
     navigate(() => {
-      setTemporary(item.temporary);
-      if (item.temporary) local.select(item.graphId);
-      else { setActiveService(item.serviceId); setProjectId(item.projectId); setGraphId(item.graphId); }
+      setActiveService(item.serviceId); setProjectId(item.projectId); setGraphId(item.graphId);
       setFilter(found.archived ? 'archived' : 'active');
       setTab('canvas');
       showPage('editor');
     });
   };
   const selectGraph = (id: string) => {
-    if (localMode) local.select(id);
-    else {
-      setActiveService(serviceId);
-      setProjectId(current?.graphs.find(g => g.graphId === id)?.projectId ?? project?.projectId ?? '');
-      setGraphId(id);
-    }
+    setActiveService(serviceId);
+    setProjectId(current?.graphs.find(g => g.graphId === id)?.projectId ?? project?.projectId ?? '');
+    setGraphId(id);
   };
   const executionInputs = useMemo(() => {
     const withEditor = async <T,>(run:Run,work:(owner:GraphEditor)=>Promise<T>) => {
@@ -508,7 +493,7 @@ export function RealApp() {
     };
     return {plan:(run:Run)=>withEditor(run,owner=>owner.executionPlan(run)),start:(run:Run,body:Parameters<GraphEditor['startExecution']>[1])=>withEditor(run,owner=>owner.startExecution(run,body))};
   },[request]);
-  const graphConnection = graph && !localMode ? registry.get(graph.serviceId) : undefined;
+  const graphConnection = graph ? registry.get(graph.serviceId) : undefined;
   const graphAgents = useMemo(() => {
     if (!graphConnection || graphConnection.status !== 'paired') return undefined;
     return workspaceAgentStore(registry, graphConnection.serviceId);
@@ -523,7 +508,7 @@ export function RealApp() {
   useSyncExternalStore(graphTransport?.subscribe ?? noPendingSubscription, graphTransport?.getPendingRevision ?? noPendingRevision);
   const pendingTransports = [...new Set([transport, graphTransport].filter((source): source is Transport => !!source))];
   const graphRequests = [...new Map([...(graphTransport?.pending() ?? []), ...(reconcilingRequest ? [reconcilingRequest] : [])].map(p => [p.id, p])).values()];
-  const pendingGraphRequests = localMode || !graph ? [] : graphRequests.filter(p => p.serviceId === graph.serviceId &&
+  const pendingGraphRequests = !graph ? [] : graphRequests.filter(p => p.serviceId === graph.serviceId &&
     (p.path === graphPath(graph.projectId, graph.graphId) + '/commands' || p.path === graphPath(graph.projectId, graph.graphId) + '/history'));
   const reconcilePendingRequest = async (source: Transport, pending: PendingRequest) => {
     if (reconciliation.current) return;
@@ -552,13 +537,9 @@ export function RealApp() {
       (registry.get(graphTransport.serviceId)?.status !== 'paired' || dataRef.current[graphTransport.serviceId]?.eventStatus !== 'connected')) throw Error(t('The Workspace is offline or reconciling its snapshot. Editing, uploading, and running are unavailable.'));
     return graphTransport.request<T>(path, body, method, options);
   }, [graphTransport, transport, request, registry, t]);
-  const canvasRequest = localMode ? local.store.request : graphRequest;
-  const canvasChanged = () => { if (localMode) void local.refresh().catch(onError); else changed(); };
-  const captureCanvasSelection = () => {
-    const epoch = navigation.current;
-    return localMode ? () => { if (navigation.current !== epoch) throw new LifecycleCancelledError(); }
-      : captureSelection(registry, serviceId, navigation);
-  };
+  const canvasRequest = graphRequest;
+  const canvasChanged = changed;
+  const captureCanvasSelection = () => captureSelection(registry, serviceId, navigation);
   const navigate = (change: () => void) => {
     const epoch = ++navigation.current;
     const state = editor.current?.getSnapshot();
@@ -574,7 +555,6 @@ export function RealApp() {
     page === "editor" ? graph?.graphId : null,
     tab,
     filter,
-    temporary,
     page,
     libraryProjectId,
   ]);
@@ -582,15 +562,14 @@ export function RealApp() {
     selectionKey.current = nextSelectionKey;
     navigation.current++;
   }
-  useEffect(() => { setSelectedCards([]); setCardRename(undefined); setCardPurge(undefined); setCardPurgeTitle(''); setCreating(false); }, [serviceId, connection?.generation, libraryProjectId, temporary, filter]);
-  useEffect(() => { setLibraryProjectId(''); }, [serviceId, temporary]);
-  useEffect(() => { setGraphImport(undefined); }, [serviceId, connection?.generation, connection?.session.id, libraryProjectId, temporary, filter, page]);
+  useEffect(() => { setSelectedCards([]); setCardRename(undefined); setCardPurge(undefined); setCardPurgeTitle(''); setCreating(false); }, [serviceId, connection?.generation, libraryProjectId, filter]);
+  useEffect(() => { setLibraryProjectId(''); }, [serviceId]);
+  useEffect(() => { setGraphImport(undefined); }, [serviceId, connection?.generation, connection?.session.id, libraryProjectId, filter, page]);
   const online =
     connection?.status === "paired" && current?.eventStatus === "connected";
   const statusConnection = connection ?? connections.find(c => c.serviceId === activeService);
   const activeRuntimeStatus = runtimeStatus(statusConnection, current?.eventStatus, current?.error, webClientPackage.version);
   const runtimeDisconnected =
-    !localMode &&
     (current?.eventStatus === "offline" ||
       // Registry restoration and initial SSE setup fence writes with offline
       // while the monitor is still starting; neither confirms an outage.
@@ -606,21 +585,10 @@ export function RealApp() {
     request<{ occupied: number; capacity: number }>("/v1/capacity").then(value => { if (live) setCapacity({ request, ...value }); }).catch(onError);
     return () => { live = false; };
   }, [request, online, current?.revision]);
-  const bridgeScope = JSON.stringify([serviceId, connection?.generation, project?.projectId, graph?.graphId, online, navigation.current]);
-  const bridgeContext = useRef(bridgeScope); bridgeContext.current = bridgeScope;
-  const remoteBrowserId = useRemoteDeliveries({ store: local.store, request, serviceId, ready: !!online && connection?.info.capabilities.remoteAssets?.status === 'available', refreshToken: local.revision, onChanged: () => { void local.refresh().then(() => editor.current?.refresh()); }, onError });
-  const localBridge = useMemo(() => {
-    if (!localMode || !graph) return undefined;
-    const binding = online && connection && project?.state === "active" ? {
-      serviceId, projectId: project.projectId, sessionId: connection.session.id, request,
-      isCurrent: () => bridgeContext.current === bridgeScope && registry.get(serviceId)?.generation === connection.generation && registry.get(serviceId)?.status === "paired",
-    } : undefined;
-    return local.bridgeFor(graph.graphId, binding);
-  }, [localMode, graph?.graphId, bridgeScope, request, local.bridgeFor]);
-  const assetsAvailable = localMode ? !!localBridge?.capabilities.assets : !!connection;
-  const projectFilesAvailable = !localMode && connection?.info.capabilities.projectFiles?.status === 'available' && connection.info.capabilities.projectFileReferences?.status === 'available';
-  const canvasOnline = !maintenance?.blocked && (localMode || !!online);
-  const canvasProjectActive = localMode || (page === 'library' ? libraryTargetProject : project)?.state === "active";
+  const assetsAvailable = !!connection;
+  const projectFilesAvailable = connection?.info.capabilities.projectFiles?.status === 'available' && connection.info.capabilities.projectFileReferences?.status === 'available';
+  const canvasOnline = !maintenance?.blocked && !!online;
+  const canvasProjectActive = (page === 'library' ? libraryTargetProject : project)?.state === "active";
   useEffect(() => {
     setDeleteName("");
     setPendingDelete(false);
@@ -718,7 +686,7 @@ export function RealApp() {
     if (asset.current.presentation?.kind === 'visualize') {
       if (connection?.info.capabilities.visualizeLibrary?.status !== 'available') throw Error(t('Upgrade the Workspace to save and install interactive visualizations.'));
       const guard = captureCanvasSelection();
-      const installRequest = localMode ? localBridge!.request : request;
+      const installRequest = request;
       const handle = canvas.current;
       const assetId = asset.id, assetVersion = asset.current.version;
       let body: { assetId: string; expectedAssetVersion: number; x: number; y: number; expectedExecutionRevision: number; expectedLayoutRevision: number; idempotencyKey: string } | undefined;
@@ -794,7 +762,7 @@ export function RealApp() {
     };
   };
   const placeProjectFile = async (path: string, dropPosition?: Point, kind?: 'file' | 'directory') => {
-    if (!editor.current || !graph || !canvas.current || localMode) throw Error(t('Connect a Workspace and open the target Work Graph first.'));
+    if (!editor.current || !graph || !canvas.current) throw Error(t('Connect a Workspace and open the target Work Graph first.'));
     const placementEditor = editor.current;
     const target = placementEditor.getSnapshot().graph;
     if (target.serviceId !== graph.serviceId || target.projectId !== graph.projectId || target.graphId !== graph.graphId) throw new LifecycleCancelledError();
@@ -930,7 +898,7 @@ export function RealApp() {
     currentSelection(); targetSelection();
     copyAttempt.current = undefined; setCopyPending(false); setActionDialog(undefined);
     setActiveService(copyConnection.serviceId); setProjectId(copyProject.projectId); setGraphId(created.graphId);
-    setTemporary(false); setFilter('active'); setTab('canvas'); changed();
+    setFilter('active'); setTab('canvas'); changed();
   };
   const closeActionDialog = () => {
     setActionDialog(undefined);
@@ -940,47 +908,7 @@ export function RealApp() {
     const guard = captureCanvasSelection();
     if (editor.current?.getSnapshot().graph.graphId === target.graphId && editor.current.getSnapshot().drafts.length) await editor.current.flush();
     guard();
-    const bundle = localMode ? await local.store.exportGraph(target.graphId, async source => {
-      guard();
-      if (!online || !connection || !project || source.serviceId !== serviceId || source.projectId !== project.projectId) throw Error(t('Exporting referenced nodes requires a connection to their source Workspace and project.'));
-      const [status] = await request<Array<{ state:'available'|'missing'|'unavailable'; name:string; mime:string|null; bytes:number|null; changeToken:string|null }>>(
-        '/v1/projects/' + encodeURIComponent(source.projectId) + '/files/stat', { paths:[source.relativePath] },
-      );
-      guard();
-      if (!status || status.state !== 'available') throw Error(status?.state === 'missing' ? t('The referenced file no longer exists. Work Graph export failed.') : t('The referenced file is currently unavailable. Work Graph export failed.'));
-      if (status.bytes === null || !Number.isSafeInteger(status.bytes) || status.bytes < 0) throw Error(t('The referenced file size could not be verified. Work Graph export failed.'));
-      if (status.bytes > FILE_NODE_MAX_BYTES) throw Error(t('The referenced file exceeds 300 MB. Work Graph export failed.'));
-      const name = status.name || source.relativePath.split('/').at(-1) || t('Project file');
-      return {
-        name,
-        mime:status.mime ?? fileMime({ name, type:'' }),
-        size:status.bytes,
-        read:async () => {
-          guard();
-          const query = new URLSearchParams({ path:source.relativePath, ...(status.changeToken ? { cacheKey:status.changeToken } : {}) });
-          if (status.bytes! > 50 * 1024 * 1024) {
-            const bytes = new Uint8Array(status.bytes!);
-            for (let start = 0; start < bytes.length; start += 4 * 1024 * 1024) {
-              guard();
-              const end = Math.min(start + 4 * 1024 * 1024, bytes.length) - 1;
-              const part = await request<import('../adapter/transport').RangeBlob>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/content?' + query, undefined, 'RANGE', {range:{start,end}});
-              guard();
-              if (part.start !== start || part.end !== end || part.total !== bytes.length || part.blob.size !== end - start + 1) throw Error(t('The referenced file changed during export. Try again.'));
-              bytes.set(new Uint8Array(await part.blob.arrayBuffer()), start);
-            }
-            const [after] = await request<Array<{state:string;bytes:number|null;changeToken:string|null}>>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/stat', {paths:[source.relativePath]});
-            guard();
-            if (after?.state !== 'available' || after.bytes !== status.bytes || after.changeToken !== status.changeToken) throw Error(t('The referenced file changed during export. Try again.'));
-            return bytes;
-          }
-          const content = await request<{ path:string; bytes:number; base64:string }>('/v1/projects/' + encodeURIComponent(source.projectId) + '/files/content?' + query);
-          guard();
-          const bytes = Uint8Array.from(atob(content.base64), character => character.charCodeAt(0));
-          if (content.bytes !== bytes.length || bytes.length !== status.bytes) throw Error(t('The referenced file changed during export. Try again.'));
-          return bytes;
-        },
-      };
-    }) : await canvasRequest<GraphBundle>(graphPath(target.projectId, target.graphId) + '/export');
+    const bundle = await canvasRequest<GraphBundle>(graphPath(target.projectId, target.graphId) + '/export');
     guard();
     const url = URL.createObjectURL(await createWorkGraphArchive(bundle));
     const link = document.createElement('a'); link.href = url; link.download = workGraphArchiveFilename(target.title); link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -1001,7 +929,7 @@ export function RealApp() {
     });
     canvasChanged(); guard();
     setSelectedCards(ids => ids.filter(id => id !== target.graphId));
-    if ((localMode && local.selected === target.graphId) || (!localMode && graphId === target.graphId)) selectGraph('');
+    if (graphId === target.graphId) selectGraph('');
     setCardPurge(undefined);
     setCardPurgeTitle('');
   };
@@ -1025,20 +953,20 @@ export function RealApp() {
             setSelectedCards(ids => ids.filter(id => !targets.some(target => target.graphId === id)));
           });
         }}/>}
-      {connectionsRestored && (services.length === 0 || welcomePairing) && local.graphs.length > 0 && <WelcomeDialog
-        registry={registry} theme={theme} onPairingStart={() => setWelcomePairing(true)} onClose={() => setWelcomePairing(false)}
+      {welcomeOpen && connectionsRestored && (services.length === 0 || welcomePairing) && <WelcomeDialog
+        registry={registry} theme={theme} onPairingStart={() => setWelcomePairing(true)} onClose={() => { setWelcomePairing(false); setWelcomeOpen(false); }}
         onModelsChanged={() => setModelRevision(value => value + 1)}
         onComplete={(id, workspaceId, createdGraphId) => {
-          setWelcomePairing(false);
+          setWelcomePairing(false); setWelcomeOpen(false);
           navigate(() => {
             setActiveService(id); setProjectId(workspaceId); setGraphId(createdGraphId ?? '');
-            setTemporary(false); setFilter('active'); setTab('canvas');
+            setFilter('active'); setTab('canvas');
             showPage(createdGraphId ? 'editor' : 'library'); changed();
           });
         }}
       />}
       <SettingsDialog open={settingsOpen} registry={registry} connections={connections} defaultWorkspaceId={serviceId} entry={settingsEntry}
-        context={{ serviceId: localMode ? '' : serviceId, projectId: project?.projectId, graphId: localMode ? undefined : graph?.graphId }}
+        context={{ serviceId, projectId: project?.projectId, graphId: graph?.graphId }}
         onlineWorkspaceIds={services.filter(item => item.status === 'paired' && data[item.serviceId]?.eventStatus === 'connected').map(item => item.serviceId)}
         theme={theme} onThemeChange={setTheme} onClose={() => setSettingsOpen(false)} onChanged={changed}
         onModelsChanged={() => setModelRevision(value => value + 1)} onError={onError}
@@ -1065,7 +993,7 @@ export function RealApp() {
         <label>{t('Enter the Work Graph name to confirm')}<input autoFocus value={cardPurgeTitle} onChange={e => setCardPurgeTitle(e.target.value)}/></label>
         <div className="graph-confirm-actions"><button disabled={busy || cardPurgeTitle !== cardPurge.title}>{t('Confirm permanent deletion')}</button><button type="button" onClick={() => { setCardPurge(undefined); setCardPurgeTitle(''); }}>{t('Cancel')}</button></div>
       </form></div>}
-      {graphImport && !localMode && <ImportWorkGraphDialog fileName={graphImport.file.name} workspace={connection?.runtimeName || connection?.address || ''}
+      {graphImport && <ImportWorkGraphDialog fileName={graphImport.file.name} workspace={connection?.runtimeName || connection?.address || ''}
         projects={current?.projects ?? []} initialProjectId={graphImport.projectId} disabled={busy || !online}
         onCancel={() => setGraphImport(undefined)} onConfirm={targetProjectId => {
           if (busy || !online) return;
@@ -1089,15 +1017,7 @@ export function RealApp() {
         if (!file || busy || !canvasOnline) return;
         const guard = pickerGuard ?? captureCanvasSelection();
         try { guard(); } catch (error) { onError(error); return; }
-        if (!localMode) {
-          setGraphImport({ file, projectId: libraryProjectId, guard });
-          return;
-        }
-        act(async () => {
-          const bundle = await readWorkGraphFile(file); guard();
-          const created = await local.store.importGraph(bundle);
-          guard(); local.select(created.graphId); setFilter('active'); canvasChanged();
-        });
+        setGraphImport({ file, projectId: libraryProjectId, guard });
       }}/>
       <header className="real-header topbar-right">
         <div className="runtime-header-actions">
@@ -1164,7 +1084,7 @@ export function RealApp() {
       {services.map(c => <WorkspaceTransferNotifications
         key={c.serviceId + ':' + c.generation} registry={registry} connection={c}
         ready={c.status === 'paired' && data[c.serviceId]?.eventStatus === 'connected' && c.info.capabilities.remoteAssets?.status === 'available'}
-        browserId={remoteBrowserId} onError={onError}
+        browserId="" onError={onError}
       />)}
       <NotificationQueue
         items={[
@@ -1182,15 +1102,15 @@ export function RealApp() {
       <div className="real-layout">
         <aside className={'real-sidebar left-sidebar' + (leftOpen && page === 'editor' ? '' : ' left-sidebar-collapsed')} aria-label={t('Work Graph sidebar')} aria-hidden={!leftOpen || page !== 'editor'} inert={!leftOpen || page !== 'editor'} style={{ '--sidebar-minimum-width': `${sidebarMinimumWidth}px`, width: leftOpen && page === 'editor' ? Math.max(sidebarMinimumWidth, leftSidebarWidth ?? 280) : 0 } as CSSProperties}>
           <div ref={sidebarTabs} className="sidebar-tabs has-skills">
-            <button className={tab === "canvas" ? "active" : ""} onClick={() => setTab("canvas")}>{t('Work Graph')}</button>
-            <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>{t('Asset library')}</button>
-            <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>{language === 'zh-CN' ? '技能库' : 'Skill library'}</button>
-            <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{t('Project files')}</button>
+            <button className={tab === "canvas" ? "active" : ""} onClick={() => setTab("canvas")}>{language === 'zh-CN' ? t('Work Graph') : 'Graph'}</button>
+            <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>{language === 'zh-CN' ? t('Asset library') : 'Assets'}</button>
+            <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>{language === 'zh-CN' ? '技能库' : 'Skills'}</button>
+            <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>{language === 'zh-CN' ? t('Project files') : 'Files'}</button>
             <button className="icon-button sidebar-collapse" aria-label={t('Collapse sidebar')} onClick={() => setLeftOpen(false)}><PanelLeftClose size={18}/></button>
           </div>
-          <RememberedSidebarContent viewKey={JSON.stringify([localMode ? 'local' : serviceId, tab === 'skills' ? '' : graph?.projectId ?? project?.projectId ?? '', tab === 'canvas' || tab === 'assets' ? graph?.graphId ?? '' : '', tab])}>
+          <RememberedSidebarContent viewKey={JSON.stringify([serviceId, tab === 'skills' ? '' : graph?.projectId ?? project?.projectId ?? '', tab === 'canvas' || tab === 'assets' ? graph?.graphId ?? '' : '', tab])}>
           <div ref={setNodeSidebar} className={tab !== "canvas" ? "real-hidden" : "real-node-sidebar"}/>
-          {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''} onAddSkill={graph && page === 'editor' && canvasOnline && canvasProjectActive && !graph.archived && !graph.trashed && (localMode || graph.serviceId === serviceId) ? addSkillWorkflow : undefined}/>}
+          {tab === 'skills' && <SkillsLibrary key={serviceId + ':' + connection?.generation + ':' + connection?.session.id} transport={transport} ready={!!online} visible={leftOpen && page === 'editor'} workspaceName={connection?.runtimeName || connection?.address || ''} onAddSkill={graph && page === 'editor' && canvasOnline && canvasProjectActive && !graph.archived && !graph.trashed && graph.serviceId === serviceId ? addSkillWorkflow : undefined}/>}
           {tab === 'files' && <ProjectFilesPanel key={serviceId + ':' + (project?.projectId ?? '')} request={request} projectId={project?.projectId} ready={!!online && projectFilesAvailable} onPlace={(path, position, kind) => { void placeProjectFile(path, position, kind).catch(onError); }}/>}
                     {tab === "assets" && assetsAvailable &&
             (graph ? (
@@ -1202,20 +1122,11 @@ export function RealApp() {
                 onSettings={() => { setSettingsEntry({ workspaceId: serviceId, page: 'data-sources', sequence: Date.now() }); setSettingsOpen(true); }}
                 getRemoteTarget={async (action) => {
                   const targetGraph = graph;
-                  const targetProjectId = localMode ? project?.projectId : graph.projectId;
+                  const targetProjectId = graph.projectId;
                   if (!targetProjectId) throw Error(t('Select a project first'));
                   if (action === 'library') return { kind: 'library', projectId: targetProjectId };
                   if (targetGraph.archived || targetGraph.trashed || !canvas.current) throw Error(t('The current Work Graph is read-only.'));
                   const position = canvas.current?.getPlacementPosition(defaultWorkgraphNodeSize('file')) ?? { x: 0, y: 0 };
-                  if (localMode) {
-                    const browserId = remoteBrowserId || await remoteAssetsCache.browserId();
-                    await withRemoteTemporaryTargets(serviceId, browserId, async () => {
-                      const latest = await local.store.request<GraphSnapshot>(graphPath('temporary',targetGraph.graphId));
-                      if (latest.archived || latest.trashed) throw Error(t('The current Work Graph is read-only.'));
-                      await request('/v1/remote-transfers/temporary-targets', { browserId, graphId: targetGraph.graphId, projectId: targetProjectId, revision: latest.executionRevision + latest.layoutRevision }, 'POST', { journal: 'memory' });
-                    });
-                    return { kind: 'temporary', projectId: targetProjectId, graphId: targetGraph.graphId, browserId, ...position };
-                  }
                   return { kind: 'graph', projectId: targetProjectId, graphId: targetGraph.graphId, ...position };
                 }}
                 ready={!!online}
@@ -1223,10 +1134,10 @@ export function RealApp() {
                 key={
                   serviceId + ":" + connection?.generation + ":" + graph.graphId
                 }
-                request={localMode ? localBridge!.request : request}
+                request={request}
                 projectId={graph.projectId}
-                ownerProjectId={localMode ? project?.projectId : graph.projectId}
-                projects={localMode ? (project ? [project] : []) : current?.projects}
+                ownerProjectId={graph.projectId}
+                projects={current?.projects}
                 graphId={graph.graphId}
                 readOnly={
                   !online ||
@@ -1303,11 +1214,11 @@ export function RealApp() {
           {page === 'library' && <section className="workgraph-library" aria-label={t('Work Graph list')}>
             <header><div><div className="library-brand"><img className="library-brand-logo" src={theme === 'dark' ? '/brand/openworkgraph-wordmark-light.svg' : '/brand/openworkgraph-wordmark-dark.svg'} alt="" aria-hidden="true"/><span className="brand-version-badge" title={`${t('OpenWorkgraph')} v${webClientPackage.version}`}>v{webClientPackage.version}</span></div><h1>{t('Work Graph')}</h1></div></header>
           <div className="library-filters">
-          <label>{t('Workspace')}<select aria-label={t('Select Workspace')} value={localMode ? 'browser' : serviceId} onChange={event => {
+          <label>{t('Workspace')}<select aria-label={t('Select Workspace')} value={serviceId} disabled={!services.length} onChange={event => {
             const value = event.target.value;
-            navigate(() => { setTemporary(value === 'browser'); if (value !== 'browser') setActiveService(value); setLibraryProjectId(''); setProjectId(''); setGraphId(''); setFilter('active'); });
-          }}><option value="browser">{t('Temporary browser storage')}</option>{services.map(c => <option key={c.serviceId} value={c.serviceId}>{c.runtimeName ? `${c.runtimeName} (${c.address})` : c.address}</option>)}</select></label>
-          {!localMode && connection && <>
+            navigate(() => { setActiveService(value); setLibraryProjectId(''); setProjectId(''); setGraphId(''); setFilter('active'); });
+          }}>{!services.length && <option value="" disabled>{t('Connect Workspace')}</option>}{services.map(c => <option key={c.serviceId} value={c.serviceId}>{c.runtimeName ? `${c.runtimeName} (${c.address})` : c.address}</option>)}</select></label>
+          {connection && <>
               <label>
                 {t('Projects on Workspace')}
                 <select
@@ -1350,7 +1261,7 @@ export function RealApp() {
                   <option value="trashed">{t('Trash')}</option>
                 </select>
               </label>
-              {!localMode && connection && <button type="button" className="library-link-project" disabled={busy || !online} onClick={openAddProject}>
+              {connection && <button type="button" className="library-link-project" disabled={busy || !online} onClick={openAddProject}>
                 <FolderPlus size={16} aria-hidden="true" />{t('Link new project')}
               </button>}
 </div>
@@ -1361,7 +1272,7 @@ export function RealApp() {
               {filter !== 'trashed' && selectedLibraryGraphs.length > 0 && <button disabled={busy || !canvasOnline} onClick={() => {
                 setConfirmTrashGraphs(selectedLibraryGraphs);
               }}>{t('Delete selected ({count})', { count: selectedLibraryGraphs.length })}</button>}
-              <button disabled={busy || !canvasOnline || (!localMode && !current?.projects.some(p => p.state === 'active' && p.availability !== 'unavailable'))} onClick={() => { importPickerGuard.current = captureCanvasSelection(); importInput.current?.click(); }}><Upload size={16}/>{t('Import Work Graph')}</button>
+              <button disabled={busy || !canvasOnline || (!current?.projects.some(p => p.state === 'active' && p.availability !== 'unavailable'))} onClick={() => { importPickerGuard.current = captureCanvasSelection(); importInput.current?.click(); }}><Upload size={16}/>{t('Import Work Graph')}</button>
               <button disabled={busy || !canvasOnline || !canvasProjectActive} className="library-primary" onClick={() => setCreating(true)}><Plus size={16}/>{t('New Work Graph')}</button>
             </div>
               {!runtimeDisconnected && <div className="library-groups">
@@ -1375,19 +1286,19 @@ export function RealApp() {
                         <strong>{item.title}</strong>
                         <span>{t('{nodes} nodes · {edges} edges', { nodes: g.nodes.length, edges: g.edges.length })}</span>
                       </button>
-                      <footer><span>{localMode ? t('Temporary browser storage') : item.projectName}</span><div>
+                      <footer><span>{item.projectName}</span><div>
                         <button aria-label={t('Export {title}', { title: g.title })} disabled={busy} className="icon-button" title={t('Export')} onClick={() => act(() => exportGraph(g))}><Download size={16}/></button>
                         <button aria-label={t('Rename {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || g.archived || g.trashed || busy} className="icon-button" title={t('Rename')} onClick={() => { setCardRename(g); setCardTitle(g.title); }}><Pencil size={16}/></button>
                       </div></footer>
                     </article>;
                   })}</div>
                 </section>}
-                {libraryGroups.map(group => <section className="library-project-group" key={group.projectId} aria-label={localMode ? t('Temporary browser storage') : group.name}>
-                <h2>{localMode ? t('Temporary browser storage') : group.name}<span>{group.graphs.length}</span></h2>
+                {libraryGroups.map(group => <section className="library-project-group" key={group.projectId} aria-label={group.name}>
+                <h2>{group.name}<span>{group.graphs.length}</span></h2>
                 <div className="library-grid">{group.graphs.map(g => <article className="library-card" key={g.graphId}>
                 <input className="library-card-check" type="checkbox" disabled={!cardProjectActive(g)} aria-label={t('Select {title}', { title: g.title })} checked={selectedCards.includes(g.graphId)} onChange={e => setSelectedCards(ids => e.target.checked ? [...ids, g.graphId] : ids.filter(id => id !== g.graphId))}/>
                 <button className="library-card-open" aria-label={g.title} onClick={() => navigate(() => { selectGraph(g.graphId); setTab('canvas'); showPage('editor'); })}><strong>{g.title}</strong><span>{t('{nodes} nodes · {edges} edges', { nodes: g.nodes.length, edges: g.edges.length })}</span></button>
-                <footer><span>{localMode ? t('Temporary browser storage') : group.name}</span><div>
+                <footer><span>{group.name}</span><div>
                   <button aria-label={t('Export {title}', { title: g.title })} disabled={busy} className="icon-button" title={t('Export')} onClick={() => act(() => exportGraph(g))}><Download size={16}/></button>
                   <button aria-label={t('Rename {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || g.archived || g.trashed || busy} className="icon-button" title={t('Rename')} onClick={() => { setCardRename(g); setCardTitle(g.title); }}><Pencil size={16}/></button>
                   <button aria-label={g.trashed ? t('Restore {title}', { title: g.title }) : t('Delete {title}', { title: g.title })} disabled={!canvasOnline || !cardProjectActive(g) || busy} className="icon-button" title={g.trashed ? t('Restore') : t('Delete')} onClick={() => g.trashed ? act(() => updateCard(g, [{ type: 'graph.trash', trashed: false }])) : setConfirmTrashGraphs([g])}>{g.trashed ? <RotateCcw size={16}/> : <Trash2 size={16}/>}</button>
@@ -1399,7 +1310,7 @@ export function RealApp() {
                 <h2>{t('Workspace connection disconnected')}</h2>
                 <WorkspaceRestartHint />
               </div>}
-              {!runtimeDisconnected && (localMode || (current && !current.error)) && visibleGraphs.length === 0 && (!localMode && !project ? <div className="library-empty"><Layers size={32}/>
+              {!runtimeDisconnected && (!connection || (current && !current.error)) && visibleGraphs.length === 0 && (!connection ? <div className="library-empty"><Server size={32}/><h2>{t('Connect Workspace')}</h2><button type="button" onClick={() => setWelcomeOpen(true)}>{t('Quick start')}</button></div> : !project ? <div className="library-empty"><Layers size={32}/>
                 <>
                   <h2>{t('No bound projects')}</h2>
                   <p>{t('Register a directory on the Workspace device in Workspace management.')}</p>
@@ -1414,29 +1325,26 @@ export function RealApp() {
                 onSubmit={(e) => {
                   e.preventDefault();
                   if (busy || creationInFlight.current) return;
-                  if (localMode || libraryTargetProject) {
+                  if (libraryTargetProject) {
                     creationInFlight.current = true;
                     setCreationPending(true);
                     act(async () => {
                       try {
                         const currentSelection = captureCanvasSelection();
-                        if (localMode && editor.current?.getSnapshot().drafts.length) await editor.current.flush();
                         currentSelection();
-                        const created = localMode ? await local.store.create(graphName)
-                          : await request<GraphSnapshot>(`/v1/projects/${libraryTargetProject!.projectId}/graphs`, { title: graphName, idempotencyKey: randomId() });
+                        const created = await request<GraphSnapshot>(`/v1/projects/${libraryTargetProject!.projectId}/graphs`, { title: graphName, idempotencyKey: randomId() });
                         currentSelection();
                         // Fence older authority reads synchronously, before publishing the new graph.
-                        if (!localMode) serviceRefreshers.current.get(serviceId)?.(created);
+                        serviceRefreshers.current.get(serviceId)?.(created);
                         // Publish the returned snapshot before entering the editor.
                         // Waiting for a later list refresh would render an existing graph.
-                        if (localMode) local.acceptCreated(created);
-                        else setData(rows => {
+                        setData(rows => {
                           const source = rows[serviceId];
                           if (!source || source.graphs.some(g => g.graphId === created.graphId)) return rows;
                           return { ...rows, [serviceId]: { ...source, graphs: [...source.graphs, created] } };
                         });
                         selectGraph(created.graphId);
-                        if (!localMode) setProjectId(created.projectId);
+                        setProjectId(created.projectId);
                         setTab('canvas'); setGraphName(''); setFilter('active'); setCreating(false); showPage('editor');
                       } finally {
                         creationInFlight.current = false;
@@ -1446,7 +1354,7 @@ export function RealApp() {
                   }
                 }}
               >
-                {!localMode && <label>{t('Projects on Workspace')}<select value={libraryTargetProject?.projectId ?? ''} onChange={event => { navigation.current++; setProjectId(event.target.value); }}>
+                {<label>{t('Projects on Workspace')}<select value={libraryTargetProject?.projectId ?? ''} onChange={event => { navigation.current++; setProjectId(event.target.value); }}>
                   {current?.projects.map(p => <option key={p.projectId} value={p.projectId} disabled={p.state !== 'active'}>{p.name}</option>)}
                 </select></label>}
                 <label>
@@ -1478,7 +1386,7 @@ export function RealApp() {
               className="real-canvas-mount"
             >
               <GraphWorkspace
-                projectName={localMode ? undefined : project?.name}
+                projectName={project?.name}
                 recentGraphs={availableRecentGraphs}
                 onOpenRecent={openRecentGraph}
                 graphActions={(closeMenu) => <>
@@ -1558,7 +1466,7 @@ export function RealApp() {
                   )}
                 </>}
                 key={
-                  graph.serviceId + ":" + (localMode ? 0 : connection?.generation) + ":" + graph.graphId
+                  graph.serviceId + ":" + connection?.generation + ":" + graph.graphId
                 }
                 onHome={() => navigate(() => { location.href = './index.html'; })}
                 onLibrary={() => navigate(() => { enterLibrary.current(); showPage('library'); })}
@@ -1568,20 +1476,19 @@ export function RealApp() {
                 sidebarTarget={nodeSidebar}
                 theme={theme}
                 request={canvasRequest}
-                serviceRequest={localMode ? localBridge?.request : graphRequest}
+                serviceRequest={graphRequest}
                 agentStore={graphAgents}
-                modelsAvailable={localMode ? !!localBridge?.capabilities.models : !!online}
+                modelsAvailable={!!online}
                 modelRefreshToken={modelRevision}
                 assetsAvailable={assetsAvailable}
                 visualizeLibraryAvailable={connection?.info.capabilities.visualizeLibrary?.status === 'available'}
-                visualizeCompatibility={localMode ? undefined : connection?.info.visualizeCompatibility}
+                visualizeCompatibility={connection?.info.visualizeCompatibility}
                 installedNodeId={installedNodeId}
-                executionReason={executionUnavailableReason(!!online, localMode, connection?.info.capabilities?.execution)}
-                imageReason={executionUnavailableReason(!!online, localMode, connection?.info.capabilities?.imageGeneration)}
+                executionReason={executionUnavailableReason(!!online, false, connection?.info.capabilities?.execution)}
                 graph={graph}
                 online={canvasOnline}
                 runtimeUnavailable={runtimeDisconnected}
-                workspaceUpgrade={!localMode && connection ? {
+                workspaceUpgrade={connection ? {
                   serviceId: connection.serviceId, runtimeVersion: connection.info.version, clientVersion: webClientPackage.version,
                   installation: connection.info.installation,
                   updating: updatingRuntime?.serviceId === connection.serviceId, updateDisabled: !!updatingRuntime || !online,
@@ -1591,8 +1498,8 @@ export function RealApp() {
                 projectActive={canvasProjectActive}
                 onOpenRun={(run, visible = Boolean(run)) => { setDetailRun(run); setRightPanel(panel => visible ? 'details' : panel === 'details' ? null : panel); }}
                 onRunSubmitted={run => { setDetailRun(run); setRightPanel('details'); }}
-                runs={localMode ? [] : current?.runs ?? []}
-                refreshToken={localMode ? local.revision : current?.revision ?? 0}
+                runs={current?.runs ?? []}
+                refreshToken={current?.revision ?? 0}
                 onChanged={canvasChanged}
                 pendingRequests={pendingGraphRequests}
                 reconciliationPending={pendingGraphRequests.some(p => p.id === reconcilingRequest?.id)}
@@ -1609,18 +1516,12 @@ export function RealApp() {
                   editor.current = e;
                 }}
                 executionAvailable={
-                  !localMode && connection?.info.capabilities?.execution?.status ===
+                  connection?.info.capabilities?.execution?.status ===
                   "available"
                 }
-                imageAvailable={
-                  !localMode && connection?.info.capabilities?.imageGeneration?.status ===
-                  "available"
-                }
-                temporary={localMode}
-                uploadFile={localMode ? file => local.store.upload(graph.graphId, file) : undefined}
-                onPlaceProjectFile={localMode ? undefined : placeProjectFile}
-                locateNodeId={localMode ? undefined : locateNodeId}
-                editExecutionNode={localMode ? undefined : editExecutionNode}
+                onPlaceProjectFile={placeProjectFile}
+                locateNodeId={locateNodeId}
+                editExecutionNode={editExecutionNode}
               />
               {actionDialog && <div className="library-dialog-backdrop">
                 {actionDialog === 'copy' ? <form className="library-dialog panel" role="dialog" aria-modal="true" aria-label={t('Copy to project workspace')} onKeyDown={event => {
@@ -1665,7 +1566,7 @@ export function RealApp() {
             </div>
           )}
           {page === 'editor' && !graph && (
-            <section className="real-empty"><h2>{t('Select or create a Work Graph')}</h2><button onClick={() => showPage("library")}>{t('My Work Graphs')}</button><p>{t('Select a Workspace in My Work Graphs, then create or open a Work Graph.')}</p></section>
+            <section className="real-empty">{connection ? <><h2>{t('Select or create a Work Graph')}</h2><button onClick={() => showPage("library")}>{t('My Work Graphs')}</button><p>{t('Select a Workspace in My Work Graphs, then create or open a Work Graph.')}</p></> : <><h2>{t('Connect Workspace')}</h2><button onClick={() => setWelcomeOpen(true)}>{t('Quick start')}</button></>}</section>
           )}
         </section>
         <aside id="service-panel" className={'real-service-panel' + (rightPanel ? '' : ' real-service-panel-collapsed')} aria-label={panelContent === 'queue' ? t('Workspace queue') : t('Run details')} aria-hidden={!rightPanel} inert={!rightPanel}>
@@ -1673,8 +1574,8 @@ export function RealApp() {
             <div className="service-panel-heading"><h2>{t('Run details')}</h2><button className="icon-button" aria-label={t('Close run details')} onClick={() => setRightPanel(null)}>×</button></div>
             {detailRun && connection && detailRun.serviceId === serviceId ? <RunsPanel key={serviceId + ":" + connection.generation} mode="details" selectedRunId={detailRun.id} onSelectRun={setDetailRun}
               request={request} executionInputs={executionInputs} graphs={current?.graphs ?? []} runs={runsForDetail(current?.runs ?? [], detailRun)} graphId={detailRun.graphId}
-              onEditExecutionNode={(run,nodeId)=>{setTemporary(false);setProjectId(run.projectId);setGraphId(run.graphId);setEditExecutionNode({nodeId,graphId:run.graphId,projectId:run.projectId,nonce:Date.now()});}}
-              readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setTemporary(false); setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/> : <p className="muted">{t('No run history')}</p>}
+              onEditExecutionNode={(run,nodeId)=>{setProjectId(run.projectId);setGraphId(run.graphId);setEditExecutionNode({nodeId,graphId:run.graphId,projectId:run.projectId,nonce:Date.now()});}}
+              readOnly={!online} onChanged={changed} onError={onError} onLocate={run => { setProjectId(run.projectId); setGraphId(run.graphId); setLocateNodeId(run.nodeId); }}/> : <p className="muted">{t('No run history')}</p>}
           </div>}
           {panelContent === 'queue' && connection && (
             <div className="real-right-panel-content"><RunsPanel
@@ -1690,7 +1591,6 @@ export function RealApp() {
               onChanged={changed}
               onError={onError}
               onLocate={(run) => {
-                setTemporary(false);
                 setProjectId(run.projectId);
                 setGraphId(run.graphId);
                 setLocateNodeId(run.nodeId);

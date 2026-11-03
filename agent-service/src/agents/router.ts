@@ -20,6 +20,7 @@ interface AttachedAgent {
   starting: boolean; startSettled: boolean; work: Set<Promise<unknown>>;
   last?: RuntimeSnapshot; pending: number; callbackBytes: number; callbacks: Promise<void>; callbackError?: AgentError;
   extensionContext?: import('./contracts.js').AgentExtensionContext;
+  titleController?: AbortController;
   secrets: Record<string, string>; secretValues: Set<string>;
   failureVersion: number; reported: Set<string>; released: boolean; disposed: boolean;
   releaseWork?: Promise<void>; disposeWork?: Promise<void>; cleaning?: Promise<void>;
@@ -125,6 +126,7 @@ export class AgentRouter implements SchedulerBackend {
     return { ...callbacks,
       onSnapshot: value => observe('onSnapshot', value, async copy => {
         const checked = this.check(id, entry, copy);
+        if (terminal(checked) || checked.state === 'unknown') entry.titleController?.abort();
         const failures = entry.failureVersion;
         entry.sideEffects = true;
         // A terminal notification cannot release a still-settling start/preparation.
@@ -153,7 +155,25 @@ export class AgentRouter implements SchedulerBackend {
     await this.bounded(entry, entry.callbacks);
     if (entry.callbackError && (failureVersion === undefined || entry.failureVersion !== failureVersion)) throw entry.callbackError;
   }
+  private startNodeTitle(id: string, entry: AttachedAgent, plugin: AgentPlugin, input: Readonly<import('../backend/types.js').BackendRunContext>, callbacks: BackendCallbacks): void {
+    const extension = plugin.extensions?.nodeTitle;
+    if (!extension || !callbacks.setNodeTitle || !input.prompt.trim() || entry.titleController || !this.accepting(id, entry) || terminal(entry.last) || entry.last?.state === 'unknown' || entry.controller.signal.aborted) return;
+    const controller = entry.titleController = new AbortController();
+    const signal = AbortSignal.any([controller.signal, entry.controller.signal]);
+    const deadline = setTimeout(() => controller.abort(), this.options.timeoutMs); deadline.unref();
+    // Naming has no tools or business side effects. A hung provider must not
+    // delay completion/release of the task; a late result loses write authority.
+    void Promise.resolve().then(async () => {
+      signal.throwIfAborted();
+      const title = await extension.generate(immutable({ runId: id, attemptId: entry.attemptId, prompt: input.prompt, model: structuredClone(entry.selection.model), signal }));
+      if (signal.aborted || !this.accepting(id, entry) || terminal(entry.last) || entry.last?.state === 'unknown' || title === null) return;
+      if (typeof title !== 'string' || !title.trim() || title.length > 1024 || /[\u0000-\u001f\u007f]/.test(title)) throw new AgentError('protocol_error');
+      await callbacks.setNodeTitle!(title);
+    }).catch(error => { if (!signal.aborted) this.record(id, entry, 'agent.title_error', 'generate', error); })
+      .finally(() => { clearTimeout(deadline); controller.abort(); });
+  }
   async start(run: Run, snapshot: InputSnapshot, context: BackendContext): Promise<void> {
+    if (this.runs.runtime(run.id).details.kind === 'image_generation') throw new AgentError('capability_unsupported');
     const selection = snapshot.agent ?? this.compatibility?.(run, snapshot);
     if (!selection) return this.legacy.start(run, snapshot, context);
     if (this.attached.has(run.id)) throw new AgentError('outcome_unknown');
@@ -206,13 +226,18 @@ export class AgentRouter implements SchedulerBackend {
           if (!this.owned(run.id, entry)) throw new AgentError('outcome_unknown');
           const checked = this.check(run.id, entry, result);
           if (!terminal(entry.last)) entry.last = checked;
+          this.startNodeTitle(run.id, entry, plugin, frozenInput, nativeCallbacks);
           return entry.last ?? checked;
         },
         cancel: async id => this.control(id, entry, 'cancel', () => adapter.cancel(id)),
         respond: async (id, interactionId, reply) => this.control(id, entry, 'respond', () => adapter.respond(id, interactionId, reply)),
         reconcile: async id => this.control(id, entry, 'reconcile', () => adapter.reconcile(id)),
       };
-      entry.bridge = new RuntimeBackend(this.runs, this.directories, guarded, this.probe, this.skills, {}, this.visualizePreviews);
+      entry.bridge = new RuntimeBackend(this.runs, this.directories, guarded, this.probe, this.skills, { readAgentHistory: async (backendId, historyContext) => {
+        let historyPlugin: AgentPlugin;
+        try { historyPlugin = this.plugin(backendId); } catch (error) { if (error instanceof AgentError && error.reason === 'runtime_unavailable') return []; throw error; }
+        return historyPlugin.extensions?.historyTools?.readHistory?.(historyContext) ?? [];
+      } }, this.visualizePreviews);
       await entry.bridge.start(run, snapshot, context);
     } catch (error) {
       const safe = this.record(run.id, entry, 'agent.start_error', 'start', agentError(error, 'outcome_unknown'));
@@ -226,12 +251,14 @@ export class AgentRouter implements SchedulerBackend {
   }
   private async control(id: string, entry: AttachedAgent, name: 'cancel' | 'respond' | 'reconcile', work: () => Promise<RuntimeSnapshot>): Promise<RuntimeSnapshot> {
     if (!this.owned(id, entry)) throw new AgentError('outcome_unknown');
+    if (name === 'cancel') entry.titleController?.abort();
     const failures = entry.failureVersion;
     try {
       const result = await this.bounded(entry, this.track(entry, work));
       await this.flush(entry, name !== 'respond' ? failures : undefined);
       if (!this.owned(id, entry)) throw new AgentError('outcome_unknown');
       const checked = this.check(id, entry, result);
+      if (terminal(checked) || checked.state === 'unknown') entry.titleController?.abort();
       if (name === 'reconcile' && checked.state !== 'unknown' || name === 'cancel' && terminal(checked)) delete entry.callbackError;
       if (!terminal(entry.last)) entry.last = checked;
       // Keep occupancy while a timed-out factory/preparation/start might still dispatch.
@@ -302,6 +329,7 @@ export class AgentRouter implements SchedulerBackend {
   private async cleanup(id: string, entry: AttachedAgent): Promise<void> {
     if (!this.owned(id, entry) || !isTerminalRunStatus(this.runs.get(id).status) || entry.starting || entry.work.size || entry.pending || entry.callbackError || (entry.started || entry.sideEffects) && !terminal(entry.last)) return;
     try {
+      entry.titleController?.abort();
       if (entry.adapter && !entry.disposed) {
         if (entry.started || entry.sideEffects) {
           if (!entry.released) {

@@ -24,8 +24,8 @@
 .welcome-progress [aria-current] { color: var(--text); font-weight: 600; }
 .welcome-progress [aria-current] .welcome-progress-number { color: var(--panel); background: var(--text); border-color: var(--text); }
 .welcome-progress .is-complete .welcome-progress-number { background: var(--fill); color: var(--text); }
-.welcome-pages { height: calc(100% - 64px); overflow: hidden; }
-.welcome-page { height: 100%; min-height: 100%; }
+.welcome-pages { height: calc(100% - 64px); overflow: hidden; scroll-snap-type: y mandatory; }
+.welcome-page { height: 100%; min-height: 100%; scroll-snap-align: start; scroll-snap-stop: always; }
 .welcome-intro { display: flex; flex-direction: column; align-items: flex-start; padding: 32px 48px 40px; overflow: auto; }
 .welcome-graph-preview { display: flex; align-items: center; justify-content: center; flex: 0 0 144px; width: 100%; margin-bottom: 28px; border: 1px solid var(--stroke); border-radius: 12px; background-color: var(--canvas); background-image: radial-gradient(var(--stroke) .8px, transparent .8px); background-size: 16px 16px; }
 .welcome-preview-node { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 82px; padding: 14px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--panel); color: var(--welcome-muted); box-shadow: 0 4px 12px rgb(0 0 0 / 5%); }
@@ -87,17 +87,10 @@
 .welcome-agent-status.error svg, .welcome-agent-save-error { color: var(--danger, #d33); }
 .welcome-agent-card button { display: inline-flex; align-items: center; justify-self: start; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--stroke); border-radius: 8px; background: var(--panel); }
 .welcome-agent-save-error { margin: 0; overflow-wrap: anywhere; }
-.welcome-image-setup .welcome-agent-card > h3 { margin: 0; }
 .welcome-workspace-setup .welcome-agent-card > h3 { margin: 0; }
 .welcome-workspace-setup input { width: 100%; min-width: 0; min-height: 44px; }
 .welcome-workspace-path { overflow-wrap: anywhere; }
 .welcome-graph-setup input { width: 100%; min-width: 0; min-height: 44px; }
-.welcome-image-setup .welcome-agent-card input:not([type=checkbox]) { width: 100%; min-width: 0; min-height: 44px; }
-.welcome-image-models { display: grid; gap: 8px; }
-.welcome-image-models > label { display: flex; flex-direction: row; align-items: center; gap: 12px; min-height: 44px; margin: 0; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; }
-.welcome-image-models input { flex: 0 0 18px; max-width: 18px; width: 18px; height: 18px; }
-.welcome-image-models span { min-width: 0; overflow-wrap: anywhere; }
-.welcome-image-models code { display: block; margin-top: 4px; color: var(--welcome-muted); }
 /* Own the card layout even within the general .real-app form styles. */
 .welcome-skills-summary { margin: 2px 0 0; color: var(--welcome-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .welcome-skills-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }

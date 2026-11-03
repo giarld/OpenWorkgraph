@@ -1,6 +1,6 @@
 import { parseRunInput, parseNodeInputDrafts } from '@openworkgraph/protocol';
 import type { IncomingMessage } from 'node:http';
-import type { ImageRoute, InteractionReply, Json, ModelSelection, SubmitRun } from '@openworkgraph/protocol';
+import type { InteractionReply, Json, ModelSelection, SubmitRun } from '@openworkgraph/protocol';
 import type { ApiResult } from './api.js';
 import { Auth } from './auth.js';
 import { WorkflowRuntime } from './runtime.js';
@@ -14,44 +14,6 @@ import type { AgentSettingsPatch } from './agents/settings.js';
 function text(value:unknown):string{if(typeof value!=='string'||!value)throw new ServiceError('INVALID_REQUEST','需要非空字符串。');return value;}
 function fields(body:Record<string,unknown>,allowed:string[]):void{if(Object.keys(body).some(key=>!allowed.includes(key)))throw new ServiceError('INVALID_REQUEST','请求包含未知字段。');}
 function executionInputs(value:unknown){try{return parseNodeInputDrafts(value);}catch{throw new ServiceError('INVALID_REQUEST','无效串联输入草稿。');}}
-function requireSecureCredentialConnection(request:IncomingMessage, origin:string):void {
-  const web=new URL(origin), host=request.headers.host ?? '';
-  const remote=request.socket.remoteAddress ?? '';
-  const local=(value:string)=>['localhost','127.0.0.1','::1','::ffff:127.0.0.1','[::1]'].includes(value);
-  const hostName=host.startsWith('[')?host.slice(0,host.indexOf(']')+1):host.split(':')[0]!;
-  const forwarded=request.headers['x-forwarded-proto'];
-  const forwardedProto=(Array.isArray(forwarded)?forwarded[0]:forwarded)?.split(',')[0]?.trim().toLowerCase();
-  const secure=((request.socket as import('node:tls').TLSSocket).encrypted===true || forwardedProto==='https') && web.protocol==='https:';
-  if (!secure && !(web.protocol==='http:' && local(web.hostname) && local(remote) && local(hostName))) throw new ServiceError('HOST_DENIED','密钥只能通过回环连接或 HTTPS 录入。');
-}
-function imageRoute(body:Record<string,unknown>):ImageRoute|undefined{
-  if(body.kind!=='image_generation'){
-    if('imageRoute' in body)throw new ServiceError('INVALID_REQUEST','只有图片任务可以指定生成方式。');
-    return undefined;
-  }
-  if(body.imageRoute===undefined)return {type:'codex'}; // Old clients always mean Codex.
-  const route=body.imageRoute;
-  if(!route||typeof route!=='object'||Array.isArray(route))throw new ServiceError('INVALID_REQUEST','图片生成方式无效。');
-  const value=route as Record<string,unknown>;
-  const parseOptions=():ImageRoute['options']=>{
-    if(value.options===undefined)return undefined;
-    if(!value.options||typeof value.options!=='object'||Array.isArray(value.options))throw new ServiceError('INVALID_REQUEST','图片参数无效。');
-    const raw=value.options as Record<string,unknown>;fields(raw,['size','quality','aspectRatio','outputFormat']);
-    for(const key of ['size','aspectRatio'])if(raw[key]!==undefined&&(typeof raw[key]!=='string'||!(raw[key] as string).trim()||(raw[key] as string).length>60))throw new ServiceError('INVALID_REQUEST','图片参数无效。');
-    if(raw.quality!==undefined&&!['auto','high','medium','low'].includes(String(raw.quality)))throw new ServiceError('INVALID_REQUEST','图片质量无效。');
-    if(raw.outputFormat!==undefined&&!['png','jpeg','webp'].includes(String(raw.outputFormat)))throw new ServiceError('INVALID_REQUEST','图片格式无效。');
-    return raw as ImageRoute['options'];
-  };
-  if(value.type==='codex'){
-    fields(value,['type','options']);const options=parseOptions();return {type:'codex',...(options?{options}:{})};
-  }
-  if(value.type!=='api')throw new ServiceError('INVALID_REQUEST','图片生成方式无效。');
-  fields(value,['type','providerId','modelId','options']);
-  if(typeof value.providerId!=='string'||!value.providerId.trim()||typeof value.modelId!=='string'||!value.modelId.trim())throw new ServiceError('INVALID_REQUEST','需要有效的服务商和模型 ID。');
-  if('modelOverride' in body||'reasoningEffort' in body)throw new ServiceError('INVALID_REQUEST','API 图片任务不能使用 Codex 模型或推理强度。');
-  const options=parseOptions() as Extract<ImageRoute,{type:'api'}>['options'];
-  return {type:'api',providerId:value.providerId,modelId:value.modelId,...(options?{options}:{})};
-}
 export class RunApi {
   constructor(readonly runtime:WorkflowRuntime,readonly auth:Auth){}
   async handle(request:IncomingMessage,path:string,token:string,origin:string):Promise<ApiResult>{
@@ -61,9 +23,8 @@ export class RunApi {
     const notificationRead=/^[/]v1[/]notifications[/]([a-zA-Z0-9_-]+)[/]read$/.exec(path);
     const notificationReadAll=path==='/v1/notifications/read-all';
     const history=/^[/]v1[/]history[/](preview|clear)$/.exec(path);
-    const providers=/^[/]v1[/]image-providers(?:[/]([a-zA-Z0-9_-]+)(?:[/](.+))?)?$/.exec(path);
     const agent=/^[/]v1[/]agents(?:[/]([a-z][a-z0-9._-]*)(?:[/](settings|models|diagnose))?)?$/.exec(path);
-    if(!graph&&!run&&!history&&!providers&&!agent&&!notifications&&!notificationRead&&!notificationReadAll&&!['/v1/models','/v1/capacity','/v1/execution-settings'].includes(path))return {handled:false};
+    if(!graph&&!run&&!history&&!agent&&!notifications&&!notificationRead&&!notificationReadAll&&!['/v1/models','/v1/capacity','/v1/execution-settings'].includes(path))return {handled:false};
     const principal=this.auth.withSession(token,origin,s=>s.id);
     const body=request.method==='POST'?await readJson(request,2*1024*1024):{};
     if(request.method==='POST')this.auth.withSession(token,origin,()=>undefined);
@@ -102,52 +63,6 @@ export class RunApi {
     if(notifications&&request.method==='GET')return ok(read(()=>rt.runs.notifications()));
     if(notificationRead&&request.method==='POST'){fields(body,['expectedRevision']);return ok(read(()=>rt.runs.readNotification(notificationRead[1]!,body.expectedRevision as number)));}
     if(notificationReadAll&&request.method==='POST'){fields(body,[]);return ok(read(()=>rt.runs.readAllNotifications()));}
-    if(providers){
-      if(request.method==='GET'&&!providers[1]){await rt.imageProviders.refreshCredentials();return ok(read(()=>rt.imageProviders.list()));}
-      if(request.method==='POST'){
-        if(providers[1]){
-          if(providers[2]==='delete'){
-            fields(body,['expectedRevision']);
-            return ok(read(()=>{rt.imageProviders.deleteProvider(providers[1]!,body.expectedRevision);return {deleted:true};}));
-          }
-          if(providers[2]==='models/discover'){
-            fields(body,['expectedRevision']);
-            if(!Number.isSafeInteger(body.expectedRevision))throw new ServiceError('INVALID_REQUEST','需要有效的修订号。');
-            this.auth.assertActive(token,origin);
-            const result=await rt.discoverImageModels(providers[1]!,body.expectedRevision as number);
-            return ok(read(()=>result));
-          }
-          if(providers[2]==='models/select'){
-            fields(body,['models','expectedRevision']);
-            if(!Array.isArray(body.models)||!Number.isSafeInteger(body.expectedRevision))throw new ServiceError('INVALID_REQUEST','模型选择无效。');
-            return ok(read(()=>rt.imageProviders.syncDiscoveredModels(providers[1]!,body.models as import('./image-providers.js').DiscoveredModel[],body.expectedRevision)));
-          }
-          if(providers[2]==='models/delete'){
-            fields(body,['modelId','expectedRevision']);
-            if(typeof body.modelId!=='string')throw new ServiceError('INVALID_REQUEST','图片模型 ID 无效。');
-            return ok(read(()=>rt.imageProviders.deleteModel(providers[1]!,body.modelId as string,body.expectedRevision)));
-          }
-          const modelAction=/^models[/]([^/]+)[/]delete$/.exec(providers[2]??'');
-          let actionModel:string|undefined;
-          if(modelAction){try{actionModel=decodeURIComponent(modelAction[1]!);}catch{throw new ServiceError('INVALID_REQUEST','图片模型 ID 无效。');}}
-          if(modelAction){fields(body,['expectedRevision']);return ok(read(()=>rt.imageProviders.deleteModel(providers[1]!,actionModel!,body.expectedRevision)));}
-          if(providers[2]==='credential' || providers[2]==='credential-revoke'){
-            fields(body,providers[2]==='credential'?['secret','expectedRevision']:['expectedRevision']);
-            requireSecureCredentialConnection(request,origin);
-            if(!Number.isSafeInteger(body.expectedRevision))throw new ServiceError('INVALID_REQUEST','需要有效的修订号。');
-            this.auth.assertActive(token,origin);
-            const result=providers[2]==='credential'
-              ?await rt.imageProviders.setCredential(providers[1]!,body.secret as string,body.expectedRevision)
-              :await rt.imageProviders.revokeCredential(providers[1]!,body.expectedRevision);
-            return ok(read(()=>result));
-          }
-          fields(body,['id','name','modes','formats','sizes','qualities','isDefault','expectedRevision']);
-          return ok(read(()=>rt.imageProviders.setModel(providers[1]!,body as unknown as import('./image-providers.js').ModelConfig,body.expectedRevision)));
-        }
-        fields(body,['id','name','driver','endpoint','enabled','expectedRevision']);
-        return ok(read(()=>rt.imageProviders.setProvider(body as unknown as import('./image-providers.js').ProviderConfig,body.expectedRevision)));
-      }
-    }
     if(path==='/v1/execution-settings'){
       if(request.method==='GET')return ok(read(()=>rt.executionSettings.get()));
       if(request.method==='POST'){
@@ -195,17 +110,11 @@ export class RunApi {
           body.agent={settingsGeneration:configuration.settingsGeneration,permissions:configuration.permissions,backendId:backend.backendId,configRevision:backend.revision,schemaVersion:backend.schemaVersion,model:{model:selection.model,reasoningEffort:selection.reasoningEffort}};
         }
         if('agent' in body&&(body.kind==='image_generation'||'imageRoute' in body||'modelOverride' in body))throw new ServiceError('INVALID_REQUEST','执行器选择不能与图片或旧模型选项混用。');
-        const route=imageRoute(body);
-        const input={...body,...scope,...(route?{imageRoute:route}:{})} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
+        if (body.kind === 'image_generation') throw new ServiceError('NOT_IMPLEMENTED', '专用生图已移除，请使用执行节点和生图技能。');
+        if ('imageRoute' in body) throw new ServiceError('INVALID_REQUEST', '图片生成方式已移除。');
+        const input={...body,...scope} as unknown as SubmitRun;text(input.nodeId);text(input.idempotencyKey);
         if('agent' in body)control.validateSubmission(input,principal);
-        let prior: Json | undefined;
-        try {prior=read(()=>repo.replay(principal+':run.submit',input.idempotencyKey,input as unknown as Json));}
-        catch(error){
-          // Old persisted request hashes predate imageRoute. Only retry the exact old
-          // body for a legacy image request; all other key collisions still fail.
-          if(!(error instanceof ServiceError && error.code==='IDEMPOTENCY_CONFLICT' && body.kind==='image_generation' && !('imageRoute' in body)))throw error;
-          prior=read(()=>repo.replay(principal+':run.submit',input.idempotencyKey,{...body,...scope} as Json));
-        }
+        const prior=read(()=>repo.replay(principal+':run.submit',input.idempotencyKey,input as unknown as Json));
         if(prior!==undefined)return ok(prior && typeof prior==='object' && !Array.isArray(prior) && 'executionStart' in prior ? read(()=>rt.runs.get(String(prior.id))) : prior);
         const cleanups: (() => unknown)[] = [];
         try { const commit=await rt.prepareSubmission(input, cleanups, principal);return ok(read(()=>{

@@ -30,7 +30,7 @@ const descriptor: AgentDescriptor = {
   projectPermissionModes: ['workspace-write', 'danger-full-access'],
   configuration: { version: 1, fields: [{ name: 'sandboxMode', type: 'enum', label: '原生权限模式', required: true, default: 'read-only', values: ['read-only', 'workspace-write', 'danger-full-access'] }] },
   models: { type: 'dynamic', allowCustom: false, effort: true },
-  capabilities: { kinds: ['execution', 'text_generation', 'image_generation', 'visualize_generation'], inputKinds: ['text', 'document', 'image', 'video', 'file'], platforms: ['darwin', 'linux', 'win32'], cancellation: true, restoredRunStart: true, conversationContinuation: false, reattach: false, approvals: true, userInput: true, historyTools: true, nativeSkills: true, configuredSkills: true, dynamicSkillCommands: true, visualize: true },
+  capabilities: { kinds: ['execution', 'text_generation', 'visualize_generation'], inputKinds: ['text', 'document', 'image', 'video', 'file'], platforms: ['darwin', 'linux', 'win32'], cancellation: true, restoredRunStart: true, conversationContinuation: false, reattach: false, approvals: true, userInput: true, historyTools: true, nativeSkills: true, configuredSkills: true, dynamicSkillCommands: true, visualize: true },
 };
 const terminal = (snapshot: RuntimeSnapshot) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(snapshot.state);
 function failure(error: unknown): AgentError {

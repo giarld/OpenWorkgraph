@@ -34,7 +34,28 @@ function restricted(path: string, directory: boolean): void {
   const stat = lstatSync(path);
   if (realpathSync(path) !== path || stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) invalid();
   if (process.platform === 'win32') {
-    const script = "$inputData=[Console]::In.ReadToEnd()|ConvertFrom-Json; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; if($inputData.directory){$acl=New-Object System.Security.AccessControl.DirectorySecurity; $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')}else{$acl=New-Object System.Security.AccessControl.FileSecurity; $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')}; $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $inputData.path -AclObject $acl -ErrorAction Stop; $check=Get-Acl -LiteralPath $inputData.path; $rules=@($check.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])); if($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl'){exit 1}";
+    // Set-Acl's provider can request audit privileges when reapplying an ACL.
+    // Persist only the owner and access rules through the filesystem API.
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      '[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)',
+      '$inputData=[Console]::In.ReadToEnd()|ConvertFrom-Json',
+      '$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User',
+      'if($inputData.directory){',
+      '$acl=New-Object System.Security.AccessControl.DirectorySecurity',
+      "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')",
+      '}else{',
+      '$acl=New-Object System.Security.AccessControl.FileSecurity',
+      "$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')",
+      '}',
+      '$acl.SetOwner($sid)',
+      '$acl.SetAccessRuleProtection($true,$false)',
+      '$acl.AddAccessRule($rule)',
+      'if($inputData.directory){[System.IO.Directory]::SetAccessControl($inputData.path,$acl)}else{[System.IO.File]::SetAccessControl($inputData.path,$acl)}',
+      '$check=Get-Acl -LiteralPath $inputData.path',
+      '$rules=@($check.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]))',
+      "if(!$check.AreAccessRulesProtected -or $check.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or $rules.Count -ne 1 -or $rules[0].IsInherited -or $rules[0].IdentityReference.Value -ne $sid.Value -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl'){exit 1}",
+    ].join(';');
     const acl = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { input: JSON.stringify({path,directory}), windowsHide: true, timeout:30000 });
     if (acl.status !== 0) throw new ServiceError('CONFLICT', 'Unable to restrict credential access.');
   } else if ((stat.mode & 0o077) || stat.uid !== process.getuid?.()) throw new ServiceError('CONFLICT', 'Credential storage permissions must be private.');

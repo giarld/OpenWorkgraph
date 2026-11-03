@@ -43,6 +43,16 @@ export function initialEffort(model: AgentModelOption): string | null {
   return model.reasoningEfforts.includes('medium') ? 'medium' : model.reasoningEfforts[0] ?? null;
 }
 export const agentModelKey = (backendId: string, modelId: string) => JSON.stringify([backendId, modelId]);
+/** Catalog labels are presentation only; selection and persistence keep opaque IDs. */
+export function agentModelLabel(state: AgentState, backendId: string, modelId: string): string {
+  const resource = state.resources[backendId];
+  return resource?.configuredModels?.find(model => model.id === modelId)?.label
+    ?? resource?.models?.find(model => model.id === modelId)?.label ?? modelId;
+}
+export function agentSelectionLabel(state: AgentState, backendId: string, modelId: string): string {
+  const name = state.descriptors.find(backend => backend.id === backendId)?.name ?? backendId;
+  return name + ' · ' + agentModelLabel(state, backendId, modelId);
+}
 /** A saved null explicitly inherits defaults, even when this node has history. */
 export function nodeAgentModelPreference(value: unknown, snapshot?: import('../../../packages/protocol/src/index').InputSnapshot): { backendId: string; model: ModelSelection } | undefined {
   if (value === null) return undefined;
@@ -57,11 +67,12 @@ export function agentModelChoices(state: AgentState, backendId: string, selected
   const resource = state.resources[backendId], descriptor = state.descriptors.find(item => item.id === backendId);
   const configured = state.configuration?.backends.find(item => item.backendId === backendId)?.models ?? [];
   const models = [...(resource?.models ?? [])];
-  for (const item of configured) if (!models.some(model => model.id === item.id)) models.push({ id: item.id, reasoningEfforts: [] });
-  return models.filter(model => configured.some(item => item.id === model.id && item.visible) || selectedId === model.id).map(model => {
+  const automaticVisibility = descriptor?.models.automaticVisibility;
+  for (const item of configured) if ((!automaticVisibility || selectedId === item.id) && !models.some(model => model.id === item.id)) models.push({ id: item.id, reasoningEfforts: [] });
+  return models.filter(model => automaticVisibility || configured.some(item => item.id === model.id && item.visible) || selectedId === model.id).map(model => {
     const absent = !!resource?.models && !resource.modelsError && !resource.models.some(item => item.id === model.id);
     const manual = absent && !!descriptor?.models.allowCustom && !resource?.knownModelIds?.includes(model.id);
-    return { ...model, manual, unavailable: absent && !manual, hidden: configured.find(item => item.id === model.id)?.visible === false };
+    return { ...model, manual, unavailable: absent && !manual, hidden: !automaticVisibility && configured.find(item => item.id === model.id)?.visible === false };
   });
 }
 

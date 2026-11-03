@@ -10,9 +10,10 @@ export function modelProviderGroup(modelId: string): string | null {
   return separator > 0 ? modelId.slice(0, separator) : null;
 }
 
-export function modelGroupMetadata(plugin: AgentPlugin, modelId: string): Pick<AgentModelOption, 'group'> {
-  if (!plugin.modelGroup) return {};
-  const group = plugin.modelGroup(modelId);
-  if (group !== null && (!publicText(group, 256) || group !== group.trim())) throw new AgentError('protocol_error');
-  return { group };
+export function modelDisplayMetadata(plugin: AgentPlugin, modelId: string, catalog?: AgentModelOption): Pick<AgentModelOption, 'group' | 'label'> {
+  const group = plugin.modelGroup ? plugin.modelGroup(modelId) : catalog?.group;
+  const label = plugin.modelLabel ? plugin.modelLabel(modelId) ?? undefined : catalog?.label;
+  if (group !== undefined && group !== null && (!publicText(group, 256) || group !== group.trim())) throw new AgentError('protocol_error');
+  if (label !== undefined && (!publicText(label, 512) || label !== label.trim())) throw new AgentError('protocol_error');
+  return { ...(group === undefined ? {} : { group }), ...(label === undefined ? {} : { label }) };
 }

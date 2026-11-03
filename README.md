@@ -46,6 +46,8 @@ With an existing build, use `node agent-service/dist/cli.js serve` to start in t
 
 Foreground logs go to the terminal. Background logs append to `logs/service-YYYY-MM-DD.log` inside the data directory (default: `~/.openworkgraph/logs/`), keeping the current UTC date and the preceding six days. Background operation defaults to key events, warnings and errors only. `NODE_ENV=production` enables this reduced logging in either mode; `NODE_ENV=development` enables detailed logs. Foreground operation keeps detailed logs when the environment is unset.
 
+Image nodes retain image content, previews and history. Generate images from execution nodes using an installed image-generation skill; the dedicated Codex/API image generator and its provider settings have been retired.
+
 ### OpenCode Agent
 
 OpenWorkgraph configures its OpenCode integration dependencies during installation; no separate SDK installation is needed. Stable OpenCode versions >= 2.0.0 are supported. Each execution owns a separate native instance; existing user sessions are not taken over. Configure providers, models and authentication through native OpenCode on the Workspace device, then enable OpenCode and choose its model in Agent settings. Web tasks use the fixed build role and the same reasoning effort selector as Codex before submission; the plugin translates the selection into a native model variant. Catalog queries do not run model inference. If the integration is incomplete, run `npm install -g openworkgraph --include=optional` on the Workspace device, restart the Workspace and refresh the Agent catalog. Explicitly omitting optional dependencies skips OpenCode integration.

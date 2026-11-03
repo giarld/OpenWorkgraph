@@ -7,12 +7,15 @@ import { ServiceError } from './errors.js';
 import { AgentDiscovery } from './agents/discovery.js';
 import { validateConfigurationUpdate } from './agents/workspace-configuration-validation.js';
 import { AgentWorkspaceConfigurationStore } from './agents/workspace-configuration.js';
+import { AgentConnectionsApi } from './agent-connections-api.js';
 
 /** Mount before RunApi: its legacy route also matches /agents/configuration.
  * Composition owns store.close()/discovery.dispose(); no old settings are read. */
 export class AgentConfigurationApi {
   constructor(readonly store: AgentWorkspaceConfigurationStore, readonly discovery: AgentDiscovery, readonly auth: Auth, private readonly resolveProject?: (id: string) => string) {}
   async handle(request: IncomingMessage, path: string, token: string, origin: string): Promise<ApiResult> {
+    const connection = await new AgentConnectionsApi(this.store, this.auth, backendId => this.discovery.invalidate(backendId)).handle(request, path, token, origin);
+    if (connection.handled) return connection;
     const scoped = /^[/]v1[/]projects[/]([a-zA-Z0-9_-]+)[/]agents[/]configuration[/]([a-z][a-z0-9._-]*)[/](models|diagnose|catalog)$/.exec(path);
     if (scoped) path = '/v1/agents/configuration/' + scoped[2] + '/' + scoped[3];
     const match = /^[/]v1[/]agents[/]configuration(?:[/]([a-z][a-z0-9._-]*)[/](models|diagnose|catalog))?$/.exec(path);

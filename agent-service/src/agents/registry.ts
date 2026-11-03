@@ -1,4 +1,5 @@
 import { AGENT_PLUGIN_API_VERSION, AGENT_FAILURE_REASONS } from '@openworkgraph/protocol';
+import { isDeepStrictEqual } from 'node:util';
 import type { AgentAvailability, AgentDescriptor, AgentPlatform, FrozenAgentSelection } from '@openworkgraph/protocol';
 import type { AgentAdapter, AgentAdapterDependencies, AgentPlugin, AgentTaskRequirements } from './contracts.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText, validateConfigurationSchema, validPlatform } from './configuration.js';
@@ -8,7 +9,7 @@ import { AgentError, agentError } from './errors.js';
 const booleanCapabilities = ['cancellation', 'restoredRunStart', 'conversationContinuation', 'reattach', 'approvals', 'userInput', 'historyTools', 'nativeSkills', 'configuredSkills', 'dynamicSkillCommands', 'visualize'] as const;
 const extensionMethods = { nativeSkills: 'list', configuredSkills: 'prepare', dynamicSkillCommands: 'dispatch', historyTools: 'install', conversationContinuation: 'continue', reattach: 'attach' } as const;
 const kinds = ['execution', 'text_generation', 'image_generation', 'visualize_generation'];
-const inputKinds = ['text', 'image', 'document', 'video', 'file'];
+const inputKinds = ['text', 'image', 'document', 'video', 'audio', 'file'];
 export function validSemver(value: string): boolean {
   if (value.length > 128) return false;
   const match = /^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:[.][0-9A-Za-z-]+)*))?(?:[+]([0-9A-Za-z-]+(?:[.][0-9A-Za-z-]+)*))?$/.exec(value);
@@ -19,13 +20,13 @@ function stringList(value: unknown, allowed: readonly string[], nonempty = false
   return Array.isArray(value) && (!nonempty || value.length > 0) && value.length <= allowed.length && value.every(v => typeof v === 'string' && allowed.includes(v)) && new Set(value).size === value.length;
 }
 export function validateAgentDescriptor(value: unknown): asserts value is AgentDescriptor {
-  if (!isPlainRecord(value) || !exactKeys(value, ['id', 'name', 'description', 'implementationVersion', 'apiVersion', 'configuration', 'capabilities', 'models', 'logo', 'projectPermissionModes']) || !validAgentId(value.id) || !publicText(value.name, 256) || !publicText(value.description) || typeof value.implementationVersion !== 'string' || !validSemver(value.implementationVersion) || value.apiVersion !== AGENT_PLUGIN_API_VERSION) throw new AgentError('protocol_error');
+  if (!isPlainRecord(value) || !exactKeys(value, ['id', 'name', 'description', 'implementationVersion', 'apiVersion', 'configuration', 'capabilities', 'models', 'logo', 'projectPermissionModes', 'initiallyEnabled', 'defaultPriority']) || !validAgentId(value.id) || !publicText(value.name, 256) || !publicText(value.description) || typeof value.implementationVersion !== 'string' || !validSemver(value.implementationVersion) || value.apiVersion !== AGENT_PLUGIN_API_VERSION || value.initiallyEnabled !== undefined && typeof value.initiallyEnabled !== 'boolean' || value.defaultPriority !== undefined && (!Number.isSafeInteger(value.defaultPriority) || Number(value.defaultPriority) < 0)) throw new AgentError('protocol_error');
   if (value.logo !== undefined && (!isPlainRecord(value.logo) || !exactKeys(value.logo, ['symbol', 'color']) || !publicText(value.logo.symbol, 16) || [...value.logo.symbol].length > 4 || value.logo.symbol !== value.logo.symbol.trim() || /[\p{Cc}\p{Cf}]/u.test(value.logo.symbol) || typeof value.logo.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(value.logo.color))) throw new AgentError('protocol_error');
   if (value.projectPermissionModes !== undefined && !stringList(value.projectPermissionModes, ['read-only', 'workspace-write', 'danger-full-access'], true)) throw new AgentError('protocol_error');
   validateConfigurationSchema(value.configuration);
   const caps = value.capabilities; const models = value.models;
   if (!isPlainRecord(caps) || !exactKeys(caps, ['kinds', 'inputKinds', 'platforms', ...booleanCapabilities]) || !stringList(caps.kinds, kinds, true) || !stringList(caps.inputKinds, inputKinds) || booleanCapabilities.some(key => typeof caps[key] !== 'boolean') || (caps.platforms !== undefined && (!Array.isArray(caps.platforms) || caps.platforms.length === 0 || caps.platforms.length > 3 || !caps.platforms.every(validPlatform) || new Set(caps.platforms).size !== caps.platforms.length))) throw new AgentError('protocol_error');
-  if (!isPlainRecord(models) || !exactKeys(models, ['type', 'allowCustom', 'effort', 'variantOption']) || !['dynamic', 'suggested', 'manual'].includes(String(models.type)) || typeof models.allowCustom !== 'boolean' || typeof models.effort !== 'boolean' || (models.type === 'manual' && !models.allowCustom) || models.variantOption !== undefined && (typeof models.variantOption !== 'string' || !value.configuration.fields.some(field => field.name === models.variantOption && field.type === 'text'))) throw new AgentError('protocol_error');
+  if (!isPlainRecord(models) || !exactKeys(models, ['type', 'allowCustom', 'effort', 'variantOption', 'automaticVisibility']) || !['dynamic', 'suggested', 'manual'].includes(String(models.type)) || typeof models.allowCustom !== 'boolean' || typeof models.effort !== 'boolean' || models.automaticVisibility !== undefined && typeof models.automaticVisibility !== 'boolean' || (models.type === 'manual' && !models.allowCustom) || models.variantOption !== undefined && (typeof models.variantOption !== 'string' || !value.configuration.fields.some(field => field.name === models.variantOption && field.type === 'text'))) throw new AgentError('protocol_error');
 }
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); }
@@ -48,11 +49,18 @@ export function evaluateAgentTask(plugin: AgentPlugin, requirements: AgentTaskRe
 export class AgentRegistry {
   private readonly plugins = new Map<string, AgentPlugin>();
   register(plugin: AgentPlugin): void {
-    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions', 'projectPermissions', 'modelGroup', 'normalizeSettings'])) throw new AgentError('protocol_error');
+    if (!isPlainRecord(plugin as unknown) || !exactKeys(plugin as unknown as Record<string, unknown>, ['descriptor', 'createAdapter', 'diagnose', 'listModels', 'evaluateTask', 'extensions', 'projectPermissions', 'modelGroup', 'modelLabel', 'normalizeSettings'])) throw new AgentError('protocol_error');
     validateAgentDescriptor(plugin.descriptor);
     if (this.plugins.has(plugin.descriptor.id)) throw new AgentError('protocol_error', '执行器 ID 已注册。');
-    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask', 'projectPermissions', 'modelGroup', 'normalizeSettings'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
-    if (plugin.extensions !== undefined && (!isPlainRecord(plugin.extensions as unknown) || !exactKeys(plugin.extensions as unknown as Record<string, unknown>, [...Object.keys(extensionMethods), 'nativeCatalog', 'restartRecovery', 'runOperations']))) throw new AgentError('protocol_error');
+    if (typeof plugin.createAdapter !== 'function' || ['diagnose', 'listModels', 'evaluateTask', 'projectPermissions', 'modelGroup', 'modelLabel', 'normalizeSettings'].some(key => Object.hasOwn(plugin, key) && typeof (plugin as unknown as Record<string, unknown>)[key] !== 'function') || (plugin.descriptor.models.type !== 'manual' && typeof plugin.listModels !== 'function')) throw new AgentError('protocol_error');
+    if (plugin.extensions !== undefined && (!isPlainRecord(plugin.extensions as unknown) || !exactKeys(plugin.extensions as unknown as Record<string, unknown>, [...Object.keys(extensionMethods), 'nodeTitle', 'nativeCatalog', 'restartRecovery', 'runOperations', 'submission', 'connectionSettings']))) throw new AgentError('protocol_error');
+    const nodeTitle = plugin.extensions?.nodeTitle;
+    if (nodeTitle !== undefined && (!isPlainRecord(nodeTitle) || !exactKeys(nodeTitle, ['version', 'generate']) || nodeTitle.version !== 1 || typeof nodeTitle.generate !== 'function')) throw new AgentError('protocol_error');
+    const connectionSettings = plugin.extensions?.connectionSettings;
+    const connectionMethods = ['list', 'save', 'prepareCredential', 'revokeCredential', 'remove', 'discover'];
+    if (connectionSettings !== undefined && (!isPlainRecord(connectionSettings) || !exactKeys(connectionSettings, ['version', ...connectionMethods, 'discoverDraft']) || connectionSettings.version !== 1 || connectionMethods.some(method => typeof (connectionSettings as unknown as Record<string, unknown>)[method] !== 'function') || connectionSettings.discoverDraft !== undefined && typeof connectionSettings.discoverDraft !== 'function')) throw new AgentError('protocol_error');
+    const submission = plugin.extensions?.submission;
+    if (submission !== undefined && (!isPlainRecord(submission) || !exactKeys(submission, ['version', 'freeze', 'assertCurrent', 'withCurrent']) || submission.version !== 1 || typeof submission.freeze !== 'function' || typeof submission.assertCurrent !== 'function' || submission.withCurrent !== undefined && typeof submission.withCurrent !== 'function')) throw new AgentError('protocol_error');
     const catalog = plugin.extensions?.nativeCatalog;
     if (catalog !== undefined && (!isPlainRecord(catalog) || !exactKeys(catalog, ['version', 'list']) || catalog.version !== 1 || typeof catalog.list !== 'function')) throw new AgentError('protocol_error');
     const restart = plugin.extensions?.restartRecovery;
@@ -62,7 +70,8 @@ export class AgentRegistry {
     for (const [capability, method] of Object.entries(extensionMethods)) {
       const extension = (plugin.extensions as unknown as Record<string, unknown> | undefined)?.[capability];
       const declared = plugin.descriptor.capabilities[capability as keyof typeof extensionMethods];
-      if (declared !== (extension !== undefined) || (extension !== undefined && (!isPlainRecord(extension) || !exactKeys(extension, ['version', method]) || extension.version !== 1 || typeof extension[method] !== 'function'))) throw new AgentError('protocol_error');
+      const optionalMethods = capability === 'nativeSkills' ? ['validateFrozen'] : capability === 'historyTools' ? ['readHistory'] : [];
+      if (declared !== (extension !== undefined) || (extension !== undefined && (!isPlainRecord(extension) || !exactKeys(extension, ['version', method, ...optionalMethods, ...(capability === 'nativeSkills' ? ['automatic'] : [])]) || extension.version !== 1 || typeof extension[method] !== 'function' || optionalMethods.some(key => extension[key] !== undefined && typeof extension[key] !== 'function') || capability === 'nativeSkills' && extension.automatic !== undefined && typeof extension.automatic !== 'boolean'))) throw new AgentError('protocol_error');
     }
     // Detach public data and capture functions, so mutating the registration input
     // cannot silently change a previously validated descriptor or factory.
@@ -70,6 +79,7 @@ export class AgentRegistry {
     if (plugin.projectPermissions) copy.projectPermissions = plugin.projectPermissions.bind(plugin);
     if (plugin.listModels) copy.listModels = plugin.listModels.bind(plugin);
     if (plugin.modelGroup) copy.modelGroup = plugin.modelGroup.bind(plugin);
+    if (plugin.modelLabel) copy.modelLabel = plugin.modelLabel.bind(plugin);
     if (plugin.normalizeSettings) copy.normalizeSettings = plugin.normalizeSettings.bind(plugin);
     if (plugin.diagnose) copy.diagnose = plugin.diagnose.bind(plugin);
     if (plugin.evaluateTask) copy.evaluateTask = plugin.evaluateTask.bind(plugin);
@@ -80,6 +90,32 @@ export class AgentRegistry {
     const plugin = this.plugins.get(backendId); if (!plugin) throw new AgentError('runtime_unavailable'); return plugin;
   }
   list(): AgentDescriptor[] { return [...this.plugins.values()].map(plugin => structuredClone(plugin.descriptor)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0); }
+  freezeSelection(selection: FrozenAgentSelection, platform: AgentPlatform): FrozenAgentSelection {
+    const extension = this.get(selection.backendId).extensions?.submission;
+    const original = structuredClone(selection);
+    let frozen: FrozenAgentSelection;
+    try { frozen = extension ? extension.freeze(deepFreeze(structuredClone(selection))) : original; } catch (error) { throw agentError(error, 'invalid_configuration'); }
+    // The hook may freeze public option references; it cannot redirect the
+    // model, change permissions, or replace the host configuration identity.
+    const { options: _old, ...before } = original;
+    const { options: _new, ...after } = frozen ?? {};
+    if (!isDeepStrictEqual(before, after)) throw new AgentError('protocol_error');
+    this.validateFrozen(frozen, platform);
+    return structuredClone(frozen);
+  }
+  assertCurrentSelection(selection: FrozenAgentSelection): void {
+    this.get(selection.backendId).extensions?.submission?.assertCurrent(deepFreeze(structuredClone(selection)));
+  }
+  withCurrentSelection<T>(selection: FrozenAgentSelection, accept: () => T): T {
+    const extension = this.get(selection.backendId).extensions?.submission;
+    if (!extension?.withCurrent) return accept();
+    let called = false;
+    const value = extension.withCurrent(deepFreeze(structuredClone(selection)), () => {
+      if (called) throw new AgentError('protocol_error'); called = true; return accept();
+    });
+    if (!called || value && typeof (value as { then?: unknown }).then === 'function') throw new AgentError('protocol_error');
+    return value;
+  }
   async create(backendId: string, dependencies: AgentAdapterDependencies): Promise<AgentAdapter> {
     const plugin = this.get(backendId);
     if (!isPlainRecord(dependencies as unknown) || !exactKeys(dependencies as unknown as Record<string, unknown>, ['runId', 'attemptId', 'selection', 'platform', 'signal']) || !publicText(dependencies.runId, 200) || !publicText(dependencies.attemptId, 200) || !isPlainRecord(dependencies.selection as unknown) || dependencies.selection.backendId !== backendId || (dependencies.signal !== undefined && !(dependencies.signal instanceof AbortSignal))) throw new AgentError('protocol_error');

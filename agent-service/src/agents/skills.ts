@@ -5,7 +5,7 @@ import { AgentError, agentError } from './errors.js';
 import { exactKeys, isPlainRecord, normalizeConfiguration, publicText, validPlatform } from './configuration.js';
 import { validateProjectPermissions } from './workspace-configuration-validation.js';
 
-export interface NativeSkillCatalog { backendId: string; configuredSkills: boolean; dynamicSkillCommands: boolean; skills: { skillId: string; name: string; description: string }[] }
+export interface NativeSkillCatalog { backendId: string; configuredSkills: boolean; dynamicSkillCommands: boolean; automatic?: boolean; skills: { skillId: string; name: string; description: string; priority?: number }[] }
 export interface NativeSkillCatalogOptions { timeoutMs?: number; cleanupTimeoutMs?: number; signal?: AbortSignal; platform?: AgentPlatform; projectPath?: string; permissions?: AgentQueryContext['permissions'] }
 function boundedMs(value: number | undefined, fallback: number, maximum: number): number {
   const selected = value ?? fallback;
@@ -34,6 +34,7 @@ export async function nativeSkillCatalog(plugin: AgentPlugin, frozen: Pick<Froze
   if (plugin.descriptor.capabilities.nativeSkills !== !!extension) throw new AgentError('protocol_error');
   if (request.signal?.aborted) throw abortError();
   if (!extension) return result;
+  if (extension.automatic === true) result.automatic = true;
   const controller = new AbortController(), hooks: (() => void | Promise<void>)[] = [];
   let cleaning = false, hookCount = 0;
   const cleanup = async (hook: () => void | Promise<void>) => {
@@ -61,8 +62,8 @@ export async function nativeSkillCatalog(plugin: AgentPlugin, frozen: Pick<Froze
     if (!Array.isArray(values) || values.length > 512) throw new AgentError('protocol_error');
     const seen = new Set<string>();
     result.skills = values.map(skill => {
-      if (!isPlainRecord(skill) || !exactKeys(skill, ['skillId', 'name', 'description']) || !isSkillIdentity({ source: 'agent', backendId, skillId: skill.skillId }) || !publicText(skill.skillId, 4096) || skill.skillId !== skill.skillId.trim() || seen.has(skill.skillId) || !isSkillName(skill.name) || (skill.description !== '' && !publicText(skill.description, 4096))) throw new AgentError('protocol_error');
-      seen.add(skill.skillId); return { skillId: skill.skillId, name: skill.name, description: skill.description as string };
+      if (!isPlainRecord(skill) || !exactKeys(skill, ['skillId', 'name', 'description', 'priority']) || !isSkillIdentity({ source: 'agent', backendId, skillId: skill.skillId }) || !publicText(skill.skillId, 4096) || skill.skillId !== skill.skillId.trim() || seen.has(skill.skillId) || !isSkillName(skill.name) || (skill.description !== '' && !publicText(skill.description, 4096)) || skill.priority !== undefined && (!Number.isSafeInteger(skill.priority) || Number(skill.priority) < 1 || Number(skill.priority) > 100)) throw new AgentError('protocol_error');
+      seen.add(skill.skillId); return { skillId: skill.skillId, name: skill.name, description: skill.description as string, ...(skill.priority === undefined ? {} : { priority: Number(skill.priority) }) };
     });
   } catch (error) { failure = controller.signal.aborted ? controller.signal.reason : agentError(error); }
   finally {

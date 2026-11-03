@@ -11,9 +11,8 @@ export class SkillsManagementApi {
     if (!item.installed) return item;
     const entry = await this.runtime.skills.packageMetadata(item.skillId,item.packageVersion);
     if (!entry.config.environment.length) return {...item,configuration:'none'};
-    const config = await this.runtime.skillConfigs.read(item.skillId,entry.config);
-    const ready = entry.config.environment.filter(field=>field.required).every(field=>config.values.some(value=>value.name===field.name && value.configured));
-    return {...item,configuration:ready ? 'ready' : 'required'};
+    const configuration = await this.runtime.skillConfigs.configurationStatus(item.skillId,entry.config);
+    return {...item,configuration};
   }
   async handle(request: IncomingMessage, rawPath: string, token: string, origin: string): Promise<ApiResult> {
     const pathname = rawPath.split('?')[0]!;

@@ -129,8 +129,8 @@ export function createService(
       visualizeLibrary: { status: 'available', reason: 'Visualize page v2 and portable interactive asset v1', verifiedAt: null },
       execution: unavailable,
       imageGeneration: {
-        status: "unknown",
-        reason: "Real image generation has not been verified",
+        status: "unavailable",
+        reason: "专用生图已移除，请使用执行节点和生图技能。",
         verifiedAt: null,
       },
       events: unavailable,
@@ -338,7 +338,7 @@ export function createService(
             ...info.capabilities,
             assets: runtime.capabilities.assets,
             execution: runtime.executionCapability,
-            imageGeneration: runtime.imageGenerationCapability,
+            imageGeneration: runtime.capabilities.imageGeneration,
           },
         });
         return;

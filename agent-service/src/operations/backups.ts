@@ -91,6 +91,23 @@ function omitLocalState(db: DatabaseSync, revokedAt: number): number {
     changes += Number(db.prepare('UPDATE image_providers SET credential_revision=NULL WHERE credential_revision IS NOT NULL').run().changes);
     changes += Number(db.prepare('UPDATE image_provider_models SET verified_at=NULL WHERE verified_at IS NOT NULL').run().changes);
   }
+  if (hasTable(db, 'builtin_agent_credential_revocations')) {
+    for (const row of db.prepare(`SELECT connection_id,json_extract(payload,'$.credentialNamespace') AS namespace, max(CAST(json_extract(payload,'$.credentialRevision') AS INTEGER)) AS revision
+      FROM builtin_agent_connection_versions WHERE json_extract(payload,'$.credentialRevision') IS NOT NULL GROUP BY connection_id,namespace`).all()) {
+      changes += Number(db.prepare('INSERT INTO builtin_agent_credential_revocations(connection_id,credential_namespace,through_revision) VALUES(?,?,?) ON CONFLICT(connection_id,credential_namespace) DO UPDATE SET through_revision=excluded.through_revision WHERE through_revision<excluded.through_revision').run(row.connection_id!, row.namespace!, row.revision!).changes);
+    }
+    // An imported copy must never reuse a former machine's secret counter.
+    // New credentials start in a fresh namespace; historical bindings remain
+    // readable and revoked. Already sanitized copies stay byte-stable.
+    for (const row of db.prepare('SELECT id,payload FROM builtin_agent_connections').all()) {
+      const value = JSON.parse(String(row.payload));
+      const used = db.prepare('SELECT 1 FROM builtin_agent_credential_revocations WHERE connection_id=? AND credential_namespace=?').get(row.id!, value.credentialNamespace);
+      if (value.credentialRevision !== null || used) {
+        value.credentialRevision = null; value.credentialNamespace = randomUUID();
+        changes += Number(db.prepare('UPDATE builtin_agent_connections SET payload=? WHERE id=?').run(JSON.stringify(value), row.id!).changes);
+      }
+    }
+  }
   if (hasTable(db, 'data_sources')) {
     changes += Number(db.prepare('UPDATE data_sources SET credential_generation=NULL WHERE credential_generation IS NOT NULL').run().changes);
     db.exec('UPDATE remote_temporary_targets SET writable=0; DELETE FROM data_source_host_challenges; DELETE FROM data_source_host_trust; UPDATE remote_transfers SET cache_path=NULL;');

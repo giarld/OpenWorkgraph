@@ -24,3 +24,5 @@ export type { RunContextRequest } from '../run-context.js';
 export { createOpenCodePlugin } from './opencode.js';
 export type { OpenCodePluginOptions } from './opencode.js';
 export { modelProviderGroup } from './model-groups.js';
+export { createBuiltinAgentPlugin } from './builtin.js';
+export type { BuiltinAgentPluginOptions } from './builtin.js';
