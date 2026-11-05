@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { AgentError } from '../errors.js';
-import { assertOpenCodeVersion, boundedWait, launchOpenCode, stopOpenCode, type OpenCodeDeviceOptions, type OpenCodeProcess } from './process.js';
+import { assertOpenCodeVersion, boundedWait, forceStopOpenCode, launchOpenCode, stopOpenCode, type OpenCodeDeviceOptions, type OpenCodeProcess } from './process.js';
 import { OpenCodeTransport, privateEndpoint } from './transport.js';
 import { openCodeSdkWorkerSource } from './sdk-worker.js';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,8 @@ export interface OpenCodeInstanceOptions {
   device?: OpenCodeDeviceOptions; signal: AbortSignal;
   /** Private native configuration, never persisted in the ownership record. */
   configuration?: Readonly<Record<string, unknown>>;
+  /** Official CLI queries retain the native device credential store. */
+  deviceData?: boolean;
   bridge?: Pick<OpenCodeSdkBridgeOptions, 'permissionMode' | 'host' | 'runsPath' | 'recoverable' | 'selectionDigest'>;
 }
 export interface OpenCodeInstanceIdentity {
@@ -25,7 +27,7 @@ export interface OpenCodeInstanceIdentity {
   directory: string; cwd: string; database: string; pid: number;
   /** Canonical owning configuration context, never inferred from a later Run. */
   projectPath?: string;
-  runtime?: 'cli' | 'sdk';
+  runtime?: 'cli' | 'sdk' | 'acp';
 }
 /** Each Run/attempt (including a directory query) owns one private CLI/SDK
  * server and DB. No Service.ensure/stop, shared service or registration file. */
@@ -61,6 +63,10 @@ export class OpenCodePrivateInstance {
         skills: [...new Set([...configurationSkills(original.OPENCODE_CONFIG_CONTENT, options.configuration), join(original.HOME ?? homedir(), '.agents', 'skills')])],
       }),
     };
+    if (options.deviceData) {
+      environment.XDG_DATA_HOME = original.XDG_DATA_HOME;
+      environment.OPENCODE_DB = original.OPENCODE_DB;
+    }
     // Override both names so an inherited shared-service password cannot win.
     delete environment.OPENCODE_SERVER_PASSWORD;
     options.signal.throwIfAborted();
@@ -140,6 +146,11 @@ export class OpenCodePrivateInstance {
   async stop(): Promise<void> {
     if (this.stopped) return;
     await stopOpenCode(this.native, this.stopTimeoutMs);
+    this.stopped = true;
+  }
+  async forceStop(): Promise<void> {
+    if (this.stopped) return;
+    await forceStopOpenCode(this.native, this.stopTimeoutMs);
     this.stopped = true;
   }
 }

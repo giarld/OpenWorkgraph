@@ -1,11 +1,12 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { promisify } from 'node:util';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { AgentQueryContext } from '../contracts.js';
 import { AgentError } from '../errors.js';
 import { claudeDeviceEnvironment } from './environment.js';
 import { claudeCommand } from './command.js';
 
 /** Device options are never accepted from browser configuration or frozen snapshots. */
-export interface ClaudeDeviceOptions { executable?: string; launcherArgs?: readonly string[]; queryTimeoutMs?: number; stopTimeoutMs?: number; runTimeoutMs?: number }
+export interface ClaudeDeviceOptions { executable?: string; launcherArgs?: readonly string[]; queryTimeoutMs?: number; stopTimeoutMs?: number; cancelAttemptMs?: number; runTimeoutMs?: number }
 /** Private spawn evidence, never inferred from generic runtime failures. */
 export class ClaudeExecutableNotFoundError extends AgentError {
   constructor() { super('runtime_unavailable'); }
@@ -19,6 +20,12 @@ export function signalClaude(child: ChildProcessWithoutNullStreams, signal: Node
   if (!child.pid) return false;
   try { if (process.platform === 'win32') return child.kill(signal); process.kill(-child.pid, signal); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+}
+/** Kill only the process tree launched for this native session. */
+export async function forceStopClaude(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (process.platform === 'win32') {
+    if (child.exitCode === null && child.signalCode === null && child.pid) await promisify(execFile)('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { timeout: 2000, windowsHide: true });
+  } else if (claudeGroupAlive(child) && !signalClaude(child, 'SIGKILL')) throw new AgentError('outcome_unknown');
 }
 export function claudeGroupAlive(child: ChildProcessWithoutNullStreams): boolean {
   if (!child.pid) return false;

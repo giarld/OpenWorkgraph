@@ -44,6 +44,9 @@ export class AgentOperations {
   }
   /** ACK is not independent exit evidence. Dispatched operations remain unresolved. */
   cancelPending(): void { this.cancelled = true; for (const entry of this.entries.values()) if (['queued', 'resolving'].includes(entry.phase)) entry.phase = 'cancelled'; }
+  /** Explicit user force-abort after the owner has terminated the execution
+   * context. Unlike a cooperative ACK, this discards unknown deliveries. */
+  forceCancelled(): void { this.cancelled = true; for (const entry of this.entries.values()) if (['queued', 'resolving', 'dispatched', 'unknown'].includes(entry.phase)) entry.phase = 'cancelled'; }
   /** Use only an observed native terminal result, not transport loss/interrupt ACK. */
   confirm(callId: string, outcome: 'completed' | 'failed' | 'cancelled'): void {
     if (!['completed', 'failed', 'cancelled'].includes(outcome)) throw new ServiceError('INVALID_REQUEST', 'Invalid independent terminal outcome');

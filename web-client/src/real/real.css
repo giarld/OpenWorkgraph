@@ -450,7 +450,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .workgraph-notification-status > svg:last-child { margin-left: auto; color: var(--muted); }
 .workgraph-notification-source { overflow-wrap: anywhere; font-size: 12px; color: var(--muted); }
 .workgraph-notification time { font-size: 12px; color: var(--muted); }
-.real-app .workgraph-notification-dismiss { display: grid; place-items: center; flex: 0 0 28px; width: 28px; min-height: 28px; margin-top: -5px; padding: 0; border-radius: 6px; color: var(--muted); }
+.real-app .workgraph-notification-dismiss { position: relative; z-index: 1; display: grid; place-items: center; flex: 0 0 28px; width: 28px; min-height: 28px; margin-top: -5px; padding: 0; border-radius: 6px; color: var(--muted); }
 /* Semantic accents pair color with an accessible type icon. */
 .workgraph-notification[data-kind=info], .workgraph-notification[data-kind=progress] { --notice-color: var(--active); }
 .workgraph-notification[data-kind=success] { --notice-color: var(--notice-success); }
@@ -461,7 +461,7 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 .workgraph-notification-body { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
 .workgraph-notification-body > div { min-width: 0; }
 .real-app .workgraph-notification-body button:not(.workgraph-notification-open) { justify-self: start; min-height: 32px; padding: 4px 8px; border: 1px solid var(--stroke); border-radius: 6px; font: inherit; }
-.real-app .workgraph-notification button:hover:not(:disabled) { background: color-mix(in srgb, var(--fill) 48%, transparent); }
+.real-app .workgraph-notification button:hover:not(:disabled):not(.workgraph-notification-open) { background: color-mix(in srgb, var(--fill) 48%, transparent); }
 .real-pending-request-notification .workgraph-notification-body { display: grid; gap: 8px; }
 .real-upload-status progress { width: 100%; height: 5px; accent-color: var(--notice-color); }
 .workgraph-notification[data-kind=progress] .workgraph-notification-icon svg { animation: notification-spin 1.2s linear infinite; }
@@ -469,6 +469,13 @@ body.resizing-left-sidebar .real-sidebar.left-sidebar { transition: none; }
 @media (prefers-reduced-motion: reduce) { .workgraph-notification[data-kind=progress] .workgraph-notification-icon svg { animation: none; } }
 @media (pointer: coarse) { .real-app .workgraph-notification-dismiss { flex-basis: 44px; width: 44px; min-height: 44px; } .real-app .workgraph-notification-body button:not(.workgraph-notification-open) { min-height: 44px; } }
 .workgraph-notification button:focus-visible { outline: 2px solid var(--active); outline-offset: -3px; }
+/* Stretch the native details button over its card; dismissal stays above it. */
+.workgraph-notification:has(.workgraph-notification-open) { isolation: isolate; }
+.workgraph-notification:has(.workgraph-notification-open) > .workgraph-notification-icon { pointer-events: none; }
+.workgraph-notification-open::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: 11px; }
+.real-app .workgraph-notification .workgraph-notification-open:is(:hover, :focus-visible) { background: transparent; outline: none; }
+.workgraph-notification-open:hover::after { background: color-mix(in srgb, var(--fill) 48%, transparent); }
+.workgraph-notification-open:focus-visible::after { outline: 2px solid var(--active); outline-offset: -3px; }
 @media (prefers-reduced-motion: reduce) { .workgraph-notification, .workgraph-notification[data-phase=exit] { transition: none; animation-duration: 1ms; } }
 .real-workspace { position: relative; }
 .real-canvas-mount { min-height: 0; height: 100%; }

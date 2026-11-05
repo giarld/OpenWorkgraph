@@ -10,7 +10,7 @@ import type { OpenCodeDeviceOptions } from './process.js';
 /** Query acquisition and cleanup use the same ownership route as Runs. Register
  * cleanup before ANY resource acquisition, including the temporary directory.
  * Discovery's timeout/last-waiter abort cannot leave a late unowned service. */
-export async function openCodeQueryInstance(device: OpenCodeDeviceOptions, context: AgentQueryContext, configuration?: Readonly<Record<string, unknown>>): Promise<OpenCodePrivateInstance> {
+export async function openCodeQueryInstance(device: OpenCodeDeviceOptions, context: AgentQueryContext, configuration?: Readonly<Record<string, unknown>>, deviceData = false): Promise<OpenCodePrivateInstance> {
   let root: string | undefined, instance: OpenCodePrivateInstance | undefined;
   let cleanupRequested = false, removable = true;
   let settle!: () => void;
@@ -44,6 +44,7 @@ export async function openCodeQueryInstance(device: OpenCodeDeviceOptions, conte
     const id = 'query_' + randomUUID();
     instance = await OpenCodePrivateInstance.start({ directory: join(root, 'native'), cwd: context.projectPath ?? device.environment?.HOME ?? homedir(),
       runId: id, attemptId: id, device, signal: context.signal, ...(device.sdkPackageRoot && typeof context.options.sandboxMode === 'string' ? { bridge: { permissionMode: context.options.sandboxMode } } : {}), ...(configuration === undefined ? {} : { configuration }),
+      deviceData,
     });
     check();
     return instance;

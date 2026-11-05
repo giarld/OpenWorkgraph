@@ -1,5 +1,10 @@
 /** Supported stable versions >= the minimum; tested revisions are recorded separately. */
 export const OPENCODE_MINIMUM_VERSION = '2.0.0';
+/** ACP uses the same minimum, limited to stable 2.x releases. */
+export const OPENCODE_ACP_MINIMUM_VERSION = OPENCODE_MINIMUM_VERSION;
+export function isSupportedOpenCodeAcpVersion(value: unknown): value is string {
+  return isSupportedOpenCodeVersion(value) && value.startsWith('2.');
+}
 
 /** Kept self-contained apart from the minimum constant so the private SDK worker uses the same check. */
 export function isSupportedOpenCodeVersion(value: unknown): value is string {

@@ -73,6 +73,15 @@ function generatedImageContent(current: Json, output: Json): Json {
 }
 
 export function parsePublicationManifest(value: unknown, version: 1 | 2, visualizeGeneration = false): Manifest {
+  // Failure is an explicit execution contract, never inferred from prose.
+  // Reject it before the normal output path can fall back to a delivery doc.
+  if (object(value) && value.status !== undefined) {
+    if (version !== 2 || value.version !== 2 || value.status !== 'failed' || visualizeGeneration
+      || typeof value.reason !== 'string' || !value.reason.trim() || Buffer.byteLength(value.reason) > 4096
+      || !Array.isArray(value.outputs) || value.outputs.length !== 0
+      || Object.keys(value).some(key => !['version', 'status', 'reason', 'outputs'].includes(key))) invalid('Invalid execution failure manifest');
+    throw new ServiceError('INPUT_BLOCKED', '交付失败：' + value.reason.trim());
+  }
   if (!object(value) || !Array.isArray(value.outputs) || !value.outputs.length || value.outputs.length > 33) return invalid('Expected 1..33 explicit outputs');
   if (version === 2 ? value.version !== 2 : value.version !== undefined) invalid(version === 2 ? 'Execution publication requires manifest version 2' : 'Legacy publication does not accept manifest version 2');
   if (version === 1 && value.executionTitle !== undefined) invalid('Only execution publication accepts executionTitle');

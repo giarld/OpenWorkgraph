@@ -2,6 +2,7 @@ import { tokenUsage } from './token-usage.js';
 import { AgentHostTools } from '../agents/host-tools.js';
 import { APPROVAL_MAX_PATHS, normalizeApprovalPermissions, validApprovalPaths, type ApprovalPermissions } from '@openworkgraph/protocol';
 import { AgentOperations } from '../agents/operations.js';
+import { cancelAgentRun } from '../agents/cancellation.js';
 import { nodeGenerationGuidance, nodeTitleGuidance } from '../prompts/index.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { publicProgressText } from './progress.js';
@@ -18,13 +19,13 @@ import { hasVisualizeFeature } from '../visualize-features.js';
 import { validateSelectionGeneration } from '../agents/workspace-configuration-validation.js';
 import { BackendError, type BackendAdapter, type BackendCallbacks, type BackendInteraction, type BackendReply, type BackendRunContext, type RuntimeSnapshot } from './types.js';
 export interface AdapterOptions {
-  executable?: string; args?: string[]; timeoutMs?: number; initializeTimeoutMs?: number;
+  executable?: string; args?: string[]; timeoutMs?: number; initializeTimeoutMs?: number; cancelAttemptMs?: number;
 }
 interface WireInteraction { method: string; fingerprint: string; privateId: string }
 interface PendingInteraction { wireId: RpcId; public: BackendInteraction; method: string; permissions?: ApprovalPermissions }
 interface FileChangeApproval { paths: string[] | null; fingerprint: string }
 export interface CodexStartOptions { signal?: AbortSignal; hostTools?: AgentHostTools }
-interface Session { fileChanges: Map<string, FileChangeApproval>; wireInteractions: Map<RpcId, WireInteraction>; interactionConflict?: boolean; hostCalls: Map<RpcId, string>; commandCalls: Map<string, { fingerprint: string; result: Promise<import('@openworkgraph/protocol').Json> }>; hostTools?: AgentHostTools | undefined; operations: AgentOperations; work: Set<Promise<unknown>>; callbackFailed?: boolean; signal?: AbortSignal | undefined; abort?: () => void; context: BackendRunContext; callbacks: BackendCallbacks; snapshot: RuntimeSnapshot; rpc: StdioRpc | null; titleRpc?: StdioRpc; interactions: Map<string, PendingInteraction>; replies: Map<string, string>; eventQueue: Promise<void>; cancelled: boolean; interruptRequested: boolean; launching: boolean; buffered: Array<{ method: string; params: any; id?: RpcId }>; skillEnvironment: Record<string,string>; skillSecrets: Record<string,string>; skillQueue: Promise<void>; pendingSkillCommands?: number; commandUncertain?: boolean; finishing?: boolean; commandSandbox?: Record<string,unknown>; commandCwd?: string; }
+interface Session { cancellationWork?: Promise<RuntimeSnapshot>; forced?: boolean; forceStopping?: boolean; fileChanges: Map<string, FileChangeApproval>; wireInteractions: Map<RpcId, WireInteraction>; interactionConflict?: boolean; hostCalls: Map<RpcId, string>; commandCalls: Map<string, { fingerprint: string; result: Promise<import('@openworkgraph/protocol').Json> }>; hostTools?: AgentHostTools | undefined; operations: AgentOperations; work: Set<Promise<unknown>>; callbackFailed?: boolean; signal?: AbortSignal | undefined; abort?: () => void; context: BackendRunContext; callbacks: BackendCallbacks; snapshot: RuntimeSnapshot; rpc: StdioRpc | null; titleRpc?: StdioRpc; interactions: Map<string, PendingInteraction>; replies: Map<string, string>; eventQueue: Promise<void>; cancelled: boolean; interruptRequested: boolean; launching: boolean; buffered: Array<{ method: string; params: any; id?: RpcId }>; skillEnvironment: Record<string,string>; skillSecrets: Record<string,string>; skillQueue: Promise<void>; pendingSkillCommands?: number; commandUncertain?: boolean; finishing?: boolean; commandSandbox?: Record<string,unknown>; commandCwd?: string; }
 const terminal = (s: RuntimeSnapshot) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(s.state);
 const text = (value: unknown, max = 16000): string => typeof value === 'string' ? value.slice(0, max) : '';
 const canonicalWirePayload = (value: unknown): string => JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry) ?? 'null';
@@ -207,7 +208,7 @@ export class CodexBackendAdapter implements BackendAdapter {
     } finally { s.launching = false; }
   }
   private incoming(s: Session, method: string, params: any, id?: RpcId): void {
-    if (terminal(s.snapshot) || s.interactionConflict) { if (id !== undefined && !s.rpc?.isClosed) s.rpc?.reject(id); return; }
+    if (s.forceStopping || s.forced || terminal(s.snapshot) || s.interactionConflict) { if (id !== undefined && !s.rpc?.isClosed) s.rpc?.reject(id); return; }
     if (!s.snapshot.threadId) {
       if (params?.threadId || method === 'thread/started') { if (s.buffered.length >= 128) { this.unknown(s, 'Backend initialization event limit exceeded'); s.rpc?.close(); return; } s.buffered.push({ method, params, ...(id === undefined ? {} : { id }) }); }
       else if (id !== undefined) s.rpc?.reject(id);
@@ -398,16 +399,36 @@ export class CodexBackendAdapter implements BackendAdapter {
     s.snapshot.state = s.interactions.size ? ([...s.interactions.values()].some(i => i.public.kind === 'approval') ? 'waiting_approval' : 'waiting_answer') : 'running'; this.emit(s); return this.snapshot(s);
   }
   async cancel(runId: string): Promise<RuntimeSnapshot> {
-    const s = this.get(runId); if (terminal(s.snapshot)) return this.snapshot(s);
+    const s = this.get(runId);
+    if (terminal(s.snapshot) && !s.operations.unresolved && !s.commandUncertain) return this.snapshot(s);
+    if (s.cancellationWork) return s.cancellationWork;
     s.cancelled = true; s.operations.cancelPending(); s.titleRpc?.close(); s.snapshot.state = 'cancelling'; this.emit(s);
-    if (!s.snapshot.threadId || !s.snapshot.turnId || s.interruptRequested) return this.snapshot(s);
-    s.interruptRequested = true;
-    try { await s.rpc!.request('turn/interrupt', { threadId: s.snapshot.threadId, turnId: s.snapshot.turnId }); } catch { this.unknown(s, 'Interrupt unconfirmed; keep project occupancy'); }
-    // An ACK is not evidence that the turn stopped.
-    return this.snapshot(s);
+    const work = (async () => {
+      await cancelAgentRun(async signal => {
+        if (s.snapshot.threadId && s.snapshot.turnId && s.rpc && !s.rpc.isClosed) {
+          s.interruptRequested = true;
+          await s.rpc.request('turn/interrupt', { threadId: s.snapshot.threadId, turnId: s.snapshot.turnId }, this.options.cancelAttemptMs ?? 2000);
+        } else s.rpc?.close();
+        while (!signal.aborted) {
+          const observed = await this.reconcile(runId);
+          if (terminal(observed) && !s.operations.unresolved && !s.commandUncertain) return true;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return false;
+      }, async () => {
+        s.forceStopping = true;
+        await Promise.all([s.rpc, s.titleRpc].filter((rpc): rpc is StdioRpc => !!rpc).map(rpc => rpc.forceClose()));
+        s.forced = true; s.operations.forceCancelled(); s.commandUncertain = false; s.interactions.clear(); s.fileChanges.clear();
+        s.snapshot.state = 'cancelled'; s.snapshot.reason = null; delete s.snapshot.progress;
+        this.emit(s);
+      }, this.options.cancelAttemptMs);
+      return this.snapshot(s);
+    })();
+    s.cancellationWork = work;
+    try { return await work; } finally { if (s.cancellationWork === work) delete s.cancellationWork; }
   }
   async reconcile(runId: string): Promise<RuntimeSnapshot> {
-    const s = this.get(runId); if (terminal(s.snapshot)) return this.snapshot(s);
+    const s = this.get(runId); if (s.forced) { s.snapshot.state = 'cancelled'; s.snapshot.reason = null; return this.snapshot(s); } if (terminal(s.snapshot)) return this.snapshot(s);
     // Once this Run's child exits, its ephemeral turn cannot continue. Preserve
     // partial edits and report interruption rather than indefinite uncertainty.
     if (s.rpc?.isDrained && !s.pendingSkillCommands && !s.commandUncertain) {
@@ -469,6 +490,7 @@ export class CodexBackendAdapter implements BackendAdapter {
   }
   async drainSideEffects(runId: string, requireStartSettled = true): Promise<void> {
     const s = this.get(runId);
+    if (s.forced) { await Promise.all([s.rpc, s.titleRpc].filter((rpc): rpc is StdioRpc => !!rpc).map(rpc => rpc.waitForClose())); return; }
     if (!terminal(s.snapshot) || s.commandUncertain || s.operations.outcomeUnknown || requireStartSettled && s.launching) throw new BackendError('CONFLICT', 'Run side effects remain unresolved');
     await s.skillQueue;
     while (s.work.size) await Promise.all([...s.work]);

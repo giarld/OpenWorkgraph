@@ -10,6 +10,7 @@ import { openCodePermissionRules } from './permissions.js';
 import { openCodePtyBridge } from './sdk-pty.js';
 import { openCodeProjectOperations } from './sdk-project-operations.js';
 import { openCodePersistentPtyBridge } from './sdk-persistent-pty.js';
+import { openCodeHistoryMessage, openCodeObservationMessages } from './observation.js';
 import type { SandboxMode } from '@openworkgraph/protocol';
 
 /** Pinned native Effect services are deliberately loaded only in the private
@@ -282,6 +283,43 @@ export async function createOpenCodeSdkBridge(options: OpenCodeSdkBridgeOptions,
     overrides: [CrossSpawnSpawner.node.replace(trackedSpawner), Job.node.replace(trackedJobs), Shell.node.replace(trackedShell), PluginHooks.node.replace(frozenHooks), ConfigPluginSource.node.replace(restrictedSources), Mcp.node.replace(restrictedMcp), Tool.node.replace(trackedTools), Session.node.replace(trackedSessions), pty.override, persistentPty.override, projectOperations.override], plugins: [plugin],
     attach(value: Native) { host = value; },
     async request(method: string, path: string, body: Native): Promise<unknown> {
+      if (path === '/api/workgraph/history' && method === 'POST') {
+        const allowed: Record<string, string[]> = { 'context.read': [], 'history.list': ['limit', 'cursor', 'order'], 'history.get': ['messageId'] };
+        if (!body || !Object.hasOwn(allowed, body.type) || Object.keys(body).some(key => !['type', 'sessionId', ...allowed[body.type]!].includes(key))
+          || !/^ses_[A-Za-z0-9_-]+$/.test(body.sessionId) || !journal.list().some(action => action.kind === 'session' && action.id === body.sessionId)) throw Error('Invalid native history read');
+        await inLocation(Effect.gen(function* (): Native {
+          if ((yield* (yield* Session.Service).get(body.sessionId)).location.directory !== options.cwd) throw Error('Native session ownership conflict');
+        }));
+        let nativePath = '/api/session/' + body.sessionId;
+        if (body.type === 'context.read') nativePath += '/context';
+        else if (body.type === 'history.get') {
+          if (typeof body.messageId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(body.messageId)) throw Error('Invalid native message identity');
+          nativePath += '/message/' + body.messageId;
+        } else {
+          if (body.limit !== undefined && (!Number.isSafeInteger(body.limit) || body.limit < 1 || body.limit > 200)
+            || body.cursor !== undefined && (typeof body.cursor !== 'string' || body.cursor.length > 8192)
+            || body.order !== undefined && !['asc', 'desc'].includes(body.order) || body.cursor && body.order) throw Error('Invalid native history page');
+          const query = new URLSearchParams({ limit: String(body.limit ?? 50) });
+          if (body.cursor) query.set('cursor', body.cursor); if (body.order) query.set('order', body.order);
+          nativePath += '/message?' + query;
+        }
+        // Read inside the authenticated private worker. Only the projected
+        // record crosses its transport/record size boundary.
+        const response = await host.fetch(new Request(new URL(nativePath, 'http://opencode.local')));
+        if (!response.ok) throw Error('Native history unavailable');
+        const value = await response.json();
+        return { ...value, data: Array.isArray(value.data) ? value.data.map(openCodeHistoryMessage) : value.data ? openCodeHistoryMessage(value.data) : value.data };
+      }
+      const observation = /^\/api\/workgraph\/session\/(ses_[A-Za-z0-9_-]+)\/observation$/.exec(path);
+      if (observation && method === 'GET') {
+        const id = observation[1];
+        if (!journal.list().some(action => action.kind === 'session' && action.id === id)) throw Error('Unowned native session');
+        return inLocation(Effect.gen(function* (): Native {
+          const sessions = yield* Session.Service;
+          if ((yield* sessions.get(id)).location.directory !== options.cwd) throw Error('Native session ownership conflict');
+          return { data: openCodeObservationMessages(yield* sessions.context(id)) };
+        }));
+      }
       if (path === '/api/workgraph/ready' && method === 'POST') {
         await inLocation(Effect.gen(function* (): Native {
           const config = yield* Config.Service, mcp = yield* Mcp.Service, tools = yield* Tool.Service;

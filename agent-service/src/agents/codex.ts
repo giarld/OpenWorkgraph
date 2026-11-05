@@ -189,8 +189,9 @@ export function createCodexPlugin(options: CodexPluginOptions = {}): AgentPlugin
       try { const runtimeVersion = await codexQuery(privateOptions, context, initialize); return { status: 'unknown', reason: null, message: '原生握手成功；尚未执行模型调用。', runtimeVersion, installation: 'installed' }; }
       catch (error) {
         if (context.signal.aborted) throw error;
-        const missing = codexQueryFailure(error)?.details.reason === 'executable_not_found';
-        return { status: 'unavailable', reason: failure(error).reason, message: failure(error).message, installation: missing ? 'missing' : 'unknown' };
+        const diagnostic = codexQueryFailure(error);
+        const missing = diagnostic?.details.reason === 'executable_not_found';
+        return { status: 'unavailable', reason: failure(error).reason, message: diagnostic?.message ?? failure(error).message, installation: missing ? 'missing' : 'unknown' };
       }
     },
     evaluateTask(requirements) {

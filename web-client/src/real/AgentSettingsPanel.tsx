@@ -72,6 +72,9 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
   const platform = configuration?.platform;
   const unsupportedPlatform = !!platform && !!backend?.capabilities.platforms && !backend.capabilities.platforms.includes(platform as AgentPlatform);
   const backendUnsupported = unsupportedPlatform || resource?.modelsUnsupported;
+  const backendIssue = backend && resource?.installation === 'missing'
+    ? text(`${agentName(backend)} 未安装。`, `${agentName(backend)} is not installed.`) + ' ' + (resource.installationMessage ? t(resource.installationMessage) : text('请在工作空间设备上安装后刷新 Agent 配置。', 'Install it on the Workspace device, then refresh the Agent configuration.'))
+    : resource?.diagnosticMessage ? t(resource.diagnosticMessage) : undefined;
   const platformNames: Record<string, string> = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
   const unsupportedReason = unsupportedPlatform
     ? text(`${agentName(backend)} 不支持当前工作空间的 ${platformNames[platform!] ?? platform} 平台。`, `${agentName(backend)} does not support the Workspace’s ${platformNames[platform!] ?? platform} platform.`)
@@ -105,8 +108,8 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     if (onReady && state.mode === 'agents') for (const item of state.descriptors) void store.checkInstallation(item.id);
   }, [store, !!onReady, state.mode, state.descriptors]);
   useEffect(() => {
-    if (backend && resource?.modelsError) void store.checkInstallation(backend.id);
-  }, [store, backend?.id, resource?.modelsError]);
+    if (backend) void store.checkInstallation(backend.id);
+  }, [store, backend?.id, settings, resource?.modelsError]);
   useEffect(() => { onBusyChange?.(busy || connectionBusy); return () => onBusyChange?.(false); }, [busy, connectionBusy, onBusyChange]);
   useEffect(() => { if (!selected && backend) setSelected(backend.id); }, [selected, backend?.id]);
   useEffect(() => { setEditing(undefined); }, [backend?.id, settings?.revision]);
@@ -219,8 +222,10 @@ export function AgentSettingsPanel({ store, readOnly = false, onChanged, onReady
     </div>
     </div>
     {backend && <>
-      {backendUnsupported ? <p role="alert">{text('执行器不支持此操作。', 'The executor does not support this operation.')}<br/>{unsupportedReason}</p>
-        : (resource?.settingsError || resource?.modelsError) && <p role="alert">{resource.settingsError ?? (resource.installation === 'missing' && resource.installationMessage ? t(resource.installationMessage) : resource.modelsError)}</p>}
+      {unsupportedPlatform ? <p role="alert">{text('执行器不支持此操作。', 'The executor does not support this operation.')}<br/>{unsupportedReason}</p>
+        : backendIssue ? <p role="alert">{backendIssue}</p>
+        : backendUnsupported ? <p role="alert">{text('执行器不支持此操作。', 'The executor does not support this operation.')}<br/>{unsupportedReason}</p>
+        : (resource?.settingsError || resource?.modelsError) && <p role="alert">{resource.settingsError ?? resource.modelsError}</p>}
       {!backendUnsupported && !settings && !resource?.settingsError && <p role="status">{text('正在加载插件配置…', 'Loading plugin settings…')}</p>}
       {!backendUnsupported && fields && settings && <>
         <label className="management-checkbox agent-backend-toggle"><input type="checkbox" disabled={disabled} checked={fields.enabled} onChange={event => update({ enabled: event.target.checked })}/><span>{text('启用 ', 'Enable ') + agentName(backend)}</span></label>

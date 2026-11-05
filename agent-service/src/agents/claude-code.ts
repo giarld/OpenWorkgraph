@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { lstat, realpath } from 'node:fs/promises';
 import type { AgentAdapter, AgentAdapterDependencies, AgentExtensionContext, AgentPlugin } from './contracts.js';
 import type { BackendCallbacks, BackendReply, BackendRunContext, RuntimeSnapshot } from '../backend/types.js';
+import { cancelAgentRun } from './cancellation.js';
 import { AgentError } from './errors.js';
 import { normalizeConfiguration } from './configuration.js';
 import { validateSelectionGeneration } from './workspace-configuration-validation.js';
@@ -28,7 +29,7 @@ import { AgentOperations } from './operations.js';
 import { ClaudeSessionStore } from './claude/sessions.js';
 import { redactClaudeOutput } from './claude/output.js';
 import { claudeModels } from './claude/models.js';
-import { claudeVersion, launchClaude, signalClaude, claudeGroupAlive, ClaudeExecutableNotFoundError, type ClaudeDeviceOptions } from './claude/process.js';
+import { claudeVersion, launchClaude, forceStopClaude, signalClaude, claudeGroupAlive, ClaudeExecutableNotFoundError, type ClaudeDeviceOptions } from './claude/process.js';
 
 export type ClaudePluginOptions = ClaudeDeviceOptions;
 const descriptor: AgentDescriptor = {
@@ -93,6 +94,10 @@ class ClaudeAgentAdapter implements AgentAdapter {
   private released = false;
   private active = false;
   private cancelled = false;
+  private forced = false;
+  private cancellationWork: Promise<RuntimeSnapshot> | undefined;
+  private readonly commandStop = new AbortController();
+  private readonly commandChildren = new Set<ChildProcessWithoutNullStreams>();
   private wireFailed = false;
   private callbackFailed = false;
   private result?: { success: boolean; answer: string; fingerprint: string };
@@ -117,6 +122,7 @@ class ClaudeAgentAdapter implements AgentAdapter {
   private check(runId: string): void { if (this.disposed || runId !== this.dependencies.runId) throw new AgentError('outcome_unknown'); }
   private copy(): RuntimeSnapshot { return structuredClone(this.snapshot); }
   private emit(): void {
+    if (this.forced) { this.snapshot.state = 'cancelled'; this.snapshot.reason = null; this.snapshot.answer = ''; delete this.snapshot.progress; }
     this.snapshot.observedAt = new Date().toISOString(); const value = this.copy();
     this.callbackQueue = this.callbackQueue.then(() => this.callbacks?.onSnapshot(value)).catch(() => { this.callbackFailed = true; });
   }
@@ -370,6 +376,10 @@ class ClaudeAgentAdapter implements AgentAdapter {
     await this.transport?.settled();
     await this.interactions?.abandonAll('main');
     await this.callbackQueue;
+    if (this.forced) {
+      this.pendingHooks.clear(); this.pendingTasks.clear(); this.turnActive = false;
+      this.actionsUnknown = false; this.startupFailed = false; this.operations.forceCancelled();
+    }
     if (this.pendingHooks.size || this.pendingTasks.size || this.turnActive || this.interactions?.pending || this.operations.unresolved || this.actionsUnknown || this.startupFailed) {
       this.unconfirmedClose('原生独立动作或启动副作用尚未确认结束。'); await this.callbackQueue; return;
     }
@@ -386,28 +396,43 @@ class ClaudeAgentAdapter implements AgentAdapter {
     if (this.callbackFailed) { this.snapshot.state = 'unknown'; this.snapshot.reason = '宿主回调送达尚未确认。'; this.snapshot.answer = ''; delete this.snapshot.progress; }
   }
   async cancel(runId: string): Promise<RuntimeSnapshot> {
-    this.check(runId); if (terminal(this.snapshot.state)) { await this.finish; return this.copy(); }
-    if (this.cancelled) { await this.closing; return this.copy(); }
-    this.cancelled = true; this.active = false; this.operations.cancelPending(); this.interactions?.cancel(); clearTimeout(this.inputEndTimer); this.preparation.abort();
-    if (!this.child) {
-      this.snapshot.state = this.starting || this.actionsUnknown ? 'unknown' : 'cancelled';
-      if (!this.starting) { this.emit(); await this.callbackQueue; if (this.callbackFailed) { this.snapshot.state = 'unknown'; this.snapshot.reason = '宿主回调送达尚未确认。'; } }
-      return this.copy();
-    }
-    const timeout = this.options.stopTimeoutMs ?? 2000;
-    if (this.pendingTasks.size && this.transport) {
-      await Promise.allSettled([...this.pendingTasks].map(task_id => this.transport!.request({ subtype: 'stop_task', task_id }, timeout)));
-      await this.transport.request({ subtype: 'interrupt' }, timeout).catch(() => {});
-    }
-    signalClaude(this.child, 'SIGTERM');
-    let timer: NodeJS.Timeout | undefined;
-    const stopped = await Promise.race([this.closing?.then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeout); })]); clearTimeout(timer);
-    if (!stopped) {
-      signalClaude(this.child, 'SIGKILL');
-      const killed = await Promise.race([this.closing?.then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), timeout); })]); clearTimeout(timer);
-      if (!killed) { this.snapshot.state = 'unknown'; this.snapshot.reason = '取消后的原生终态尚未确认。'; this.emit(); }
-    }
-    return this.copy();
+    this.check(runId); if (this.cancellationWork) return this.cancellationWork;
+    if (terminal(this.snapshot.state)) { await this.finish; return this.copy(); }
+    this.cancelled = true; this.active = false;
+    // Reserve the single flight before abort listeners synchronously re-enter.
+    const work = Promise.resolve().then(async () => {
+      this.operations.cancelPending(); this.interactions?.cancel(); clearTimeout(this.inputEndTimer); this.preparation.abort(); this.commandStop.abort();
+      if (this.starting && !this.child) { this.snapshot.state = 'unknown'; return this.copy(); }
+      await cancelAgentRun(async signal => {
+        if (this.starting) return false;
+        if (!this.child) return !this.actionsUnknown && !this.operations.unresolved;
+        if (!this.nativeClosed && this.transport) {
+          await Promise.allSettled([...this.pendingTasks].map(task_id => this.transport!.request({ subtype: 'stop_task', task_id }, this.options.cancelAttemptMs ?? 2000)));
+          if (signal.aborted || this.forced) return false;
+          await this.transport.request({ subtype: 'interrupt' }, this.options.cancelAttemptMs ?? 2000);
+          if (signal.aborted || this.forced) return false;
+          this.transport.end();
+        }
+        await this.closing;
+        if (this.nativeClosed && this.snapshot.state === 'unknown') await this.finishClosed(this.nativeClosed.code, this.nativeClosed.signal);
+        return terminal(this.snapshot.state) && !this.operations.unresolved && !this.commandChildren.size;
+      }, async () => {
+        const children = [...this.commandChildren, ...(this.child ? [this.child] : [])];
+        await Promise.all(children.map(forceStopClaude));
+        const deadline = Date.now() + (this.options.stopTimeoutMs ?? 2000);
+        while (children.some(claudeGroupAlive)) {
+          if (Date.now() >= deadline) throw new AgentError('outcome_unknown');
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        this.forced = true; this.operations.forceCancelled(); this.commandChildren.clear();
+        await this.closing;
+        await this.interactions?.abandonAll('main');
+        await this.sessionStore?.closed();
+      }, this.options.cancelAttemptMs);
+      this.snapshot.state = 'cancelled'; this.snapshot.reason = null; this.snapshot.answer = ''; delete this.snapshot.progress;
+      this.emit(); await this.callbackQueue; return this.copy();
+    });
+    this.cancellationWork = work; void work.finally(() => { this.cancellationWork = undefined; }).catch(() => {}); return work;
   }
   async respond(runId: string, interactionId: string, reply: BackendReply): Promise<RuntimeSnapshot> {
     this.check(runId); if (!this.interactions) throw new AgentError('outcome_unknown');
@@ -431,9 +456,9 @@ class ClaudeAgentAdapter implements AgentAdapter {
       if (!this.current()) throw new AgentError('outcome_unknown');
       return this.operations.dispatch(callId, skillId, this.callbacks!.withSkillEnvironment!, (environment, secrets) => {
         for (const secret of Object.values(secrets)) if (secret) this.secrets['activation-' + Object.keys(this.secrets).length] = secret;
-        return nativeSkillCommand(this.options, this.context!, argv, environment, secrets, this.launchSignal!, (message, send) => this.interactions!.request(callId, message, send), known => {
+        return nativeSkillCommand(this.options, this.context!, argv, environment, secrets, this.commandStop.signal, (message, send) => this.interactions!.request(callId, message, send), known => {
           if (known) this.operations.confirm(callId, this.cancelled ? 'cancelled' : 'completed'); else this.actionsUnknown = true;
-        }, this.dependencies.platform, id => id === null ? this.interactions!.abandonAll(callId) : this.interactions!.abandon(callId, id));
+        }, this.dependencies.platform, id => id === null ? this.interactions!.abandonAll(callId) : this.interactions!.abandon(callId, id), child => { this.commandChildren.add(child); return () => this.commandChildren.delete(child); });
       });
     });
     this.commands.set(callId, { fingerprint, work }); this.commandQueue = work.catch(() => {}); this.nativeWrites.add(work);
@@ -501,7 +526,15 @@ export function createClaudePlugin(options: ClaudePluginOptions = {}): AgentPlug
       context.signal.throwIfAborted();
       if (!descriptor.capabilities.platforms!.includes(context.platform)) return { status: 'unavailable', reason: 'capability_unsupported', message: 'Claude 当前不支持此工作空间平台。' };
       try { const runtimeVersion = await claudeVersion(privateOptions, context); return { status: 'unknown', reason: null, message: 'CLI 版本查询通过；认证与模型调用尚未通过推理验证。', runtimeVersion, installation: 'installed' }; }
-      catch (error) { if (context.signal.aborted) throw error; const reason = error instanceof AgentError ? error.reason : 'runtime_unavailable'; return { status: 'unavailable', reason, message: new AgentError(reason).message, installation: error instanceof ClaudeExecutableNotFoundError ? 'missing' : 'unknown' }; }
+      catch (error) {
+        if (context.signal.aborted) throw error;
+        const reason = error instanceof AgentError ? error.reason : 'runtime_unavailable';
+        const missing = error instanceof ClaudeExecutableNotFoundError;
+        const message = missing ? '请在工作空间设备上安装 Claude Code CLI，并确保 claude 命令可用。'
+          : reason === 'capability_unsupported' ? 'Claude Code CLI 版本不兼容，请升级到 2.1.0 或更高版本后刷新 Agent 配置。'
+          : new AgentError(reason).message;
+        return { status: 'unavailable', reason, message, installation: missing ? 'missing' : 'unknown' };
+      }
     },
     evaluateTask(requirements) {
       const available = supported(requirements) && requirements.inputKinds.every(kind => descriptor.capabilities.inputKinds.includes(kind));

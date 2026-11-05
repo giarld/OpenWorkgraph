@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { FrozenBuiltinAgentConnection, SandboxMode, Json } from '@openworkgraph/protocol';
 import type { AgentAdapter, AgentAdapterDependencies, AgentExtensionContext, AgentNodeTitleContext } from '../contracts.js';
 import type { BackendCallbacks, BackendInteraction, BackendReply, BackendRunContext, RuntimeSnapshot } from '../../backend/types.js';
+import { cancelAgentRun } from '../cancellation.js';
 import { AgentError } from '../errors.js';
 import { AgentHostTools } from '../host-tools.js';
 import { agentGuidance } from '../guidance.js';
@@ -42,6 +43,7 @@ export interface BuiltinAgentCommandExecutor {
   drain(): Promise<'drained' | 'unknown'>;
 }
 export interface BuiltinAgentAdapterOptions {
+  cancelAttemptMs?: number;
   commands?: BuiltinAgentCommandExecutor;
   /** Host-private lazy construction: project/Run roots exist only at start.
    * Must not launch work; only execute may do that. Exactly one configuration
@@ -60,6 +62,8 @@ export class BuiltinAgentAdapter implements AgentAdapter {
   private prepared?: { input: string; callbacks: BackendCallbacks };
   private readonly cancellation = new AbortController();
   private context?: BackendRunContext; private callbacks?: BackendCallbacks;
+  private cancellationWork: Promise<RuntimeSnapshot> | undefined;
+  private forcedCancellation = false;
   private work?: Promise<void>; private released = false; private disposed = false;
   private snapshot: RuntimeSnapshot;
   private pending: { interaction: BackendInteraction; resolve(reply: BackendReply): void; reject(error: unknown): void } | undefined;
@@ -95,6 +99,7 @@ export class BuiltinAgentAdapter implements AgentAdapter {
   }
   private active(): void { this.check(); if (this.protocolFailure) throw this.protocolFailure; this.cancellation.signal.throwIfAborted(); if (terminal(this.snapshot.state) || this.snapshot.state === 'unknown') throw new AgentError('outcome_unknown'); }
   private record(type: string, value: unknown): void {
+    if (this.forcedCancellation || this.disposed) return;
     if (!this.journalPath) throw new AgentError('outcome_unknown');
     if (this.skillCommands && type !== 'model.response') {
       const payload = value as { callId?: string; name?: string } | null;
@@ -106,14 +111,19 @@ export class BuiltinAgentAdapter implements AgentAdapter {
       }
     }
     const line = JSON.stringify({ type, runId: this.dependencies.runId, attemptId: this.dependencies.attemptId, at: new Date().toISOString(), value }, (_key, item: unknown) => {
+      if (item && typeof item === 'object' && 'type' in item && ((item.type === 'file' || item.type === 'reasoning-file') && 'data' in item || item.type === 'image' && 'image' in item)) {
+        const media = item as { type: string; mediaType?: string; filename?: string };
+        return { type: media.type, mediaType: media.mediaType, filename: media.filename, content: '[resource content omitted]' };
+      }
       const bytes = item instanceof Uint8Array ? item : item && typeof item === 'object' && 'type' in item && item.type === 'Buffer' && 'data' in item && Array.isArray(item.data) ? Buffer.from(item.data) : null;
       return bytes ? { frozenBytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') } : item;
     }) + '\n';
     this.journalBytes += Buffer.byteLength(line);
-    if (this.journalBytes > limits.historyBytes) { this.limitReached = true; this.cancellation.abort(); throw new AgentError('invalid_configuration'); }
+    if (this.journalBytes > limits.historyBytes && type !== 'attempt.force_cancelled') { this.limitReached = true; this.cancellation.abort(); throw new AgentError('invalid_configuration'); }
     appendFileSync(this.journalPath, line, { encoding: 'utf8', mode: 0o600 });
   }
   private async emit(state: RuntimeSnapshot['state'], answer = this.snapshot.answer, reason: string | null = null, progress?: { messageId: string; phase: 'commentary' | 'final_answer'; text: string }): Promise<void> {
+    if (this.forcedCancellation && state !== 'cancelled') return;
     if (this.skillCommands) { answer = this.skillCommands.redact(answer); if (reason) reason = this.skillCommands.redact(reason); if (progress) progress = { ...progress, text: this.skillCommands.redact(progress.text) }; }
     this.snapshot = { ...this.snapshot, state, answer, reason, observedAt: new Date().toISOString() };
     delete this.snapshot.progress; delete this.snapshot.identity;
@@ -222,6 +232,11 @@ export class BuiltinAgentAdapter implements AgentAdapter {
       const cancelled = this.cancellation.signal.aborted;
       this.cancellation.abort();
       const failure = builtinModelFailure(error);
+      // Retain bounded diagnostic categories, never provider messages, bodies,
+      // credentials or media. A logging fault must not change the terminal state.
+      const knownTypes = ['AgentError', 'AI_TypeValidationError', 'AI_InvalidResponseDataError', 'AI_APICallError', 'AI_StreamProviderError', 'AI_NoSuchToolError', 'AI_InvalidToolInputError', 'AI_UnsupportedFunctionalityError', 'AI_NoOutputGeneratedError', 'AbortError', 'TimeoutError'];
+      const errorType = error instanceof Error && knownTypes.includes(error.name) ? error.name : 'unclassified';
+      if (!cancelled) { try { this.record('attempt.failed', { request: this.requests, reason: failure.reason, errorType }); } catch { /* Preserve the original failure. */ } }
       this.ending = this.limitReached ? { state: 'failed', reason: new AgentError('execution_limit').message, failureReason: 'execution_limit' }
         : cancelled ? { state: 'cancelled', reason: null } : { state: 'failed', reason: failure.message, failureReason: failure.reason };
       await this.finishStoppedWork();
@@ -229,7 +244,7 @@ export class BuiltinAgentAdapter implements AgentAdapter {
       this.timeBudget.close();
       if (this.pending) { const pending = this.pending; this.pending = undefined; pending.reject(new AgentError('outcome_unknown')); await this.revokeInteraction(pending.interaction.id); }
     });
-    void this.work.catch(() => { this.snapshot = { ...this.snapshot, state: 'unknown', reason: '运行状态未能写入，请核对历史。' }; });
+    void this.work.catch(() => { if (this.forcedCancellation || this.disposed) return; this.snapshot = { ...this.snapshot, state: 'unknown', reason: '运行状态未能写入，请核对历史。' }; });
     // The host sees the first observation immediately while callbacks carry work.
     return structuredClone(this.snapshot);
   }
@@ -492,6 +507,16 @@ export class BuiltinAgentAdapter implements AgentAdapter {
     this.record('context.initial', { system, messages });
     await this.emit('running');
     let request = 0, estimatedTokens = 0;
+    const rejectProviderTool = (part: { toolName: string; invalid?: boolean | undefined }): never => {
+      if (!this.protocolFailure) {
+        this.protocolFailure = new AgentError('protocol_error');
+        // This is a capability mismatch for any provider-executed tool, not
+        // a media-specific rule. Do not retain its arguments/result/error text.
+        this.record('model.protocol_rejected', { request, code: 'unsupported_provider_tool',
+          registered: Object.hasOwn(tools, part.toolName), invalid: part.invalid === true });
+      }
+      throw this.protocolFailure;
+    };
     const budgetGuidance = (number: number) => '\n\nHost execution budget: this is model request ' + number + ' of ' + limits.modelRequests + '. Reserve turns for required output files, manifest hashes, validation and the final answer.' + (limits.modelRequests - number < 8
       ? ' The request budget is nearly exhausted. Prioritize completing delivery now; stop repeating exploratory checks. If browser verification is unavailable, report that limitation honestly and complete the required protocol validation. Never claim unperformed checks or bypass validation.' : '');
     const completeStep = async (step: StepResult<ToolSet>) => {
@@ -524,6 +549,10 @@ export class BuiltinAgentAdapter implements AgentAdapter {
         // only, never reasoning/deltas or the final answer as commentary.
         try {
           await this.observeUsage(callId, request, usage); this.active();
+          // Only host function tools are registered. SDK provider-native calls
+          // may be marked invalid without emitting an error, and lose that
+          // marker when converted to history. Refuse them before tool dispatch.
+          for (const part of content) if (part.type === 'tool-call' && part.providerExecuted) rejectProviderTool(part);
           if (finishReason !== 'tool-calls') return;
           const modelText = content.filter(part => part.type === 'text').map(part => part.text).join('');
           const preparingCommand = content.some(part => part.type === 'tool-call' && ['run_command', 'run_skill_command'].includes(part.toolName));
@@ -554,6 +583,9 @@ export class BuiltinAgentAdapter implements AgentAdapter {
       this.active();
       if (event.type === 'error') throw event.error;
       if (event.type === 'abort') throw new AgentError('outcome_unknown');
+      if ((event.type === 'tool-call' || event.type === 'tool-result') && event.providerExecuted) {
+        rejectProviderTool(event);
+      }
       if (event.type === 'start-step') textBytes = 0;
       if (event.type === 'text-delta') { textBytes += Buffer.byteLength(JSON.stringify(event.text)) - 2; if (textBytes > limits.answerBytes) { this.limitReached = true; this.cancellation.abort(); throw new AgentError('invalid_configuration'); } }
     }
@@ -568,13 +600,33 @@ export class BuiltinAgentAdapter implements AgentAdapter {
     await this.emit('completed', last.text, null, { messageId: 'builtin-' + this.dependencies.attemptId + '-' + request, phase: 'final_answer', text: last.text }); this.cancellation.abort();
   }
   async cancel(id: string): Promise<RuntimeSnapshot> {
-    this.check(id); if (terminal(this.snapshot.state)) return structuredClone(this.snapshot);
-    const interactionId = this.pending?.interaction.id;
-    this.cancellation.abort();
-    if (!this.work) await this.emit('cancelled', '');
-    if (interactionId) await this.revokeInteraction(interactionId);
-    await this.work;
-    return structuredClone(this.snapshot);
+    this.check(id); if (this.cancellationWork) return this.cancellationWork;
+    if (terminal(this.snapshot.state)) return structuredClone(this.snapshot);
+    const work = (async () => {
+      this.cancellation.abort(); this.callbacks?.hostWork?.cancel();
+      const interactionId = this.pending?.interaction.id;
+      await cancelAgentRun(async () => {
+        if (interactionId) await this.revokeInteraction(interactionId);
+        if (!this.work) await this.emit('cancelled', '');
+        await this.work;
+        return terminal(this.snapshot.state) && !this.pendingTools.size;
+      }, async () => {
+        // Native commands own their process groups. They must confirm their
+        // destruction before abandoning an unresponsive model/tool promise.
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          const drained = await Promise.race([this.commands?.drain() ?? Promise.resolve('drained'), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentError('outcome_unknown')), 2000); })]);
+          if (drained !== 'drained') throw new AgentError('outcome_unknown');
+        } finally { clearTimeout(timer); }
+        this.record('attempt.force_cancelled', { softAttempts: 4 });
+        this.forcedCancellation = true; this.timeBudget.close();
+        if (this.pending) { this.pending.reject(new AgentError('outcome_unknown')); this.pending = undefined; }
+        delete this.snapshot.failureReason;
+        await this.emit('cancelled', '');
+      }, this.options.cancelAttemptMs);
+      return structuredClone(this.snapshot);
+    })();
+    this.cancellationWork = work; void work.finally(() => { this.cancellationWork = undefined; }).catch(() => {}); return work;
   }
   async respond(id: string, interactionId: string, reply: BackendReply): Promise<RuntimeSnapshot> {
     this.check(id); this.active();
@@ -583,8 +635,8 @@ export class BuiltinAgentAdapter implements AgentAdapter {
     if (!this.pending || this.pending.interaction.id !== interactionId || this.pending.interaction.kind !== reply.kind || reply.kind === 'approval' && !['accept', 'decline'].includes(reply.decision) || reply.kind === 'question' && (!reply.answers || Object.keys(reply.answers).some(key => key !== 'answer') || !Array.isArray(reply.answers.answer) || reply.answers.answer.some(value => typeof value !== 'string'))) throw new AgentError('invalid_configuration');
     this.replies.set(interactionId, encoded); this.pending.resolve(structuredClone(reply)); return structuredClone(this.snapshot);
   }
-  async reconcile(id: string): Promise<RuntimeSnapshot> { this.check(id); if (this.ending && !terminal(this.snapshot.state)) await this.finishStoppedWork(); return structuredClone(this.snapshot); }
-  async releaseRun(id: string): Promise<void> { this.check(id); if (!terminal(this.snapshot.state) || this.pendingTools.size || !await this.drainWork()) throw new AgentError('outcome_unknown'); await this.work; this.released = true; }
+  async reconcile(id: string): Promise<RuntimeSnapshot> { this.check(id); if (this.forcedCancellation) return structuredClone(this.snapshot); if (this.ending && !terminal(this.snapshot.state)) await this.finishStoppedWork(); return structuredClone(this.snapshot); }
+  async releaseRun(id: string): Promise<void> { this.check(id); if (this.forcedCancellation) { this.released = true; return; } if (!terminal(this.snapshot.state) || this.pendingTools.size || !await this.drainWork()) throw new AgentError('outcome_unknown'); await this.work; this.released = true; }
   async disposeUnstarted(): Promise<void> { this.check(); if (this.work) throw new AgentError('outcome_unknown'); this.dispose(); }
   async disposeDrained(): Promise<void> { this.check(); if (this.work && !this.released) throw new AgentError('outcome_unknown'); this.dispose(); }
   private dispose(): void { this.cancellation.abort(); this.timeBudget.close(); if (this.stopDependency) this.dependencies.signal?.removeEventListener('abort', this.stopDependency); this.disposed = true; this.unregister(); }

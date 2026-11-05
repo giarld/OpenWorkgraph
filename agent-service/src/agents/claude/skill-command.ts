@@ -3,13 +3,14 @@ import type { BackendRunContext } from '../../backend/types.js';
 import { AgentError } from '../errors.js';
 import { ClaudeTransport } from './transport.js';
 import { claudeResponse, type ClaudeSend } from './interactions.js';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { launchClaude, signalClaude, claudeGroupAlive, type ClaudeDeviceOptions } from './process.js';
 import { redactClaudeOutput } from './output.js';
 
 /** Protected command configuration is scoped to a native Claude session, not
  * written into a prompt/tool argument or dispatched by a host shell. SDK hooks
  * admit exactly the frozen argv and return actual native tool output. */
-export function nativeSkillCommand(options: ClaudeDeviceOptions, context: BackendRunContext, argv: string[], environment: Record<string, string>, secrets: Record<string, string>, signal: AbortSignal, permission: (message: Record<string, any>, send: ClaudeSend) => Promise<void>, onClosed: (known: boolean) => void, platform: AgentPlatform = process.platform as AgentPlatform, withdrawn?: (id: string | null) => Promise<void>): Promise<Json> {
+export function nativeSkillCommand(options: ClaudeDeviceOptions, context: BackendRunContext, argv: string[], environment: Record<string, string>, secrets: Record<string, string>, signal: AbortSignal, permission: (message: Record<string, any>, send: ClaudeSend) => Promise<void>, onClosed: (known: boolean) => void, platform: AgentPlatform = process.platform as AgentPlatform, withdrawn?: (id: string | null) => Promise<void>, register?: (child: ChildProcessWithoutNullStreams) => () => void): Promise<Json> {
   signal.throwIfAborted();
   const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
   const tool = platform === 'win32' ? 'PowerShell' : 'Bash';
@@ -18,10 +19,10 @@ export function nativeSkillCommand(options: ClaudeDeviceOptions, context: Backen
   const args = ['--print', '--verbose', '--include-hook-events', '--input-format', 'stream-json', '--output-format', 'stream-json', '--no-session-persistence', '--tools', tool, '--disable-slash-commands', '--setting-sources', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', mode === 'danger-full-access' ? 'bypassPermissions' : 'default', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', '--settings', JSON.stringify({ sandbox: { enabled: false }, disableAllHooks: true, permissions: { deny: mode === 'read-only' ? [tool] : [] } }), '--model', context.model.model, '--max-turns', '3'];
   if (context.model.reasoningEffort) args.push('--effort', context.model.reasoningEffort);
   const child = launchClaude(options, args, context.projectPath, { ...process.env, ...environment, CLAUDE_CODE_SDK_READS_SESSION_STATE: '1' });
+  const unregister = register?.(child);
   let captured: Json | undefined, used = false, wireFailed = false;
   let toolUseId: string | null | undefined;
-  const abort = () => { signalClaude(child, 'SIGTERM'); killTimer = setTimeout(() => signalClaude(child, 'SIGKILL'), options.stopTimeoutMs ?? 2000); killTimer.unref(); };
-  let killTimer: NodeJS.Timeout | undefined;
+  const abort = () => { void transport.request({ subtype: 'interrupt' }, options.cancelAttemptMs ?? 2000).catch(() => {}); };
   const timer = setTimeout(() => { wireFailed = true; signalClaude(child, 'SIGKILL'); }, Math.min(options.runTimeoutMs ?? 120000, 120000)); timer.unref();
   signal.addEventListener('abort', abort, { once: true });
   const transport: ClaudeTransport = new ClaudeTransport(child, event => {
@@ -58,7 +59,7 @@ export function nativeSkillCommand(options: ClaudeDeviceOptions, context: Backen
   })();
   void work.catch(() => { wireFailed = true; signalClaude(child, 'SIGKILL'); });
   return transport.closed.then(async closed => {
-    clearTimeout(timer); clearTimeout(killTimer); signal.removeEventListener('abort', abort); await work.catch(() => {});
+    clearTimeout(timer); if (!claudeGroupAlive(child)) unregister?.(); signal.removeEventListener('abort', abort); await work.catch(() => {});
     const known = !claudeGroupAlive(child) && !closed.failed && !wireFailed;
     await withdrawn?.(null);
     if (!known) { signalClaude(child, 'SIGKILL'); onClosed(false); throw new AgentError('outcome_unknown'); }

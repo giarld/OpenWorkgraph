@@ -40,8 +40,22 @@ export function builtinLanguageModel(connections: BuiltinAgentConnections, refer
     },
   };
   if (frozen.configuration.protocol === 'responses') {
-    return deepseek || media ? createOpenResponses({ ...settings, name: 'openai', url: expected })(reference.modelId)
-      : createOpenAI(settings).responses(reference.modelId);
+    if (deepseek || media) return createOpenResponses({ ...settings, name: 'openai', url: expected })(reference.modelId);
+    return wrapLanguageModel({ model: createOpenAI(settings).responses(reference.modelId), middleware: {
+      specificationVersion: 'v4',
+      transformParams: async ({ params }) => {
+        // Explicitly constrain automatic selection to this call's host tools.
+        // Preserve narrower caller choices; response validation remains required.
+        const mode = params.toolChoice?.type ?? 'auto';
+        if (!params.tools?.length || (mode !== 'auto' && mode !== 'required')
+          || params.providerOptions?.openai?.allowedTools !== undefined
+          || params.tools.some(tool => tool.type !== 'function')) return params;
+        return { ...params, providerOptions: { ...params.providerOptions, openai: {
+          ...params.providerOptions?.openai,
+          allowedTools: { toolNames: params.tools.map(tool => tool.name), mode },
+        } } };
+      },
+    } });
   }
   // Compatible providers preserve reasoning_content without guessing which
   // vendor a proxy serves. OpenAI proxies can explicitly retain its catalog

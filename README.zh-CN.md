@@ -50,11 +50,11 @@ node agent-service/dist/cli.js stop
 
 ### OpenCode 执行器
 
-OpenCode 集成依赖由万象画布安装流程自动配置，无须单独安装 SDK。最低支持 OpenCode 2.0.0（稳定版 >= 2.0.0），由工作空间为每次执行启动独立原生实例，不接管用户已有会话。在工作空间设备使用 OpenCode 原生方式配置提供商、模型及认证，再到 Agent 设置页启用并选择模型；Web 使用固定的 build 角色，提交前可通过与 Codex 相同的思考强度选择框调节原生模型变体，由插件转换参数。目录查询不触发模型推理。若提示集成依赖未安装完整，在工作空间设备执行 `npm install -g openworkgraph --include=optional`，然后重启工作空间并刷新 Agent 目录；显式省略可选依赖会跳过 OpenCode 集成。
+请在工作空间设备单独安装 OpenCode CLI 2.0.0 或更高的 2.x 稳定版，并确保 opencode 命令可用。万象画布通过官方 ACP stdio 协议执行任务，不再安装嵌入式 OpenCode SDK。先用 OpenCode 原生方式配置提供商、模型和认证，再到 Agent 设置页启用并选择模型。每次运行拥有独立 ACP 进程和新建的原生会话，认证继续使用设备原生凭据库。Web 保持 build 角色和现有思考强度选择；目录查询通过官方 CLI/API 完成，不触发模型推理。
 
-支持执行、文本及可视化交付，不提供 OpenCode 生图。项目可写模式使用原生文件规则与命令审批，不是 OS 沙箱；只读模式暂不支持。全访问模式自动批准可批准的权限请求，仍保留原生硬拒绝，用户问题需自行答复。高级会话、回退及终端操作通过后端 API 使用，Web 没有新增这些入口。
+支持执行、文本及可视化交付，不提供 OpenCode 生图。提交 OpenCode 任务前须明确选择完全访问；ACP 接入暂不支持只读和项目可写，不会自动升级权限。保留原生硬拒绝，完全访问下仅一次性批准可批准的权限请求，受支持的用户问题仍需答复。显式选择的技能配置随 ACP 启动注入，对整个会话及原生子进程生效；不提供逐命令配置隔离。动态配置技能命令、原会话续聊、PTY、快照及高级会话操作不再开放。原生 ACP 无法表达的条件表单、外部认证等交互不属于本接入范围，请使用 OpenCode 原生路径。
 
-崩溃后若独立工作尚未确认结束，会继续保留项目锁和执行占用。先核对并停止原工作，再使用有修订校验的恢复操作；不要直接修改数据库释放占用。实现、安装与平台边界见 [OpenCode 能力说明](docs/development/opencode-plugin-capabilities.md)和[运行与恢复操作](docs/development/opencode-run-operations.md)。
+任务应使用前台工具。发现后台工作、工具未结束、执行操作中断或派发结果丢失时，继续保留项目锁和执行占用；ACP 结果和取消确认本身不证明独立工作已结束。请先核对并停止原工作，再使用有修订校验的人工确认；不要直接修改数据库释放占用。详见 [OpenCode 能力说明](docs/development/opencode-plugin-capabilities.md)和[运行与恢复操作](docs/development/opencode-run-operations.md)。
 
 ### Web Client
 

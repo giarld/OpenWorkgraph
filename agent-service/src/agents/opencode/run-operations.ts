@@ -50,11 +50,8 @@ export class OpenCodeRunOperations{
   }else if(input.type==='fork')return this.fork(input);
   else if(input.type==='input.submit'||input.type==='compact')return this.mutate(input);
   else throw new AgentError('capability_unsupported');
-  const response=await this.transport.request(path) as any;
-  if(input.type.startsWith('history.')||input.type==='context.read'){
-   const project=(message:any)=>({id:message.id,type:message.type,time:message.time,...(message.type==='assistant'&&message.time?.completed?{text:(message.content??[]).filter((part:any)=>part.type==='text').map((part:any)=>part.text).join(String.fromCharCode(10))}:{})});
-   if(Array.isArray(response.data))response.data=response.data.map(project);else if(response.data)response.data=project(response.data);
-  }
+  const history=input.type.startsWith('history.')||input.type==='context.read';
+  const response=await this.transport.request(history?'/api/workgraph/history':path,history?{method:'POST',body:{...input,sessionId:this.sessionId}}:undefined) as any;
   const encoded=this.redact(JSON.stringify(response));if(Buffer.byteLength(encoded)>65536)throw new AgentError('protocol_error');return JSON.parse(encoded);
  }
  private async sessionControl(input:Record<string,any>):Promise<Json>{

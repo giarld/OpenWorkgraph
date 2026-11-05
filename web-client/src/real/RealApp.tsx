@@ -264,8 +264,7 @@ export function RealApp() {
     association?: () => Promise<GraphSnapshot>;
     uncertain: boolean;
   }>());
-  const enqueueNotice = useCallback((content: string, role: 'status' | 'alert' = 'alert') => {
-    const id = `notice-${++noticeSequence.current}`;
+  const enqueueNotice = useCallback((content: string, role: 'status' | 'alert' = 'alert', id = `notice-${++noticeSequence.current}`) => {
     setActionNotices(items => appendNotification(items, { id, content, kind: role === 'alert' ? 'error' : 'info', dismissLabel: t('Close') }));
   }, [t]);
   const dismissNotice = useCallback((id: string) => {
@@ -402,7 +401,7 @@ export function RealApp() {
   );
   const current = data[serviceId];
   useEffect(() => {
-    if (current?.error) enqueueNotice(current.error);
+    if (current?.error) enqueueNotice(current.error, 'alert', `workspace-error-${serviceId}`);
   }, [serviceId, current?.error, enqueueNotice]);
   const project =
     current?.projects.find((p) => p.projectId === projectId) ??

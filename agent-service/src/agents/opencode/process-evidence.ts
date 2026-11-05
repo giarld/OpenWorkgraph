@@ -68,7 +68,12 @@ export async function stopObservedOpenCodeShellGroup(evidence: OpenCodeShellProc
 export async function stopOpenCodeNativeProcessGroup(instanceId: string, pid: number, timeoutMs = 3000): Promise<{ groupExited: true; actionTerminalConfirmed: false }> {
   return stopOwnedGroup({ instanceId, pid, groupId: pid }, timeoutMs);
 }
-async function stopOwnedGroup(evidence: Omit<OpenCodeShellProcessEvidence, 'started'> & { started?: string }, timeoutMs: number): Promise<{ groupExited: true; actionTerminalConfirmed: false }> {
+/** User-requested force cancellation still verifies the exact native group. */
+export async function forceStopOpenCodeNativeProcessGroup(instanceId: string, pid: number, evidence?: OpenCodeShellProcessEvidence): Promise<void> {
+  if (evidence && (evidence.instanceId !== instanceId || evidence.pid !== pid)) throw new AgentError('outcome_unknown');
+  await stopOwnedGroup(evidence ?? { instanceId, pid, groupId: pid }, 3000, 'SIGKILL');
+}
+async function stopOwnedGroup(evidence: Omit<OpenCodeShellProcessEvidence, 'started'> & { started?: string }, timeoutMs: number, signal: NodeJS.Signals = 'SIGTERM'): Promise<{ groupExited: true; actionTerminalConfirmed: false }> {
   validIdentity(evidence.instanceId, evidence.pid);
   if (evidence.pid !== evidence.groupId || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) throw new AgentError('invalid_configuration');
   if (!alive(-evidence.groupId)) return { groupExited: true, actionTerminalConfirmed: false };
@@ -95,7 +100,7 @@ async function stopOwnedGroup(evidence: Omit<OpenCodeShellProcessEvidence, 'star
     catch (error) { if (!alive(pid)) continue; throw error; }
     if (current.groupId !== evidence.groupId) throw new AgentError('outcome_unknown');
   }
-  try { process.kill(-evidence.groupId, 'SIGTERM'); }
+  try { process.kill(-evidence.groupId, signal); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw new AgentError('outcome_unknown'); }
   const deadline = Date.now() + timeoutMs;
   while ((await groupMembers(evidence.groupId)).some(member => !member.zombie)) {

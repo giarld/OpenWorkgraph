@@ -128,5 +128,14 @@ export class OpenCodeActionJournal {
       this.db.exec("UPDATE action SET phase='failed',exit_code=NULL WHERE phase NOT IN ('completed','failed','cancelled'); COMMIT;");
     } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
   }
+  /** Explicit user abort after the worker and observed process groups stop.
+   * This records a force decision, never fabricated native completion. */
+  forceCancelled(): void {
+    this.db.exec('CREATE TABLE IF NOT EXISTS force_cancellation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), time TEXT NOT NULL, soft_attempts INTEGER NOT NULL); BEGIN IMMEDIATE;');
+    try {
+      this.db.prepare('INSERT OR IGNORE INTO force_cancellation VALUES(1,?,4)').run(new Date().toISOString());
+      this.db.exec("UPDATE action SET phase='cancelled',exit_code=NULL WHERE phase NOT IN ('completed','failed','cancelled'); COMMIT;");
+    } catch (error) { this.db.exec('ROLLBACK;'); throw error; }
+  }
   close(): void { this.db.close(); }
 }

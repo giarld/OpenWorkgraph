@@ -118,8 +118,8 @@ export class AgentDiscovery {
         }
         return plugin.diagnose ? safeAvailability(await plugin.diagnose(context)) : { status: 'unknown', reason: null, message: '执行器未提供运行诊断。' };
       }, platform, options, request.projectPath, permissions).then(value => {
-        // A user may install the CLI then immediately retry onboarding.
-        const retryInstallation = !Array.isArray(value) && 'installation' in value && value.installation !== undefined && value.installation !== 'installed';
+        // A user may install or upgrade an unavailable CLI, then immediately refresh settings.
+        const retryInstallation = !Array.isArray(value) && 'status' in value && (value.status === 'unavailable' || 'installation' in value && value.installation !== undefined && value.installation !== 'installed');
         if (this.ttlMs > 0 && !retryInstallation && !controller.signal.aborted && !this.closed) {
           this.cache.set(key, { backendId, expires: Date.now() + this.ttlMs, value: structuredClone(value) });
           while (this.cache.size > this.maxEntries) this.cache.delete(this.cache.keys().next().value!);

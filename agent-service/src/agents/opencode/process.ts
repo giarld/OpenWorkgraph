@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { promisify } from 'node:util';
 import { StringDecoder } from 'node:string_decoder';
 import { AgentError } from '../errors.js';
 import { isSupportedOpenCodeVersion } from './version.js';
@@ -74,6 +75,18 @@ export async function stopOpenCode(processInfo: OpenCodeProcess, timeoutMs = 200
   const draining = drainOpenCode(processInfo, timeoutMs);
   processInfo.draining = draining;
   try { await draining; } finally { delete processInfo.draining; }
+}
+/** Explicit user stop escalation; Windows must terminate the owned process
+ * tree rather than killing only its Node worker. Other detached POSIX groups
+ * are stopped separately from their recorded instance evidence. */
+export async function forceStopOpenCode(processInfo: OpenCodeProcess, timeoutMs = 2000): Promise<void> {
+  if (openCodeProcessAlive(processInfo)) {
+    if (process.platform === 'win32') {
+      try { await promisify(execFile)('taskkill.exe', ['/PID', String(processInfo.child.pid), '/T', '/F'], { timeout: timeoutMs, windowsHide: true }); }
+      catch { if (openCodeProcessAlive(processInfo)) throw new AgentError('outcome_unknown'); }
+    } else signalOpenCode(processInfo, 'SIGKILL');
+  }
+  await stopOpenCode(processInfo, timeoutMs);
 }
 async function drainOpenCode(processInfo: OpenCodeProcess, timeoutMs: number): Promise<void> {
   if (openCodeProcessAlive(processInfo)) {

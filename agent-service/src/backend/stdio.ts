@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { promisify } from 'node:util';
 import { StringDecoder } from 'node:string_decoder';
 import { existsSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -54,7 +55,7 @@ export class StdioRpc {
   constructor(private readonly options: StdioOptions) {
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     const command = codexCommand(options);
-    this.child = spawn(command.executable, command.args, { cwd: options.cwd, env: options.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, windowsHide: true });
+    this.child = spawn(command.executable, command.args, { cwd: options.cwd, env: options.env ?? process.env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, detached: process.platform !== 'win32', windowsHide: true });
     this.child.stderr.resume(); // Drain, but never persist credentials/backend diagnostics.
     this.child.on('error', (error: NodeJS.ErrnoException) => {
       if (['ENOENT', 'EACCES', 'EPERM', 'ENOEXEC'].includes(error.code ?? '')) this.spawnCode = error.code as TransportFailure['spawnCode'];
@@ -99,7 +100,7 @@ export class StdioRpc {
     return new Promise((resolve, reject) => {
       const id = ++this.nextId;
       const timeoutMs = requestTimeoutMs ?? (method === 'initialize' ? this.options.initializeTimeoutMs ?? this.options.timeoutMs ?? 60000 : this.options.timeoutMs ?? 15000);
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new BackendError('TIMEOUT', 'Backend request timed out; outcome unknown', { method, timeoutMs })); this.fail('rpc_timeout'); }, timeoutMs);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new BackendError('TIMEOUT', 'Backend request timed out; outcome unknown', { method, timeoutMs })); if (method !== 'turn/interrupt') this.fail('rpc_timeout'); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method });
       try { this.write({ id, method, params }); } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
@@ -116,4 +117,17 @@ export class StdioRpc {
     this.onDisconnect();
   }
   close(): void { this.fail("host_close"); }
+  async forceClose(): Promise<void> {
+    // The adapter closes admission before escalation; Windows taskkill needs
+    // the original parent alive to enumerate its owned process tree.
+    const child = this.child;
+    if (child.pid && !this.drained && (!this.exited || process.platform !== 'win32')) {
+      try {
+        if (process.platform === 'win32') await promisify(execFile)('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { timeout: 2000, windowsHide: true });
+        else process.kill(-child.pid, 'SIGKILL');
+      } catch (error) { if (!this.exited && (error as NodeJS.ErrnoException).code !== 'ESRCH') throw new BackendError('UNAVAILABLE', 'Backend force stop unconfirmed'); }
+    }
+    this.close();
+    await this.waitForClose();
+  }
 }

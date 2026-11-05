@@ -30,7 +30,7 @@ async function recoveryOwner(context: AgentRestartContext) {
   const stat = await lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(directory) !== directory) throw new AgentError('outcome_unknown');
   const owner = await record(join(directory, 'bootstrap.json'));
-  if (owner.version !== 1 || owner.runtime !== 'sdk' || owner.runId !== context.runId || owner.attemptId !== context.attemptId || owner.directory !== directory || owner.projectPath !== context.projectPath || owner.selectionDigest !== digest(context.selection) || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.database !== join(directory, 'opencode.db')) throw new AgentError('outcome_unknown');
+  if (owner.version !== 1 || !['sdk', 'acp'].includes(owner.runtime) || owner.runId !== context.runId || owner.attemptId !== context.attemptId || owner.directory !== directory || owner.projectPath !== context.projectPath || owner.selectionDigest !== digest(context.selection) || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.database !== (owner.runtime === 'acp' ? 'device' : join(directory, 'opencode.db'))) throw new AgentError('outcome_unknown');
   const file = await lstat(join(directory, 'workgraph-native.sqlite'));
   if (!file.isFile() || file.isSymbolicLink()) throw new AgentError('outcome_unknown');
   return { directory, owner: owner as OpenCodeInstanceIdentity };
@@ -73,7 +73,7 @@ export async function recoverOpenCodeRun(context: AgentRestartContext): Promise<
     try { const stat = await lstat(directory); if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(directory) !== directory) return 'unknown'; }
     catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'drained' : 'unknown'; }
     const owner = await record(join(directory, 'bootstrap.json'));
-    if (owner.version !== 1 || owner.runtime !== 'sdk' || owner.runId !== context.runId || owner.attemptId !== context.attemptId || owner.directory !== directory || owner.projectPath !== context.projectPath || owner.selectionDigest !== digest(context.selection) || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.database !== join(directory, 'opencode.db')) return 'unknown';
+    if (owner.version !== 1 || !['sdk', 'acp'].includes(owner.runtime) || owner.runId !== context.runId || owner.attemptId !== context.attemptId || owner.directory !== directory || owner.projectPath !== context.projectPath || owner.selectionDigest !== digest(context.selection) || !Number.isSafeInteger(owner.pid) || owner.pid <= 1 || owner.database !== (owner.runtime === 'acp' ? 'device' : join(directory, 'opencode.db'))) return 'unknown';
     const identity = owner as OpenCodeInstanceIdentity;
     // Opening a fresh empty journal would fabricate evidence. Require the
     // original durable file and its matching owner before any observation.
@@ -81,6 +81,7 @@ export async function recoverOpenCodeRun(context: AgentRestartContext): Promise<
     if (!stat.isFile() || stat.isSymbolicLink()) return 'unknown';
     journal = new OpenCodeActionJournal(directory, identity);
     if (!await alive(owner.pid)) return journal.unresolved ? 'unknown' : 'drained';
+    if (owner.runtime === 'acp') return 'unknown';
     const connection = await record(join(directory, 'private-transport.json'));
     if (connection.version !== 1 || connection.instanceId !== owner.instanceId || typeof connection.password !== 'string' || !/^[a-f0-9]{64}$/.test(connection.password)) return 'unknown';
     const transport = new OpenCodeTransport(connection.endpoint, connection.password, 10000);

@@ -24,6 +24,8 @@ export const MIN_NOTIFICATION_VISIBLE_MS = 2000;
 export const notificationVisibleDuration = (duration: number) => Math.max(MIN_NOTIFICATION_VISIBLE_MS, duration);
 
 export function appendNotification(items: NotificationItem[], item: NotificationItem, limit = 50): NotificationItem[] {
+  // A stable id represents one ongoing issue, even when its error message changes.
+  if (items.some(existing => existing.id === item.id)) return items.map(existing => existing.id === item.id ? item : existing);
   if (typeof item.content === 'string' && items.some(existing => existing.content === item.content && existing.kind === item.kind)) return items;
   return [...items, item].slice(-Math.max(1, limit));
 }

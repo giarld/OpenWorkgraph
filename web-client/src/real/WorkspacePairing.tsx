@@ -107,7 +107,7 @@ export function WorkspacePairing({
         <small>{t('Current origin: {origin}', { origin: location.origin })}</small>
         <details><summary>{t('View public key fingerprint')}</summary><small>{t('Public key fingerprint SHA-256: {fingerprint}', { fingerprint: identity.fingerprint })}</small></details>
         <p>{t('Run this on the Workspace device (no need to enter the origin manually):')}</p>
-        <code>npx openworkgraph@latest pair --client-code {clientCode}</code>
+        <code>openworkgraph pair --client-code {clientCode}</code>
         <p>{t('The client code is valid for 5 minutes. Keep this page open; refreshing or regenerating requires authorization again.')}</p>
         {busy && <p role="status">{t('Waiting for Workspace approval…')}</p>}
       </>}
